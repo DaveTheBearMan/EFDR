@@ -1,9 +1,14 @@
 VERSION := $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build test test-root e2e
+.PHONY: build bpf test test-root e2e
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X xdr/internal/cli.Version=$(VERSION)" -o bin/xdr ./cmd/xdr
+
+# Rebuilds the eBPF object and its Go bindings (needs clang, llvm and
+# libbpf-dev). The results are checked in: a plain build needs none of it.
+bpf:
+	go generate ./internal/sensor
 
 test:
 	go test ./...
