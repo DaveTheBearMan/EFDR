@@ -613,3 +613,36 @@ func TestOnQuery_NewAskerRereads(t *testing.T) {
 		t.Fatalf("incidents = %+v", r.got)
 	}
 }
+
+// A reload never changes who can reach the box: a wrong address there
+// would lock the operator out with nothing to revert it.
+func TestReload_RefusesAccessChange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*config.Config)
+	}{
+		{"jump", func(c *config.Config) { c.Jump = []config.Net{pfx("192.0.2.99/32")} }},
+		{"ssh_from", func(c *config.Config) { c.SSHFrom = []config.Net{pfx("198.51.100.0/24")} }},
+		{"ssh_port", func(c *config.Config) { c.SSHPort = 2222 }},
+		{"xdr_ports", func(c *config.Config) { c.XDRPorts = []uint16{7444} }},
+	} {
+		r := newRig(t)
+		old := r.a.cfg
+		next := *old
+		tc.edit(&next)
+		err := r.a.reload(&next)
+		if err == nil || !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("%s: err = %v", tc.name, err)
+		}
+		if r.a.cfg != old {
+			t.Errorf("%s: the new config was taken into use", tc.name)
+		}
+	}
+	r := newRig(t)
+	next := *r.a.cfg
+	next.Scored = append(next.Scored, config.Port{Proto: "tcp", Port: 443})
+	next.Jump = []config.Net{pfx("192.0.2.7/32")} // the same, as a new slice
+	if err := r.a.reload(&next); err != nil || r.a.cfg != &next {
+		t.Fatalf("an ordinary reload was refused: %v", err)
+	}
+}

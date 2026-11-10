@@ -206,9 +206,9 @@ func TestVerdict_IPv6(t *testing.T) {
 
 func TestString(t *testing.T) {
 	s := Build(fixture(), now).String()
-	for _, want := range []string{"chain input", "chain output", "chain forward", "ct direction original ip saddr 192.0.2.7 tcp dport 22 accept",
+	for _, want := range []string{"chain input", "chain output", "chain forward", " ip saddr 192.0.2.7 tcp dport 22 accept", "ct direction original ip saddr 198.51.100.0/24 tcp dport 22 accept",
 		"ct direction reply ct state established,related tcp sport 80 accept",
-		"ct direction reply ct state established,related ip saddr 192.0.2.4 tcp sport 7443 accept", "ip daddr 192.0.2.3 tcp dport 3306 accept", "ct original proto-dst 80 accept"} {
+		" ip saddr 192.0.2.4 tcp sport 7443 accept", "ip daddr 192.0.2.3 tcp dport 3306 accept", "ct original proto-dst 80 accept"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("String() lacks %q:\n%s", want, s)
 		}
@@ -219,4 +219,30 @@ func TestString(t *testing.T) {
 	if strings.Contains(s, "dport 53") {
 		t.Error("DNS rule present with the switch off")
 	}
+}
+
+// A connection open when conntrack starts (a host that was tracking
+// nothing before our table) is picked up from whichever packet comes
+// first, and that packet's direction becomes "original". The operator's
+// session from the jump box, and the agents' own, must survive the box
+// speaking first; nothing else gets that latitude.
+func TestVerdict_JumpSessionPickedUpMidStream(t *testing.T) {
+	picked := func(p Packet, reply bool) Packet {
+		p.Reply = reply
+		if reply {
+			p.State = StateEstablished
+		}
+		return p
+	}
+	check(t, Build(fixture(), now), []vcase{
+		{"box speaks first to jump", picked(tcp(HookOutput, box, jump, 22, 50000), false), Accept},
+		{"then jump's packets", picked(tcp(HookInput, jump, box, 50000, 22), true), Accept},
+		{"xdr: box speaks first to peer", picked(tcp(HookOutput, box, peer, 7443, 50000), false), Accept},
+		{"then the peer's packets", picked(tcp(HookInput, peer, box, 50000, 7443), true), Accept},
+		{"ssh from the gray subnet stays strict", picked(tcp(HookOutput, box, gray, 22, 50000), false), Drop},
+		{"so do its packets", picked(tcp(HookInput, gray, box, 50000, 22), true), Drop},
+		{"scored stays strict", picked(tcp(HookOutput, box, stranger, 80, 50000), false), Drop},
+		{"from source port 22 to a stranger", picked(tcp(HookOutput, box, stranger, 22, 50000), false), Drop},
+		{"jump's ssh port is not jump's any port", picked(tcp(HookOutput, box, jump, 4444, 50000), false), Drop},
+	})
 }

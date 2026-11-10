@@ -124,6 +124,34 @@ func (a *agent) setConfig(cfg *config.Config) {
 	a.cfg, a.pol, a.users = cfg, &pol, users
 }
 
+// reload takes a reloaded config into use, unless it changes who can
+// reach the box: the agent applies a table at once and keeps it, with no
+// trial and no revert, so a wrong address there would be a lockout. Such a
+// change needs a restart, after `xdr fw try` with the new file.
+func (a *agent) reload(cfg *config.Config) error {
+	a.mu.Lock()
+	old := a.cfg
+	a.mu.Unlock()
+	var changed []string
+	if !slices.Equal(old.Jump, cfg.Jump) {
+		changed = append(changed, "jump")
+	}
+	if !slices.Equal(old.SSHFrom, cfg.SSHFrom) {
+		changed = append(changed, "ssh_from")
+	}
+	if old.SSHPort != cfg.SSHPort {
+		changed = append(changed, "ssh_port")
+	}
+	if !slices.Equal(old.XDRPorts, cfg.XDRPorts) {
+		changed = append(changed, "xdr_ports")
+	}
+	if changed != nil {
+		return fmt.Errorf("%s changed; restart the agent for that, after `xdr fw try`", strings.Join(changed, ", "))
+	}
+	a.setConfig(cfg)
+	return nil
+}
+
 // record writes one incident.
 func (a *agent) record(in incident.Incident) {
 	in.Host = a.cfg.Host
@@ -563,7 +591,10 @@ func Run(ctx context.Context, o Options) error {
 				logf("reload: %v; the old config stays", err)
 				continue
 			}
-			a.setConfig(cfg)
+			if err := a.reload(cfg); err != nil {
+				logf("reload: %v; the old config stays", err)
+				continue
+			}
 			a.guard()
 			logf("reload: done")
 		case <-sweeps.C:

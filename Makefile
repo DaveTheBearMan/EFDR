@@ -17,6 +17,7 @@ test:
 test-root: build
 	sudo env "GOMODCACHE=$$(go env GOMODCACHE)" "$$(command -v go)" test -count=1 -run Kernel ./internal/...
 	sudo test/netns/fw.sh
+	sudo FW_NO_NAT=1 test/netns/fw.sh
 
 e2e: build
 	test/vm/e2e.sh

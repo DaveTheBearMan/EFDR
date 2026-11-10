@@ -6,6 +6,7 @@ package fw
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +125,16 @@ func Build(c *config.Config, now time.Time) Ruleset {
 		add(chain, func(r *Rule) { r.CT = CTOriginal; edit(r) })
 		*replies = append(*replies, mirror((*chain)[len(*chain)-1]))
 	}
+	// either is allow in both directions, for the operator's and the
+	// agents' own sessions: on a host that tracked nothing before the
+	// table loaded, a session already open is picked up from whichever
+	// packet comes first, and the box may speak first. The far end is
+	// pinned to the jump box or a peer, which the red team cannot hold.
+	either := func(chain, replies *[]Rule, edit func(*Rule)) {
+		allow(chain, replies, edit)
+		(*chain)[len(*chain)-1].CT = CTAny
+		(*replies)[len(*replies)-1].CT = CTAny
+	}
 	icmp := func(chain *[]Rule, proto uint8, types ...int) {
 		for _, t := range types {
 			add(chain, func(r *Rule) { r.Proto, r.ICMPType = proto, t })
@@ -155,12 +166,17 @@ func Build(c *config.Config, now time.Time) Ruleset {
 	for _, p := range c.Scored {
 		allow(in, out, func(r *Rule) { r.Proto, r.DPort = protoNum(p.Proto), p.Port })
 	}
+	jump := union(c.Jump)
 	for _, src := range union(c.Jump, c.SSHFrom) {
-		allow(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, c.SSHPort })
+		how := allow
+		if slices.Contains(jump, src) {
+			how = either
+		}
+		how(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, c.SSHPort })
 	}
 	for _, src := range xdr {
 		for _, port := range c.XDRPorts {
-			allow(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
+			either(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
 		}
 	}
 
@@ -171,7 +187,7 @@ func Build(c *config.Config, now time.Time) Ruleset {
 	}
 	for _, dst := range xdr {
 		for _, port := range c.XDRPorts {
-			allow(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &dst, unix.IPPROTO_TCP, port })
+			either(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &dst, unix.IPPROTO_TCP, port })
 		}
 	}
 	for _, d := range c.AllowOut {

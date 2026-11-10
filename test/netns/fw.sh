@@ -5,7 +5,9 @@
 #
 # xa publishes xc:80 on its port 8080 with a DNAT rule in a table of its
 # own, as Docker does. That table also means xa tracks connections before
-# the xdr table is loaded, like a real host.
+# the xdr table is loaded, like a host running Docker. With FW_NO_NAT=1 there
+# is no such table: conntrack starts with the xdr table and picks up the
+# connections already open mid-stream, like a stock server.
 set -u
 cd "$(dirname "$0")/../.."
 [ "$(id -u)" = 0 ] || { echo "fw.sh: needs root" >&2; exit 2; }
@@ -25,11 +27,13 @@ trap cleanup EXIT
 for n in xa xb xc; do ip netns del $n 2>/dev/null; done
 
 cat > "$tmp/net.py" <<'PY'
-"""serve PORT LOG | probe SRC HOST PORT | chat SRC HOST PORT LOG
+"""serve PORT LOG | probe SRC HOST PORT | chat SRC HOST PORT LOG | watch SRC HOST PORT LOG
 
 A probe asks for one answer and prints ok, timeout or refused. A chat keeps
 a connection open on which both ends send a byte every 0.3 s on their own
 initiative; each end appends a line to its log for every byte received.
+A watch is a chat whose client sends nothing after its first byte, so the
+first packet of it after the table loads is the server's.
 """
 import socket, sys, threading, time
 
@@ -91,6 +95,16 @@ elif mode == "probe":
         print("timeout")
     except OSError as e:
         print("refused" if isinstance(e, ConnectionRefusedError) else "error: %s" % e)
+elif mode == "watch":
+    s = dial(args[0], args[1], int(args[2]))
+    s.settimeout(None)
+    s.sendall(b"c")
+    while True:
+        data = s.recv(100)
+        if not data:
+            break
+        with open(args[3], "a") as f:
+            f.write("x\n" * len(data))
 elif mode == "chat":
     s = dial(args[0], args[1], int(args[2]))
     s.settimeout(None)
@@ -123,7 +137,8 @@ in_ns xa ip route add $STRANGER/32 dev ab0
 in_ns xb ip route add 198.51.100.128/25 via $BOX
 in_ns xc ip route add default via 198.51.100.129
 in_ns xa sysctl -qw net.ipv4.ip_forward=1
-in_ns xa nft -f - <<NFT
+NO_NAT=${FW_NO_NAT:-}
+[ -n "$NO_NAT" ] || in_ns xa nft -f - <<NFT
 table ip nat {
 	chain prerouting { type nat hook prerouting priority dstnat; tcp dport 8080 dnat to $CTR:80; }
 }
@@ -142,7 +157,9 @@ sleep 0.5
 
 # Without the firewall everything connects: the cases below that expect a
 # timeout are then the firewall's doing.
-for t in "xb $STRANGER $BOX 4444" "xb $STRANGER $BOX 22" "xa - $STRANGER 9999" "xc - $STRANGER 9999" "xb $STRANGER $BOX 8080"; do
+published="xb $STRANGER $BOX 8080"
+[ -z "$NO_NAT" ] || published=""
+for t in "xb $STRANGER $BOX 4444" "xb $STRANGER $BOX 22" "xa - $STRANGER 9999" "xc - $STRANGER 9999" ${published:+"$published"}; do
 	# shellcheck disable=SC2086
 	got=$(probe $t)
 	[ "$got" = ok ] || { echo "fw.sh: setup is broken: probe $t: $got" >&2; exit 2; }
@@ -152,8 +169,10 @@ in_ns xa ping -c1 -W1 $STRANGER >/dev/null || { echo "fw.sh: setup is broken: no
 # Two connections that are open when the table loads.
 in_ns xa python3 "$tmp/net.py" chat - $STRANGER 9999 "$tmp/shell.log" &
 in_ns xb python3 "$tmp/net.py" chat $STRANGER $BOX 80 "$tmp/visitor.log" &
+# The operator's session, quiet while the box talks.
+in_ns xb python3 "$tmp/net.py" watch $JUMP $BOX 22 "$tmp/operator.log" &
 sleep 1
-[ "$(grows "$tmp/shell.log")" = yes ] && [ "$(grows "$tmp/xa-80.log")" = yes ] ||
+[ "$(grows "$tmp/shell.log")" = yes ] && [ "$(grows "$tmp/xa-80.log")" = yes ] && [ "$(grows "$tmp/operator.log")" = yes ] ||
 	{ echo "fw.sh: setup is broken: the long-lived connections are silent" >&2; exit 2; }
 
 shell_in=$(lines "$tmp/shell.log") shell_out=$(lines "$tmp/xb-9999.log")
@@ -174,7 +193,8 @@ expect egress-xdr ok "$(probe xa - $JUMP 7443)"
 expect ping-in answered "$(in_ns xb ping -c1 -W1 $BOX >/dev/null && echo answered || echo lost)"
 expect ping-out lost "$(in_ns xa ping -c1 -W1 $STRANGER >/dev/null && echo answered || echo lost)"
 expect pre-existing-scored "in yes, out yes" "in $(grows "$tmp/xa-80.log"), out $(grows "$tmp/visitor.log")"
-expect forward-published ok "$(probe xb $STRANGER $BOX 8080)"
+expect pre-existing-quiet-ssh yes "$(grows "$tmp/operator.log")"
+[ -n "$NO_NAT" ] || expect forward-published ok "$(probe xb $STRANGER $BOX 8080)"
 expect forward-egress timeout "$(probe xc - $STRANGER 9999)"
 
 table() { in_ns xa nft list table inet xdr >/dev/null 2>&1 && echo present || echo gone; }
