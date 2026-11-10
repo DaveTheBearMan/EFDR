@@ -44,7 +44,7 @@ func Walk(root string) (map[string]baseline.FileEntry, []string) {
 	}
 
 	filepath.WalkDir(root, func(full string, d fs.DirEntry, err error) error {
-		rel := strings.TrimPrefix(full, root)
+		rel := relPath(root, full)
 		if rel == "" {
 			return nil // the root itself
 		}
@@ -82,6 +82,18 @@ func Walk(root string) (map[string]baseline.FileEntry, []string) {
 		return nil
 	})
 	return files, errs
+}
+
+// relPath turns a walked path into a path relative to root with a leading
+// slash; the root itself is "".
+func relPath(root, full string) string {
+	if full == root {
+		return ""
+	}
+	if root == "/" {
+		return full
+	}
+	return strings.TrimPrefix(full, root)
 }
 
 func skip(rel string) bool {

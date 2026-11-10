@@ -7,3 +7,6 @@ build:
 
 test:
 	go test ./...
+
+e2e: build
+	test/vm/e2e.sh

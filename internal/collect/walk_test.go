@@ -78,18 +78,40 @@ func TestWalk_FifoAndUnreadable(t *testing.T) {
 func TestWalk_Excluded(t *testing.T) {
 	root := testfs.Root(t)
 	testfs.File(t, root, "proc/1/x", "", 0o644)
+	testfs.File(t, root, "run/systemd/propagate/a.service/x", "", 0o644)
+	testfs.Symlink(t, root, "run/systemd/units/invocation:a.service", "0123abcd")
+	testfs.File(t, root, "run/systemd/system/keep.service", "[Service]\n", 0o644)
 	testfs.File(t, root, "var/log/a", "", 0o644)
 	testfs.File(t, root, "etc/machine-id", "id", 0o644)
 	testfs.File(t, root, "etc/ssh/ssh_host_ed25519_key", "k", 0o600)
 	testfs.File(t, root, "dev/null2", "", 0o644)
 	testfs.File(t, root, "dev/shm/evil", "x", 0o755)
 	files, _ := Walk(root)
-	for _, p := range []string{"/proc/1/x", "/proc", "/var/log/a", "/etc/machine-id", "/etc/ssh/ssh_host_ed25519_key", "/dev/null2"} {
+	for _, p := range []string{"/proc/1/x", "/proc", "/run/systemd/propagate", "/run/systemd/propagate/a.service/x", "/run/systemd/units/invocation:a.service", "/var/log/a", "/etc/machine-id", "/etc/ssh/ssh_host_ed25519_key", "/dev/null2"} {
 		if _, ok := files[p]; ok {
 			t.Errorf("%s should be excluded", p)
 		}
 	}
 	if _, ok := files["/dev/shm/evil"]; !ok {
 		t.Error("/dev/shm/evil should be walked")
+	}
+	if _, ok := files["/run/systemd/system/keep.service"]; !ok {
+		t.Error("runtime unit files must still be walked")
+	}
+}
+
+// A live host is scanned with root "/": paths must still come out
+// absolute, or no exclusion or classification pattern matches them.
+func TestRelPath(t *testing.T) {
+	for _, c := range []struct{ root, full, want string }{
+		{"/", "/", ""},
+		{"/", "/proc", "/proc"},
+		{"/", "/proc/1/pagemap", "/proc/1/pagemap"},
+		{"/tmp/x", "/tmp/x", ""},
+		{"/tmp/x", "/tmp/x/etc/passwd", "/etc/passwd"},
+	} {
+		if got := relPath(c.root, c.full); got != c.want {
+			t.Errorf("relPath(%q, %q) = %q, want %q", c.root, c.full, got, c.want)
+		}
 	}
 }

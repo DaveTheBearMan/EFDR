@@ -1,0 +1,11 @@
+added	cron	/etc/cron.d/updater
+added	account	toor
+added	preload	/etc/ld.so.preload
+ssh-key	/root/.ssh/authorized_keys
+added	privilege	/var/tmp/.b
+added	systemd-unit	/etc/systemd/system/snapd-refresh-helper.service
+added	systemd-unit	/etc/systemd/system/snapd-refresh-helper.timer
+added	pkg-hook	/etc/apt/apt.conf.d/99update
+mail	/etc/aliases
+altered	sshd	/etc/ssh/sshd_config
+altered	privilege	/usr/bin/python3.12

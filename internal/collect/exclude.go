@@ -8,6 +8,11 @@ var Excluded = []string{
 	"/run/user",
 	"/run/udev",
 	"/run/systemd/journal",
+	// Per-running-unit bookkeeping that comes and goes as services start
+	// and stop (seen on a clean 24.04 rescan). Unit files are not loaded
+	// from either; /run/systemd/{system,user} stay walked.
+	"/run/systemd/units",
+	"/run/systemd/propagate",
 	"/var/log",
 	"/var/cache",
 	"/var/tmp/systemd-private-*",
