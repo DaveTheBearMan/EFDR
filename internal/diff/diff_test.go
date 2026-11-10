@@ -116,3 +116,13 @@ func TestDiff_Identical(t *testing.T) {
 		t.Fatalf("%+v", fs)
 	}
 }
+
+func TestDiff_UnifiedNoPhantomTrailingLine(t *testing.T) {
+	p := "/etc/hosts"
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: reg("1", 0o644, "a\n")}), bl(map[string]baseline.FileEntry{p: reg("2", 0o644, "b\n")})))
+	for _, line := range strings.Split(f.Diff, "\n") {
+		if line == " " {
+			t.Fatalf("phantom blank context line in diff:\n%s", f.Diff)
+		}
+	}
+}

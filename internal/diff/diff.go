@@ -174,9 +174,21 @@ func ident(e baseline.FileEntry) string {
 	return e.SHA256
 }
 
+// lines splits content keeping line endings. Unlike difflib.SplitLines it
+// does not invent an extra empty line after a trailing newline.
+func lines(b []byte) []string {
+	ls := strings.SplitAfter(string(b), "\n")
+	if ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	} else {
+		ls[len(ls)-1] += "\n"
+	}
+	return ls
+}
+
 func unified(a, b []byte) string {
 	s, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A: difflib.SplitLines(string(a)), B: difflib.SplitLines(string(b)),
+		A: lines(a), B: lines(b),
 		FromFile: "baseline", ToFile: "live", Context: 3,
 	})
 	return s
