@@ -33,6 +33,7 @@ commands:
   scan      diff a host vs baseline: scan --root DIR [--baseline FILE]... [--json]
   pkglist   list installed packages: pkglist --root DIR
   pkghash   package layer from debs: pkghash --debs DIR --out FILE
+  fw        host firewall:          fw print|apply|try|confirm|remove --config FILE
   version   print the xdr version
 `
 
@@ -59,6 +60,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = pkglist(rest, stdout, stderr)
 	case "pkghash":
 		err = pkghash(rest, stderr)
+	case "fw":
+		code, err = fwCmd(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s", cmd, usage)
 		return 2

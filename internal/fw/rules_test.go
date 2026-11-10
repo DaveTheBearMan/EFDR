@@ -118,7 +118,17 @@ func TestVerdict_EstablishedOriginalDirectionNeedsAllow(t *testing.T) {
 	inv.State = StateInvalid
 	check(t, Build(fixture(), now), []vcase{
 		{"reverse shell, our packets", est(tcp(HookOutput, box, stranger, 50000, 9999), false), Drop},
-		{"reverse shell, their replies", est(tcp(HookInput, stranger, box, 9999, 50000), true), Accept},
+		// Data from the far end would still reach the shell's stdin.
+		{"reverse shell, their replies", est(tcp(HookInput, stranger, box, 9999, 50000), true), Drop},
+		{"reverse shell from a scored source port", est(tcp(HookOutput, box, stranger, 80, 9999), false), Drop},
+		{"its replies", est(tcp(HookInput, stranger, box, 9999, 80), true), Drop},
+		{"reply from a stranger on the xdr port", est(tcp(HookInput, stranger, box, 7443, 50000), true), Drop},
+		{"ssh reply to jump", est(tcp(HookOutput, box, jump, 22, 50000), true), Accept},
+		{"ssh reply to stranger", est(tcp(HookOutput, box, stranger, 22, 50000), true), Drop},
+		{"xdr reply to peer", est(tcp(HookOutput, box, peer, 7443, 50000), true), Accept},
+		{"allow_out reply", est(tcp(HookInput, db, box, 3306, 50000), true), Accept},
+		{"echo reply out", est(Packet{Hook: HookOutput, Proto: unix.IPPROTO_ICMP, Src: box, Dst: stranger, ICMPType: 0}, true), Accept},
+		{"echo reply in", est(Packet{Hook: HookInput, Proto: unix.IPPROTO_ICMP, Src: stranger, Dst: box, ICMPType: 0}, true), Drop},
 		{"bind shell, their packets", est(tcp(HookInput, stranger, box, 50000, 4444), false), Drop},
 		{"xdr reply from peer", est(tcp(HookInput, peer, box, 7443, 50000), true), Accept},
 		{"scored reply out", est(tcp(HookOutput, box, stranger, 80, 50000), true), Accept},
@@ -138,10 +148,17 @@ func TestVerdict_DNS(t *testing.T) {
 	on.DNS.Enabled = true
 	expired := fixture()
 	expired.DNS.Enabled, expired.DNS.Expires = true, now.Add(-time.Second)
-	check(t, Build(off, now), []vcase{{"switch off", q(resolver, DNSMark), Drop}})
+	answer := func(src netip.Addr) Packet {
+		p := udp(HookInput, src, box, 53, 50000)
+		p.State, p.Reply = StateEstablished, true
+		return p
+	}
+	check(t, Build(off, now), []vcase{{"switch off", q(resolver, DNSMark), Drop}, {"answer, switch off", answer(resolver), Drop}})
 	check(t, Build(expired, now), []vcase{{"switch expired", q(resolver, DNSMark), Drop}})
 	check(t, Build(on, now), []vcase{
 		{"agent to resolver", q(resolver, DNSMark), Accept},
+		{"answer", answer(resolver), Accept},
+		{"answer from another server", answer(stranger), Drop},
 		{"unmarked to resolver", q(resolver, 0), Drop},
 		{"marked to another server", q(netip.MustParseAddr("203.0.113.53"), DNSMark), Drop},
 		{"tcp 53", tcp(HookOutput, box, resolver, 50000, 53), Drop},
@@ -156,15 +173,19 @@ func TestVerdict_Forward(t *testing.T) {
 		p.DNAT, p.OrigDPort = true, orig
 		return p
 	}
-	reply := tcp(HookForward, ctr, stranger, 80, 50000)
-	reply.State, reply.Reply = StateEstablished, true
+	est := func(p Packet) Packet { p.State, p.Reply = StateEstablished, true; return p }
+	reply := est(tcp(HookForward, ctr, stranger, 80, 50000))
+	reply.DNAT, reply.OrigDPort = true, 80
 	check(t, Build(fixture(), now), []vcase{
 		{"published scored port", dnat(80), Accept},
 		{"published other port", dnat(8081), Drop},
 		{"not dnat", tcp(HookForward, stranger, ctr, 50000, 80), Drop},
 		{"container egress", tcp(HookForward, ctr, stranger, 50000, 443), Drop},
 		{"container to allow_out", tcp(HookForward, ctr, db, 50000, 3306), Accept},
-		{"reply", reply, Accept},
+		{"published scored port, reply", reply, Accept},
+		{"reply of a connection that was never allowed", est(tcp(HookForward, ctr, stranger, 80, 50000)), Drop},
+		{"container reverse shell, their replies", est(tcp(HookForward, stranger, ctr, 443, 50000)), Drop},
+		{"allow_out reply", est(tcp(HookForward, db, ctr, 3306, 50000)), Accept},
 	})
 }
 
@@ -185,11 +206,15 @@ func TestVerdict_IPv6(t *testing.T) {
 
 func TestString(t *testing.T) {
 	s := Build(fixture(), now).String()
-	for _, want := range []string{"chain input", "chain output", "chain forward", "ip saddr 192.0.2.7 tcp dport 22 accept",
-		"ct direction reply ct state established,related accept", "ip daddr 192.0.2.3 tcp dport 3306 accept", "ct original proto-dst 80 accept"} {
+	for _, want := range []string{"chain input", "chain output", "chain forward", "ct direction original ip saddr 192.0.2.7 tcp dport 22 accept",
+		"ct direction reply ct state established,related tcp sport 80 accept",
+		"ct direction reply ct state established,related ip saddr 192.0.2.4 tcp sport 7443 accept", "ip daddr 192.0.2.3 tcp dport 3306 accept", "ct original proto-dst 80 accept"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("String() lacks %q:\n%s", want, s)
 		}
+	}
+	if strings.Contains(s, "established,related accept") {
+		t.Error("a reply rule that accepts any connection")
 	}
 	if strings.Contains(s, "dport 53") {
 		t.Error("DNS rule present with the switch off")

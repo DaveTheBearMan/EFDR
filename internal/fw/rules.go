@@ -37,10 +37,11 @@ func (a Action) String() string {
 type CT int
 
 const (
-	CTAny     CT = iota
-	CTInvalid    // ct state invalid
-	CTReply      // ct direction reply, ct state established or related
-	CTRelated    // ct state related
+	CTAny      CT = iota
+	CTInvalid     // ct state invalid
+	CTOriginal    // ct direction original
+	CTReply       // ct direction reply, ct state established or related
+	CTRelated     // ct state related
 )
 
 // Rule is one line of a chain. A zero field matches anything, except
@@ -84,18 +85,44 @@ func union(lists ...[]config.Net) []netip.Prefix {
 	return out
 }
 
+// mirror is the rule for the reply packets of connections r allows: the
+// same addresses and ports seen from the other end, in the reply direction
+// of an established connection.
+func mirror(r Rule) Rule {
+	m := r
+	m.CT, m.Mark = CTReply, 0
+	m.Src, m.Dst = r.Dst, r.Src
+	m.SPort, m.DPort = r.DPort, r.SPort
+	switch {
+	case r.Proto == unix.IPPROTO_ICMP && r.ICMPType == 8:
+		m.ICMPType = 0 // echo-reply
+	case r.Proto == unix.IPPROTO_ICMPV6 && r.ICMPType == 128:
+		m.ICMPType = 129
+	}
+	return m
+}
+
 // Build turns the deployment config into the policy in force at now.
 //
-// Only the reply direction of a tracked connection is accepted without
-// further checks. The original direction has to match an allow rule on
-// every packet, so a connection opened before the table was loaded gets no
-// free pass: a reverse shell stops, a session to a scored port carries on.
+// A connection passes only while its opening direction matches an allow
+// rule: that direction is checked on every packet, an allow rule accepts
+// that direction only, and reply packets are accepted only by the mirror
+// of such a rule. There is no rule that accepts
+// "established" as such, so a connection opened before the table was
+// loaded gets no free pass in either direction: a reverse shell goes
+// silent both ways, a session to a scored port carries on.
 func Build(c *config.Config, now time.Time) Ruleset {
 	var rs Ruleset
 	add := func(chain *[]Rule, edit func(*Rule)) {
 		r := rule()
 		edit(&r)
 		*chain = append(*chain, r)
+	}
+	// allow adds a rule to chain and its mirror to the chain the replies
+	// pass through.
+	allow := func(chain, replies *[]Rule, edit func(*Rule)) {
+		add(chain, func(r *Rule) { r.CT = CTOriginal; edit(r) })
+		*replies = append(*replies, mirror((*chain)[len(*chain)-1]))
 	}
 	icmp := func(chain *[]Rule, proto uint8, types ...int) {
 		for _, t := range types {
@@ -104,58 +131,65 @@ func Build(c *config.Config, now time.Time) Ruleset {
 	}
 	common := func(chain *[]Rule, v6 bool) {
 		add(chain, func(r *Rule) { r.CT, r.Action = CTInvalid, Drop })
-		add(chain, func(r *Rule) { r.CT = CTReply })
 		add(chain, func(r *Rule) { r.CT, r.Proto = CTRelated, unix.IPPROTO_ICMP })
 		if v6 {
 			add(chain, func(r *Rule) { r.CT, r.Proto = CTRelated, unix.IPPROTO_ICMPV6 })
 		}
 	}
 	xdr := union(c.Jump, c.Peers)
+	in, out, fwd := &rs.Input, &rs.Output, &rs.Forward
 
-	add(&rs.Input, func(r *Rule) { r.Loopback = true })
-	common(&rs.Input, true)
-	icmp(&rs.Input, unix.IPPROTO_ICMP, 8)
-	icmp(&rs.Input, unix.IPPROTO_ICMPV6, 128, 135, 136, 134)
+	add(in, func(r *Rule) { r.Loopback = true })
+	add(out, func(r *Rule) { r.Loopback = true })
+	common(in, true)
+	common(out, true)
+	common(fwd, false)
+
+	// Inbound.
+	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMP, 8 })
+	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMPV6, 128 })
+	icmp(in, unix.IPPROTO_ICMPV6, 135, 136, 134)
 	if c.DHCP {
-		add(&rs.Input, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 67, 68 })
+		add(in, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 67, 68 })
 	}
 	for _, p := range c.Scored {
-		add(&rs.Input, func(r *Rule) { r.Proto, r.DPort = protoNum(p.Proto), p.Port })
+		allow(in, out, func(r *Rule) { r.Proto, r.DPort = protoNum(p.Proto), p.Port })
 	}
 	for _, src := range union(c.Jump, c.SSHFrom) {
-		add(&rs.Input, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, c.SSHPort })
+		allow(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, c.SSHPort })
 	}
 	for _, src := range xdr {
 		for _, port := range c.XDRPorts {
-			add(&rs.Input, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
+			allow(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
 		}
 	}
 
-	add(&rs.Output, func(r *Rule) { r.Loopback = true })
-	common(&rs.Output, true)
-	icmp(&rs.Output, unix.IPPROTO_ICMPV6, 135, 136, 133)
+	// Outbound.
+	icmp(out, unix.IPPROTO_ICMPV6, 135, 136, 133)
 	if c.DHCP {
-		add(&rs.Output, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 68, 67 })
+		add(out, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 68, 67 })
 	}
 	for _, dst := range xdr {
 		for _, port := range c.XDRPorts {
-			add(&rs.Output, func(r *Rule) { r.Dst, r.Proto, r.DPort = &dst, unix.IPPROTO_TCP, port })
+			allow(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &dst, unix.IPPROTO_TCP, port })
 		}
 	}
 	for _, d := range c.AllowOut {
-		add(&rs.Output, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
+		allow(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
 	}
 	if c.DNSOn(now) && c.DNS.Resolver.IsValid() {
 		res := netip.PrefixFrom(c.DNS.Resolver, c.DNS.Resolver.BitLen())
-		add(&rs.Output, func(r *Rule) { r.Mark, r.Dst, r.Proto, r.DPort = DNSMark, &res, unix.IPPROTO_UDP, 53 })
+		allow(out, in, func(r *Rule) { r.Mark, r.Dst, r.Proto, r.DPort = DNSMark, &res, unix.IPPROTO_UDP, 53 })
 	}
 
-	common(&rs.Forward, false)
+	// Forwarded: to and from containers. The original destination port of
+	// a published connection is the same on its packets in both directions,
+	// so that rule is its own mirror.
 	for _, p := range c.Scored {
-		add(&rs.Forward, func(r *Rule) { r.Proto, r.OrigDPort = protoNum(p.Proto), p.Port })
+		add(fwd, func(r *Rule) { r.Proto, r.OrigDPort = protoNum(p.Proto), p.Port })
 	}
 	for _, d := range c.AllowOut {
-		add(&rs.Forward, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
+		allow(fwd, fwd, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
 	}
 	return rs
 }
@@ -216,6 +250,10 @@ func (r Rule) matches(p Packet) bool {
 		if p.State != StateInvalid {
 			return false
 		}
+	case CTOriginal:
+		if p.Reply || p.State == StateInvalid {
+			return false
+		}
 	case CTReply:
 		if !p.Reply || p.State != StateEstablished && p.State != StateRelated {
 			return false
@@ -259,6 +297,8 @@ func (r Rule) text(hook int) string {
 	switch r.CT {
 	case CTInvalid:
 		w = append(w, "ct state invalid")
+	case CTOriginal:
+		w = append(w, "ct direction original")
 	case CTReply:
 		w = append(w, "ct direction reply ct state established,related")
 	case CTRelated:
