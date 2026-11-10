@@ -107,6 +107,17 @@ We have the competition's **exact base image** (without scored services) and a *
 - Captured as: file hashes (packages + `debsums -ca`-equivalent including conffiles), user/group lists, unit/timer list, cron contents, SUID/SGID and file-capability sets, PAM stack, sshd_config, kernel module list, listener list, and the other locations in §6.
 - At T-0 the agent sweeps the live box against the baseline before anything else — implants may already be present.
 
+**Collection rules** *(added after the Plan 1 review; the scanned box is hostile input)*:
+
+- Nothing is left out by path alone except the kernel's own views (`/proc`, `/sys`). The same filesystems mounted anywhere else are recorded as a directory and not entered.
+- Trees that churn on a healthy box (logs, caches, mail spool, runtime dirs, database files) are not inventoried file by file, but a setuid/setgid or capability-carrying file, or anything in a persistence location, is recorded wherever it sits. Container storage (`/var/lib/docker`, `/var/lib/containerd`) is recorded as a directory only; its contents belong to the Docker inspector (§6.2).
+- Per-instance identity files (machine-id, SSH host keys, netplan, hostname) are skipped only when they are plain files.
+- The collector never follows a symlink, opens only regular files, and bounds every read. Anything it could not read is reported as an `error` finding at High or above — never a silent pass — and a scan with such findings exits non-zero.
+- Account databases are parsed the way glibc parses them; a line glibc would skip is reported rather than dropped.
+- The package layer vouches for a file's content and packaged mode only. Setuid/setgid bits or capabilities beyond what the `.deb` ships are a privilege finding. It does not vouch for dpkg's own database (`/var/lib/dpkg`), which surfaces at T-0 and is absorbed by triage.
+- Until the console exists (Plan 6), "triage" is a full T-0 snapshot used as the top layer: everything present at T-0 is treated as approved in one step.
+- Baseline files never contain password hashes and are written readable by their owner only.
+
 ## 6. Detection
 
 ### 6.1 Network and process (primary focus)

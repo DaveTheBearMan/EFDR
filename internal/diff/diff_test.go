@@ -91,12 +91,91 @@ func TestDiff_Removed(t *testing.T) {
 	}
 }
 
-func TestDiff_ErrEntriesSkipped(t *testing.T) {
-	p := "/etc/secret"
+// What could not be read could not be compared: that is a finding, never
+// a silent pass.
+func TestDiff_UnreadableLiveEntryIsFinding(t *testing.T) {
 	live := reg("", 0o600, "")
 	live.Err = "permission denied"
-	if fs := Diff(bl(map[string]baseline.FileEntry{p: reg("1", 0o600, "")}), bl(map[string]baseline.FileEntry{p: live})); len(fs) != 0 {
+	for p, want := range map[string]model.Severity{"/srv/deep": model.SevHigh, "/etc/sudoers.d/x": model.SevCritical} {
+		for _, base := range []map[string]baseline.FileEntry{{}, {p: reg("1", 0o600, "")}, {p: live}} {
+			f := one(t, Diff(bl(base), bl(map[string]baseline.FileEntry{p: live})))
+			if f.Kind != model.KindError || f.Severity != want || f.Subject != p || !strings.Contains(f.Detail, "permission denied") {
+				t.Fatalf("%+v", f)
+			}
+		}
+	}
+}
+
+func TestDiff_UnreadableBaseEntryCountsAsAbsent(t *testing.T) {
+	p := "/etc/cron.d/x"
+	base := reg("", 0o600, "")
+	base.Err = "permission denied"
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: base}), bl(map[string]baseline.FileEntry{p: reg("1", 0o600, "x")})))
+	if f.Kind != model.KindAdded || f.Category != "cron" {
+		t.Fatalf("%+v", f)
+	}
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{p: base}), bl(map[string]baseline.FileEntry{})))
+	if f.Kind != model.KindRemoved {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestDiff_CollectorErrorsAreFindings(t *testing.T) {
+	live := bl(map[string]baseline.FileEntry{})
+	live.Errors = []string{"/etc/passwd: not a regular file"}
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{}), live))
+	if f.Kind != model.KindError || f.Category != "collector" || f.Severity != model.SevHigh || f.Subject != "/etc/passwd" || f.Detail != "could not read: not a regular file" {
+		t.Fatalf("%+v", f)
+	}
+}
+
+// The package layer must not hide a privilege gain on a file it vouches for.
+func TestDiff_HashOnlyGainedSetuidIsPrivilege(t *testing.T) {
+	p := "/usr/sbin/postfix"
+	base := reg("1", 0o755, "")
+	base.HashOnly = true
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: base}), bl(map[string]baseline.FileEntry{p: reg("1", 0o755|os.ModeSetuid, "")})))
+	if f.Kind != model.KindAltered || f.Category != "privilege" || f.Severity != model.SevCritical || !strings.Contains(f.Detail, "setuid") {
+		t.Fatalf("%+v", f)
+	}
+	live := reg("1", 0o755, "")
+	live.Caps = "0100"
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{p: base}), bl(map[string]baseline.FileEntry{p: live})))
+	if f.Category != "privilege" || f.Severity != model.SevCritical || !strings.Contains(f.Detail, "caps") {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestDiff_HashOnlyShippedSetuidIsNotAGain(t *testing.T) {
+	p := "/usr/bin/su"
+	base := reg("1", 0o755|os.ModeSetuid, "")
+	base.HashOnly = true
+	if fs := Diff(bl(map[string]baseline.FileEntry{p: base}), bl(map[string]baseline.FileEntry{p: reg("1", 0o755|os.ModeSetuid, "")})); len(fs) != 0 {
 		t.Fatalf("%+v", fs)
+	}
+}
+
+func TestDiff_PersistenceDirReplacedBySymlink(t *testing.T) {
+	dir := baseline.FileEntry{Type: baseline.TypeDir, Mode: uint32(os.ModeDir | 0o755)}
+	link := baseline.FileEntry{Type: baseline.TypeLink, Mode: uint32(os.ModeSymlink | 0o777), Link: "/tmp/x"}
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{"/etc/cron.d": dir}), bl(map[string]baseline.FileEntry{"/etc/cron.d": link})))
+	if f.Category != "cron" || f.Severity != model.SevHigh || !strings.Contains(f.Detail, "type dir→symlink") {
+		t.Fatalf("%+v", f)
+	}
+	// Any directory swapped for something else redirects everything below it.
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{"/etc/systemd": dir}), bl(map[string]baseline.FileEntry{"/etc/systemd": link})))
+	if f.Category != "file" || f.Severity != model.SevHigh {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestDiff_PartialHashComparesSize(t *testing.T) {
+	p := "/srv/big"
+	b, l := reg("partial:1", 0o644, ""), reg("partial:1", 0o644, "")
+	b.Size, l.Size = 2<<30, 3<<30
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: b}), bl(map[string]baseline.FileEntry{p: l})))
+	if !strings.Contains(f.Detail, "size") {
+		t.Fatalf("%+v", f)
 	}
 }
 

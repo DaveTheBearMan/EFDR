@@ -47,7 +47,8 @@ type Account struct {
 	Home     string
 	Shell    string
 	PwState  string // "locked", "none" or "set"
-	PwDigest string // sha256 of the shadow password field
+	PwDigest string // sha256 of the effective password field
+	Bad      bool   // a line the parser could not read; Name holds its start
 }
 
 // Group is one /etc/group entry.
@@ -55,6 +56,7 @@ type Group struct {
 	Name    string
 	GID     uint32
 	Members []string
+	Bad     bool // a line the parser could not read; Name holds its start
 }
 
 // Baseline is a complete host snapshot.
@@ -70,8 +72,9 @@ type Baseline struct {
 	Errors     []string
 }
 
-// Compose overlays layers in order: a later layer's entry wins per path, and
-// the last non-nil Accounts, Groups and Modules win. Inputs are not modified.
+// Compose overlays layers in order: a later layer's entry wins per path
+// (see overlay for HashOnly entries), and the last non-nil Accounts, Groups
+// and Modules win. Inputs are not modified.
 func Compose(layers ...*Baseline) *Baseline {
 	out := &Baseline{Schema: 1, Files: map[string]FileEntry{}}
 	for _, l := range layers {
@@ -88,7 +91,7 @@ func Compose(layers ...*Baseline) *Baseline {
 			out.CapturedAt = l.CapturedAt
 		}
 		for p, e := range l.Files {
-			out.Files[p] = e
+			out.Files[p] = overlay(out.Files, p, e)
 		}
 		if l.Accounts != nil {
 			out.Accounts = l.Accounts
@@ -101,4 +104,22 @@ func Compose(layers ...*Baseline) *Baseline {
 		}
 	}
 	return out
+}
+
+// overlay returns the entry for p after e is laid over what is already
+// there. A HashOnly entry knows only what a package ships: over a full
+// entry of the same type it updates content and packaged mode and keeps
+// the owner and capabilities already known, and a directory it ships never
+// displaces a full entry.
+func overlay(files map[string]FileEntry, p string, e FileEntry) FileEntry {
+	old, ok := files[p]
+	if !ok || !e.HashOnly || old.HashOnly || old.Err != "" || old.Type != e.Type {
+		return e
+	}
+	if e.Type == TypeDir {
+		return old
+	}
+	old.Mode, old.Size, old.SHA256, old.Link, old.Layer = e.Mode, e.Size, e.SHA256, e.Link, e.Layer
+	old.Content = nil
+	return old
 }

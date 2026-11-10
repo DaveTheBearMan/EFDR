@@ -17,6 +17,7 @@ import (
 	"github.com/ulikunitz/xz"
 
 	"xdr/internal/baseline"
+	"xdr/internal/pathenc"
 )
 
 func sum(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
@@ -176,5 +177,12 @@ func TestLayer_HashOnly(t *testing.T) {
 	e, ok := l.Files["/usr/bin/a"]
 	if !ok || !e.HashOnly || e.Layer != baseline.LayerPackage || e.SHA256 != sum("A") {
 		t.Fatalf("%+v", l.Files)
+	}
+}
+
+func TestLayer_LinkTargetIsEncoded(t *testing.T) {
+	b := Layer([]*Deb{{Files: []DebFile{{Path: "/usr/bin/l", Type: baseline.TypeLink, Link: "t\xff"}}}})
+	if got := b.Files["/usr/bin/l"].Link; got != pathenc.Encode("t\xff") {
+		t.Fatalf("link %q", got)
 	}
 }

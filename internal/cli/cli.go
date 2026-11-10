@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"xdr/internal/baseline"
 	"xdr/internal/collect"
@@ -105,16 +109,32 @@ func captureCmd(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A baseline that could not read something vouches for less than it
+	// appears to; say so while the operator can still do something about it.
+	var warn []string
 	for p, e := range b.Files {
+		if e.Err != "" {
+			warn = append(warn, p+": "+e.Err)
+		}
 		e.Layer = lv
 		b.Files[p] = e
+	}
+	sort.Strings(warn)
+	for _, w := range append(warn, b.Errors...) {
+		fmt.Fprintf(stderr, "xdr capture: warning: %s\n", printable(w, false))
 	}
 	return writeBaseline(*out, b)
 }
 
+// writeBaseline writes b readable by its owner only: a baseline is a map
+// of the whole box.
 func writeBaseline(path string, b *baseline.Baseline) error {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		return err
 	}
 	if err := baseline.Save(f, b); err != nil {
@@ -182,13 +202,35 @@ func scan(args []string, stdout, stderr io.Writer) (int, error) {
 
 func printFindings(w io.Writer, findings []model.Finding) {
 	for _, f := range findings {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", strings.ToUpper(f.Severity.String()), f.Kind, f.Category, f.Subject, f.Detail)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", strings.ToUpper(f.Severity.String()), f.Kind, f.Category,
+			printable(f.Subject, false), printable(f.Detail, false))
 		if f.Diff != "" {
 			for _, line := range strings.Split(strings.TrimRight(f.Diff, "\n"), "\n") {
-				fmt.Fprintf(w, "    %s\n", line)
+				fmt.Fprintf(w, "    %s\n", printable(line, true))
 			}
 		}
 	}
+}
+
+// printable escapes everything in s that is not a printable character, so
+// text taken from the scanned host cannot drive the operator's terminal or
+// forge output columns. Tabs survive only where tab says so.
+func printable(s string, tab bool) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case unicode.IsPrint(r), r == '\t' && tab:
+			b.WriteRune(r)
+		default:
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+		i += n
+	}
+	return b.String()
 }
 
 func pkglist(args []string, stdout, stderr io.Writer) error {
@@ -197,12 +239,11 @@ func pkglist(args []string, stdout, stderr io.Writer) error {
 	if err := parse(fs, args); err != nil {
 		return err
 	}
-	f, err := os.Open(filepath.Join(*root, "var/lib/dpkg/status"))
+	data, err := collect.ReadFile(filepath.Join(*root, "var/lib/dpkg/status"), 256<<20)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	pkgs := debhash.ParseStatus(f)
+	pkgs := debhash.ParseStatus(bytes.NewReader(data))
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Package < pkgs[j].Package })
 	for _, p := range pkgs {
 		fmt.Fprintf(stdout, "%s=%s %s\n", p.Package, p.Version, p.Arch)

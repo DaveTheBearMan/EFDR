@@ -13,7 +13,7 @@ func Layer(debs []*Deb) *baseline.Baseline {
 	for _, d := range debs {
 		for _, f := range d.Files {
 			b.Files[pathenc.Encode(f.Path)] = baseline.FileEntry{
-				Type: f.Type, Mode: f.Mode, SHA256: f.SHA256, Link: f.Link,
+				Type: f.Type, Mode: f.Mode, SHA256: f.SHA256, Link: pathenc.Encode(f.Link),
 				HashOnly: true, Layer: baseline.LayerPackage,
 			}
 		}

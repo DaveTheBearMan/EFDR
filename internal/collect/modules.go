@@ -1,8 +1,6 @@
 package collect
 
 import (
-	"bufio"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,15 +9,17 @@ import (
 // Modules lists loaded kernel modules from root/proc/modules, sorted.
 // It returns nil when the file is absent (e.g. an offline image).
 func Modules(root string) []string {
-	f, err := os.Open(filepath.Join(root, "proc/modules"))
+	data, err := ReadFile(filepath.Join(root, "proc/modules"), maxDB)
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	return parseModules(data)
+}
+
+func parseModules(data []byte) []string {
 	mods := []string{}
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		if fields := strings.Fields(s.Text()); len(fields) > 0 {
+	for _, line := range strings.Split(string(data), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 {
 			mods = append(mods, fields[0])
 		}
 	}

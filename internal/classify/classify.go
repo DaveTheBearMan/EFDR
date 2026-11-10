@@ -20,13 +20,16 @@ type rule struct {
 	patterns []string
 }
 
-// home stands in for every user home directory.
-const home = "{/root,/home/*}"
+// home stands in for every home directory. Homes are wherever passwd says
+// they are (service accounts live under /var/lib, /var/spool, /var/www or
+// even "/"), so a per-user file is matched at any depth.
+const home = "{,/**}"
 
 var rules = []rule{
 	{Class{"preload", model.SevCritical, true}, []string{"/etc/ld.so.preload"}},
 	{Class{"systemd-generator", model.SevCritical, true}, []string{"/{etc,run,usr/lib,usr/local/lib}/systemd/{system,user}-generators/**"}},
-	{Class{"systemd-unit", model.SevHigh, true}, []string{"/{etc,run,usr/lib,usr/local/lib}/systemd/{system,user}/**", home + "/.config/systemd/user/**"}},
+	{Class{"systemd-unit", model.SevHigh, true}, []string{"/{etc,run,usr/lib,usr/local/lib}/systemd/{system,user}/**", home + "/.config/systemd/user/**",
+		"/run/user/*/systemd/{user,user.control}/**", "/var/lib/systemd/linger/**"}},
 	{Class{"cron", model.SevHigh, true}, []string{"/etc/crontab", "/etc/cron.d/**", "/etc/cron.{hourly,daily,weekly,monthly}/**", "/var/spool/cron/crontabs/**"}},
 	{Class{"at", model.SevHigh, true}, []string{"/var/spool/cron/atjobs/**", "/var/spool/at/**"}},
 	{Class{"pkg-hook", model.SevHigh, true}, []string{"/etc/apt/apt.conf.d/**", "/etc/dpkg/dpkg.cfg.d/**", "/var/lib/dpkg/info/*.{preinst,postinst,prerm,postrm}"}},
@@ -38,17 +41,24 @@ var rules = []rule{
 	{Class{"kmod-config", model.SevCritical, true}, []string{"/etc/modules", "/etc/modules-load.d/**", "/etc/modprobe.d/**", "/usr/lib/modules-load.d/**"}},
 	{Class{"login-hook", model.SevHigh, true}, []string{"/etc/update-motd.d/**", "/etc/rc.local", "/etc/profile", "/etc/profile.d/**", "/etc/bash.bashrc", "/etc/environment", home + "/.{bashrc,profile,bash_profile,bash_login,bash_logout,zshrc}"}},
 	{Class{"resolver", model.SevHigh, true}, []string{"/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/ld.so.conf", "/etc/ld.so.conf.d/**"}},
+	{Class{"resolver", model.SevHigh, false}, []string{"/etc/ld.so.cache"}},
+	{Class{"cloud-init", model.SevHigh, true}, []string{"/etc/cloud/**", "/var/lib/cloud/scripts/**", "/var/lib/cloud/{instance,instances/*}/scripts/**"}},
 	{Class{"udev", model.SevHigh, true}, []string{"/etc/udev/rules.d/**", "/usr/lib/udev/rules.d/**"}},
 	{Class{"mail", model.SevHigh, true}, []string{"/etc/aliases", "/etc/postfix/**", home + "/.forward"}},
-	{Class{"account-db", model.SevMedium, true}, []string{"/etc/{passwd,shadow,group,gshadow}"}},
+	{Class{"account-db", model.SevMedium, true}, []string{"/etc/{passwd,group}"}},
+	// Password hashes are compared by digest only, never copied into a baseline.
+	{Class{"account-db", model.SevMedium, false}, []string{"/etc/{shadow,gshadow}"}},
 	{Class{"system-binary", model.SevHigh, false}, []string{"/usr/{bin,sbin,lib,lib64,libexec,local/bin,local/sbin}/**", "/opt/**"}},
 }
 
-var fallback = Class{"file", model.SevMedium, false}
+// Fallback is the category of a path no rule names.
+const Fallback = "file"
+
+var fallback = Class{Fallback, model.SevMedium, false}
 
 type compiled struct {
 	class    Class
-	patterns []string
+	patterns [][]string // each pattern split into segments
 }
 
 var table = compile()
@@ -56,9 +66,11 @@ var table = compile()
 func compile() []compiled {
 	out := make([]compiled, 0, len(rules))
 	for _, r := range rules {
-		var ps []string
+		var ps [][]string
 		for _, p := range r.patterns {
-			ps = append(ps, Expand(p)...)
+			for _, e := range Expand(p) {
+				ps = append(ps, strings.Split(e, "/"))
+			}
 		}
 		out = append(out, compiled{r.class, ps})
 	}
@@ -67,9 +79,10 @@ func compile() []compiled {
 
 // Path classifies a decoded absolute path. The first matching rule wins.
 func Path(p string) Class {
+	segs := strings.Split(p, "/")
 	for _, c := range table {
 		for _, pat := range c.patterns {
-			if Match(pat, p) {
+			if matchSegs(pat, segs) {
 				return c.class
 			}
 		}
@@ -121,8 +134,9 @@ func splitTop(s string) []string {
 	return append(parts, s[start:])
 }
 
-// Match reports whether p matches pattern. Segments use path.Match syntax;
-// a "**" segment matches one or more whole segments.
+// Match reports whether p matches pattern. Segments use path.Match syntax.
+// A "**" segment matches one or more whole segments; as the last segment it
+// also matches none, so "/etc/cron.d/**" covers the directory itself.
 func Match(pattern, p string) bool {
 	return matchSegs(strings.Split(pattern, "/"), strings.Split(p, "/"))
 }
@@ -131,6 +145,9 @@ func matchSegs(pat, segs []string) bool {
 	for len(pat) > 0 {
 		if pat[0] == "**" {
 			rest := pat[1:]
+			if len(rest) == 0 {
+				return true
+			}
 			for i := 1; i <= len(segs); i++ {
 				if matchSegs(rest, segs[i:]) {
 					return true

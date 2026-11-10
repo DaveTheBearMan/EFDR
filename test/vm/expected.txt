@@ -9,3 +9,5 @@ added	pkg-hook	/etc/apt/apt.conf.d/99update
 mail	/etc/aliases
 altered	sshd	/etc/ssh/sshd_config
 altered	privilege	/usr/bin/python3.12
+altered	privilege	/usr/bin/tree	sha256, gained setuid
+added	system-binary	/opt/.p	new dir

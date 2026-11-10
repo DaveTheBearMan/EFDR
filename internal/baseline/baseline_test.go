@@ -46,3 +46,45 @@ func TestCompose_LaterWins(t *testing.T) {
 		t.Fatal("Compose mutated its input")
 	}
 }
+
+// A package-layer entry knows a file's content and packaged mode, nothing
+// else. Laid over a full entry it must update those and keep the rest, or
+// the package layer would erase what the base image knows.
+func TestCompose_HashOnlyMergesIntoFullEntry(t *testing.T) {
+	base := &Baseline{Files: map[string]FileEntry{
+		"/usr/bin/x": {Type: TypeFile, Mode: 0o755, UID: 0, GID: 4, Caps: "01", SHA256: "1", Content: []byte("old")},
+	}}
+	pkg := &Baseline{Files: map[string]FileEntry{
+		"/usr/bin/x": {Type: TypeFile, Mode: 0o700, SHA256: "2", HashOnly: true, Layer: LayerPackage},
+	}}
+	got := Compose(base, pkg).Files["/usr/bin/x"]
+	want := FileEntry{Type: TypeFile, Mode: 0o700, UID: 0, GID: 4, Caps: "01", SHA256: "2", Layer: LayerPackage}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestCompose_HashOnlyDirNeverReplacesFullEntry(t *testing.T) {
+	dir := FileEntry{Type: TypeDir, Mode: 0o755, UID: 0, GID: 0}
+	base := &Baseline{Files: map[string]FileEntry{"/etc/cron.d": dir}}
+	pkg := &Baseline{Files: map[string]FileEntry{
+		"/etc/cron.d": {Type: TypeDir, Mode: 0o777, HashOnly: true, Layer: LayerPackage},
+		"/etc/new.d":  {Type: TypeDir, Mode: 0o755, HashOnly: true, Layer: LayerPackage},
+	}}
+	got := Compose(base, pkg)
+	if !reflect.DeepEqual(got.Files["/etc/cron.d"], dir) {
+		t.Fatalf("got %+v", got.Files["/etc/cron.d"])
+	}
+	if !got.Files["/etc/new.d"].HashOnly {
+		t.Fatal("a directory only the package ships is still added")
+	}
+}
+
+func TestCompose_HashOnlyTypeChangeReplaces(t *testing.T) {
+	base := &Baseline{Files: map[string]FileEntry{"/usr/bin/x": {Type: TypeFile, Mode: 0o755, SHA256: "1"}}}
+	link := FileEntry{Type: TypeLink, Link: "y", HashOnly: true, Layer: LayerPackage}
+	pkg := &Baseline{Files: map[string]FileEntry{"/usr/bin/x": link}}
+	if got := Compose(base, pkg).Files["/usr/bin/x"]; !reflect.DeepEqual(got, link) {
+		t.Fatalf("got %+v", got)
+	}
+}

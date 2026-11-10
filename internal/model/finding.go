@@ -10,6 +10,7 @@ const (
 	KindAdded   Kind = "added"
 	KindAltered Kind = "altered"
 	KindRemoved Kind = "removed"
+	KindError   Kind = "error" // could not be read, so could not be compared
 )
 
 // Severity orders findings from informational to critical.
