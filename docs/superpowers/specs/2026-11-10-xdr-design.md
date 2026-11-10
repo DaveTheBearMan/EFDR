@@ -40,6 +40,25 @@ It only has to work once, for one competition, on a known OS. That justifies har
 - Operator works from a desktop (primary) / laptop / phone, connecting to the control plane.
 - Deployment: Ansible during the setup window; nothing built live.
 
+## 3a. Competition environment (from the packet, 2026-11-10)
+
+Hostnames are placeholders and the mail server's network is not final, so nothing below is compiled in: it is deployment config, keyed by team number.
+
+| Host | OS | IP | Scored service | XDR |
+|------|----|----|----------------|-----|
+| SecurityBlanket | Windows Server 2022 | 192.168.N.1 | AD, DNS | out of scope |
+| PsychiatricBooth | Windows Server 2022 | 192.168.N.2 | IIS | out of scope |
+| KiteTree | Ubuntu 24.04 | 192.168.N.3 | MySQL | agent |
+| ToyPiano | Ubuntu 24.04 | 192.168.N.4 | SMTP | agent |
+| Doghouse | Ubuntu 24.04 | 192.168.N.5 | Apache (Docker) | agent |
+
+- One flat /24 per team (`192.168.N.0/24`, N = team number; team 1 shown in the packet), gateway `.254` (OpenStack router). Domain `TEAMN.PEANUTS.LOCAL`. **No separate management interface.**
+- The scoring engine and the red team's attack boxes **share one subnet** outside ours. A source address therefore never proves "this is the scorer": scored ports stay open to that subnet, and every other control has to work without source-based trust.
+- The two Windows boxes sit on our subnet and are not covered by this tool. Treat them as untrusted neighbours: a compromised Windows box is an attacker inside the /24. Nothing is allowed from `.1`/`.2` to the Linux boxes beyond what a scored service needs, and DNS replies from `.1`.
+- DNS for the team is the AD box (`.1`). If a Linux box needs DNS at all, `.1` is the only resolver it may talk to.
+- **Gray team accounts — never touched:** `grayteam`, `othergrayteam`, `violetgray`. No credential or key rotation, no disable, no session kill, no home-directory cleanup. Activity on them is alert-only (§7.3).
+- Blue team accounts, identical on every box, all starting on one shared default password: admins (in `sudo`) `charliebrown`, `lucyvanpelt`, `linusvanpelt`, `peppermintpatty`, `marcie`; normal local users `snoopy`, `woodstock`, `sallybrown`, `schroeder`, `pigpen`. On Linux these are local accounts.
+
 ## 4. Architecture
 
 **Language / build (decided):** Go. One static binary (`CGO_ENABLED=0`), role chosen by subcommand/flag:
@@ -55,7 +74,7 @@ It only has to work once, for one competition, on a known OS. That justifies har
 
 **Jump box is out of red team scope (decided by operator):** it is the trust anchor — signing key, authoritative state, off-box baseline.
 
-**State:** etcd, single node on the jump box *(builder's call: since the jump box is out of scope, no etcd members on red-team-rooted hosts)*, reached over the management interface, authenticated with per-node client certs and RBAC (a node can write only its own keys and read shared rules). Shared state: rules, incidents, approvals, heartbeats, session approvals. Agents keep enforcing with last-known state (cached locally) if etcd is unreachable.
+**State:** etcd, single node on the jump box *(builder's call: since the jump box is out of scope, no etcd members on red-team-rooted hosts)*, reached over the team subnet (or wherever the jump box sits, §13), authenticated with per-node client certs and RBAC (a node can write only its own keys and read shared rules). Shared state: rules, incidents, approvals, heartbeats, session approvals. Agents keep enforcing with last-known state (cached locally) if etcd is unreachable.
 
 **Rule promotion (builder's call):** agents write *proposed* rules under their own keys. The controller validates each one and promotes it to the shared rule set automatically — no human in the loop — so fleet-wide kill stays fast. Validation rejects any rule that would:
 - match a baseline binary by hash (bash, python3, perl, nc, etc. are only targeted via narrower patterns: parent→child, cmdline, remote endpoint, specific cron entry/unit);
@@ -65,7 +84,7 @@ Non-baseline binary hashes, remote IPs and parent→child patterns are promoted.
 
 **Fleet communication (decided: boxes must learn about problems on other boxes immediately):**
 - **Primary channel:** agents hold etcd *watches* (push, not polling), so new rules, incidents and hunt requests reach every box in well under a second.
-- **Backup channel:** agents also form a direct peer mesh over the management interface (mTLS, per-node certs). They relay signed rules and hunt requests to each other. If the jump box or etcd is unreachable, boxes keep sharing. A compromised peer can't forge rules because it lacks the signing key.
+- **Backup channel:** agents also form a direct peer mesh over the team subnet (mTLS, per-node certs). They relay signed rules and hunt requests to each other. If the jump box or etcd is unreachable, boxes keep sharing. A compromised peer can't forge rules because it lacks the signing key.
 - **Heartbeats** go over both channels, so a dead or silenced agent is noticed by its peers and by the controller.
 
 **Trust model:**
@@ -137,7 +156,7 @@ Any process bound to a scored service's port (80/443, 25, 3306 — exact list fr
 - logind terminate-session after a short grace window unless approved; fail-closed.
 - Platform-launched sessions auto-approve; manual sessions approved in the console or via the break-glass/escape command.
 - Exempt: agent account and recovery account. *(Builder's call:)* because there's no console access, the recovery account is the only way back in when the jump box or etcd is down, and it's the red team's best target. So it is:
-  - accepted only from the jump box/operator IPs, on the management interface;
+  - accepted only from the jump box/operator IPs (there is no management interface, §3a);
   - key-only, with the key held off-box;
   - excluded from the "new user" and "non-baseline session" rules;
   - alerted on every login.
@@ -145,6 +164,7 @@ Any process bound to a scored service's port (80/443, 25, 3306 — exact list fr
   It's also enforced at the sshd level (`Match` block) and in our nftables table, so it doesn't depend on the agent.
 - Agent re-asserts the known-good `/etc/pam.d/sshd` and `sshd_config` on drift.
 - Auto-disable sessions whose user isn't in baseline.
+- **Gray team accounts (§3a) are outside the gate.** Their sessions are never terminated and never need approval; each login raises an alert with source address and the session's process tree stays under the normal network/process detections (a reverse shell started from a gray session is still killed — that is a red-team tool on our box, not the account). The gate reads the protected-account list from signed config, not from `/etc/passwd`, so adding a user named like one doesn't earn the exemption, and a protected name with a changed UID or a UID of 0 is a critical alert.
 
 ### 7.4 Other response
 - New users disabled until approved.
@@ -155,10 +175,11 @@ Any process bound to a scored service's port (80/443, 25, 3306 — exact list fr
 
 ## 8. Hardening and firewall
 
-- SSH keys-only, password auth disabled. Rotate creds and replace all `authorized_keys` at T-0; regenerate host keys. **Do not rotate credentials the scorer uses** without checking the rules.
-- Bind sshd to the management interface if topology allows.
+- SSH keys-only, password auth disabled, for the ten blue-team accounts and root. Rotate their creds (they all start on one shared default password, so this is the first action at T-0) and replace their `authorized_keys`; regenerate host keys. **Do not rotate credentials the scorer uses** without checking the rules.
+- Gray team accounts keep whatever they had: password, keys, shell, sudo rights, and the authentication methods sshd offered them at T-0 (a `Match User` block preserves those while the global default tightens). T-0 tooling refuses to act on a protected account even if asked.
+- No management interface exists (§3a). sshd listens on the one interface; `AllowUsers` pins blue-team and recovery accounts to the jump box address and leaves gray accounts reachable from the gray subnet.
 - nftables: our own table with base chains on input, output and forward hooks.
-  - Inbound: scored ports, SSH from blue-team/jump-box addresses, XDR on the mgmt interface.
+  - Inbound: scored ports from anywhere; SSH from the jump box, and from the gray/red subnet because gray team shares it with the attackers (sshd's `AllowUsers` is what narrows that to gray accounts); XDR from the jump box and the other two agents only.
   - Outbound: established/related only, plus XDR peers/etcd/controller.
   - Forward (Docker): same egress policy for the container. Because a drop in any nf_tables chain is final, Docker's own accept rules can't override ours.
   - Default-deny, inverted workflow: scored services allowed first, additions approved in the console.
@@ -183,13 +204,13 @@ Fleet communication must always be recoverable. When a host notices it is cut of
 **Detecting isolation:** heartbeats are missing from the controller *and* all peers for a short window (e.g. 10s), or etcd and the mesh both fail to connect. Losing a single peer is just a peer alert. Isolation means losing everyone.
 
 **Reconnect ladder.** Each step runs, then the agent re-tests connectivity. It stops at the first success:
-1. Re-assert our nftables table and its allow rules for the management interface, fleet peers and the jump box.
+1. Re-assert our nftables table and its allow rules for fleet peers and the jump box.
 2. Find and remove anything local that blocks fleet traffic:
    - foreign nftables tables/chains, iptables-legacy rules and `ip6tables` rules that drop or reject fleet addresses or ports;
    - `ip rule`/route blackholes, `tc` filters, `/etc/hosts.deny`.
 
    Each removal is logged as a tamper incident.
-3. Restore the management interface: link up, baseline address, routes. Undo `ip link set down` and changed addresses.
+3. Restore the network interface: link up, baseline address, routes. Undo `ip link set down` and changed addresses.
 4. Restore the known-good `sshd_config` and its listen address, then restart sshd (and `ssh.socket`) so the controller can get in.
 5. Restart the agent's mesh/etcd clients. Re-open the agent's management listener, moving to pre-agreed alternate ports if the primary port is taken.
 6. **Call home.** The agent dials *out* to the jump box on several pre-agreed ports and holds a reverse control channel open. Outbound to the jump box is always allowed in our table, so control is regained even when inbound is blocked.
@@ -197,7 +218,7 @@ Fleet communication must always be recoverable. When a host notices it is cut of
 
 **Guardrails:**
 - The ladder never touches scored-service ports or rules.
-- It only opens access to the jump box, fleet peers and the management interface, never broad egress.
+- It only opens access to the jump box, and fleet peers, never broad egress.
 - It never reboots the host by default, since that drops scoring. A reboot step exists only as an opt-in for after a long isolation.
 
 While isolated, the agent keeps enforcing locally from last-known signed rules. Once it reconnects, it reports what had blocked it and what it changed, and the console shows that as a tamper incident on that host.
@@ -226,7 +247,7 @@ Web UI served by the controller on the jump box. Primary use on desktop; must al
 ## 13. Open items
 
 - **Apache container:** rebuild from a clean pinned image we pre-stage (leaning this way) vs. keep theirs and baseline the docroot/image. Either way: docroot diff, image/restart-policy inspect, container egress under our forward chain.
-- Competition specifics to fill in when known: number and names of boxes, scored ports, whether a separate management interface exists, which accounts the scorer uses. (Kernel/point release comes from the base image we have.)
+- Still unknown from the packet: where the jump box sits (address and subnet — it decides the SSH and etcd allow rules), the scored ports and whether the scorer logs in to any service with one of the listed accounts (rotating that account's password would then fail the check), whether the mail server moves to another network, and whether the Linux boxes need DNS or are domain-joined.
 - Whether eBPF signal-blocking is available on the competition kernel (§9).
 
 ## 14. Left to the builder
