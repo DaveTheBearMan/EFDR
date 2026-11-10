@@ -128,6 +128,11 @@ We have the competition's **exact base image** (without scored services) and a *
 - **Raw sockets:** processes holding `AF_PACKET`/`SOCK_RAW` sockets or attached socket BPF filters (rare on a stock server → high-signal).
 - **Listeners:** any listener not in baseline; `docker-proxy` and scored ports allowlisted.
 - **Container:** process and network events inside the Apache container are watched the same way (cgroup-aware).
+- *(Builder's calls, plan 2:)*
+  - Hooked: exec, connect, sendmsg and socket creation. `accept` and `bind` are not hooked: listeners and accepted connections come from the socket tables, read by a 1 s sweep of `/proc` that also sees what existed before the agent started. Without eBPF the agent falls back to the netlink proc connector (exec only) and then to the sweep alone, and says which it runs.
+  - An unknown listener or raw socket held by an unmodified baseline binary is **alert-only**; the firewall still blocks the port. Holders that are not baseline, or are shells, interpreters or net tools, are killed. `xdr listeners` prints the current listeners in the config's format so known ones can be listed. Loopback listeners are low-severity alerts. Only `AF_PACKET` and IPv4/IPv6 `SOCK_RAW` sockets count as raw (netlink sockets are `SOCK_RAW` too). A classic BPF filter on an ordinary TCP/UDP socket is not detected.
+  - *Service shell:* a shell or net tool whose ancestors, walked up from its parent, reach a guarded process (one in `guard_exes`, or holding a listener on a scored port) that holds a listening socket, before reaching pid 1, a kernel thread or another shell or net tool. `sshd` is never the service (with socket activation pid 1 holds port 22), and a shell under a shell is judged by its parent, not reported again. Legitimate CGI or `system()` shells of a web server die too; `"kill": false` is the switch for a first run.
+  - A listening UDP socket is any bound UDP socket with no peer; a listener is "known" when any process holding it matches a `listeners` entry (port, protocol and executable) or is `docker-proxy`.
 
 ### 6.2 "Added" (baseline diff)
 - systemd services and timers (system and per-user `~/.config/systemd/user`), systemd generators.
@@ -203,6 +208,16 @@ Any process bound to a scored service's port (80/443, 25, 3306 — exact list fr
 - Postfix: disable reverse lookups (`smtpd_peername_lookup = no`) and anything else needing DNS; the container gets the same static hosts file — so the default (DNS off) holds for all three scored services.
 - **Password rotation.** The controller generates each new password on the jump box and sends the agent only its hash (`chpasswd -e`); for service accounts (MySQL users and the like) where the service needs the cleartext, it is sent over the agent's mTLS channel and not stored on the target beyond what the service itself keeps. Cleartext lives in the controller's local store on the jump box, never in etcd where a rooted agent could read it. Gray accounts are refused (§3a).
 - Agent re-applies the ruleset on a short loop and alerts on drift.
+- *(Builder's calls, plan 2:)*
+  - **The DNS stub always runs**, also with the switch off. `resolv.conf` points at it and it answers NXDOMAIN at once, so a scored service that does its own lookups fails fast instead of waiting on a dropped packet, and every name asked is logged with the asking process. With the switch on it forwards only allowed names. A refusal is NXDOMAIN, not REFUSED, so callers do not retry. The stub is UDP only.
+  - "Only the agent may send to port 53" is a socket mark (`0x58445201`) on the stub's upstream socket. Root can forge the mark; the destination is still pinned to the team resolver.
+  - **Established is not a free pass.** Only the reply direction of a tracked connection is accepted without a rule (a mirror of each allow rule); the original direction must match an allow rule on every packet. A reverse shell open before the table loads is cut; an in-flight scored or SSH session survives.
+  - Outbound ping is dropped (ICMP tunnels); inbound echo is answered. DHCP client traffic is allowed unless `dhcp` is false.
+  - Drift is checked by reading the table back over netlink and comparing it byte for byte with what was written; any difference is re-applied and logged.
+  - `xdr fw try` applies the table and removes it again unless `xdr fw confirm` runs within the timeout: there is no console to recover a wrong jump-box address. A config with no `jump` address is refused.
+  - `"kill": false` in the config turns every kill into a logged `would-kill`.
+  - Host-to-container traffic is egress like any other: a host process talking to a container address needs an `allow_out` entry for the bridge subnet. On a Docker host with `br_netfilter` loaded, container-to-container traffic on one bridge is expected to pass the forward chain too and be dropped unless `allow_out` covers it (not yet measured; plan 2's VM has no Docker).
+  - The agent never removes the table on exit; only `xdr fw remove` does. With the agent dead, the table keeps dropping.
 
 ## 9. Self-protection
 

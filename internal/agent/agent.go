@@ -86,6 +86,7 @@ type agent struct {
 	logf  func(string, ...any)
 
 	applied string // the ruleset last applied, as text
+	pinned  string // the config and DNS switch the files were last asserted for
 	snap    *proc.Snapshot
 	snapAt  time.Time
 	askers  map[int]*asker
@@ -226,7 +227,14 @@ func (a *agent) assert(report bool) {
 			drift("repaired", "table inet xdr was changed")
 		}
 	}
+	// A reload or the switch going on or off changes the files the
+	// config calls for: writing them then is not a repair.
+	pinned := fmt.Sprintf("%p %v", a.cfg, a.cfg.DNSOn(now))
+	report = report && pinned == a.pinned
 	changed, err := dnsguard.Assert(a.root, a.cfg, now)
+	if err == nil {
+		a.pinned = pinned
+	}
 	for _, path := range changed {
 		if report {
 			a.record(incident.Incident{Kind: "dns-files", Action: "repaired", Severity: model.SevMedium, Detail: path})
@@ -239,10 +247,11 @@ func (a *agent) assert(report bool) {
 	}
 }
 
-// fresh returns a snapshot no older than snapMaxAge, or the last one when
-// proc cannot be read. The caller holds mu.
-func (a *agent) fresh(now time.Time) *proc.Snapshot {
-	if a.snap == nil || now.Sub(a.snapAt) > snapMaxAge {
+// fresh reads proc again unless the last snapshot is younger than
+// snapMaxAge. It returns the last snapshot when proc cannot be read. The
+// caller holds mu.
+func (a *agent) fresh(now time.Time, force bool) *proc.Snapshot {
+	if force || a.snap == nil || now.Sub(a.snapAt) > snapMaxAge {
 		if s, err := a.read(); err == nil {
 			a.snap, a.snapAt = s, now
 		}
@@ -256,10 +265,16 @@ func (a *agent) onQuery(q dnsguard.Query) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	s := a.fresh(now)
 	var owner *proc.Proc
+	s := a.fresh(now, false)
 	if s != nil {
 		owner = s.UDPOwner(a.netns, q.Client.Port())
+	}
+	if owner == nil && a.snapAt != now {
+		// The asker's socket may be younger than the snapshot.
+		if s = a.fresh(now, true); s != nil {
+			owner = s.UDPOwner(a.netns, q.Client.Port())
+		}
 	}
 	pid := 0
 	if owner != nil {

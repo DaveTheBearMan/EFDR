@@ -569,3 +569,47 @@ func TestGrayUIDs(t *testing.T) {
 		t.Fatalf("users %v gray %v", users, gray)
 	}
 }
+
+// The DNS switch going on or off rewrites nsswitch: that is the agent's
+// own change, not a repair.
+func TestGuard_DNSSwitchIsNotARepair(t *testing.T) {
+	r := newRig(t)
+	r.a.assert(false)
+	on := *r.a.cfg
+	on.DNS.Resolver = netip.MustParseAddr("192.0.2.53")
+	on.DNS.Enabled = true
+	on.DNS.Expires = r.now.Add(time.Hour)
+	r.a.setConfig(&on)
+	r.a.guard()
+	if b, _ := os.ReadFile(filepath.Join(r.root, "etc/nsswitch.conf")); !strings.Contains(string(b), "files dns") {
+		t.Fatalf("nsswitch not switched on: %q", b)
+	}
+	r.now = r.now.Add(time.Hour + time.Second)
+	r.a.guard()
+	if b, _ := os.ReadFile(filepath.Join(r.root, "etc/nsswitch.conf")); strings.Contains(string(b), "files dns") {
+		t.Fatalf("nsswitch not switched off: %q", b)
+	}
+	if got := r.kind("dns-files"); len(got) != 0 {
+		t.Fatalf("the switch reported as repairs: %+v", got)
+	}
+	// The next change is someone else's.
+	os.WriteFile(filepath.Join(r.root, "etc/nsswitch.conf"), []byte("hosts: files dns\n"), 0o644)
+	r.a.guard()
+	if got := r.kind("dns-files"); len(got) != 1 || got[0].Detail != "/etc/nsswitch.conf" {
+		t.Fatalf("incidents = %+v", r.got)
+	}
+}
+
+// A process that opened its socket after the cached snapshot is found by
+// reading proc again.
+func TestOnQuery_NewAskerRereads(t *testing.T) {
+	r := newRig(t)
+	r.snap = tree()
+	r.a.sweep()
+	r.snap = asking(555, 40001)
+	r.now = r.now.Add(50 * time.Millisecond)
+	r.a.onQuery(query("c2.example.net", 40001, false))
+	if len(r.got) != 1 || r.got[0].PID != 555 {
+		t.Fatalf("incidents = %+v", r.got)
+	}
+}
