@@ -1,0 +1,35 @@
+{
+  "host": "web01",
+  "jump": ["192.0.2.7"],
+  "peers": ["192.0.2.4", "192.0.2.6"],
+  "ssh_from": ["198.51.100.0/25"],
+  "ssh_port": 22,
+  "xdr_ports": [7443],
+  "scored": [
+    {"proto": "tcp", "port": 80},
+    {"proto": "tcp", "port": 443}
+  ],
+  "allow_out": [
+    {"to": "192.0.2.6", "proto": "tcp", "port": 3306},
+    {"to": "198.51.100.128/25", "proto": "tcp", "port": 80}
+  ],
+  "guard_exes": ["/usr/sbin/apache2", "/usr/bin/dockerd", "/usr/bin/containerd-shim-runc-v2"],
+  "listeners": [
+    {"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"},
+    {"proto": "udp", "port": 68, "exe": "/usr/lib/systemd/systemd-networkd"}
+  ],
+  "gray_users": ["gray1"],
+  "dhcp": true,
+  "kill": true,
+  "dns": {
+    "resolver": "192.0.2.1",
+    "enabled": false,
+    "allow": [],
+    "hosts": {
+      "web01": "192.0.2.5",
+      "db01": "192.0.2.6",
+      "mail01": "192.0.2.4"
+    },
+    "listen": "127.0.0.1:53"
+  }
+}
