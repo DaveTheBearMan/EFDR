@@ -18,6 +18,9 @@ import (
 // Diff returns every difference between base and live, most severe first.
 func Diff(base, live *baseline.Baseline) []model.Finding {
 	out := diffFiles(base.Files, live.Files)
+	out = append(out, diffAccounts(base.Accounts, live.Accounts)...)
+	out = append(out, diffGroups(base.Groups, live.Groups)...)
+	out = append(out, diffModules(base.Modules, live.Modules)...)
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Severity != out[j].Severity {
 			return out[i].Severity > out[j].Severity
