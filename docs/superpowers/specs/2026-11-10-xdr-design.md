@@ -55,7 +55,9 @@ Hostnames are placeholders and the mail server's network is not final, so nothin
 - One flat /24 per team (`192.168.N.0/24`, N = team number; team 1 shown in the packet), gateway `.254` (OpenStack router). Domain `TEAMN.PEANUTS.LOCAL`. **No separate management interface.**
 - The scoring engine and the red team's attack boxes **share one subnet** outside ours. A source address therefore never proves "this is the scorer": scored ports stay open to that subnet, and every other control has to work without source-based trust.
 - The two Windows boxes sit on our subnet and are not covered by this tool. Treat them as untrusted neighbours: a compromised Windows box is an attacker inside the /24. Nothing is allowed from `.1`/`.2` to the Linux boxes beyond what a scored service needs, and DNS replies from `.1`.
-- DNS for the team is the AD box (`.1`). If a Linux box needs DNS at all, `.1` is the only resolver it may talk to.
+- DNS for the team is the AD box (`.1`). The Linux boxes do not use it by default (§8 DNS); when the switch is on, `.1` is the only resolver they may talk to.
+- **Jump box placement is not known in advance:** it may be on the team subnet or on an attached network. Either way it is out of the red team's scope. Its address(es) are therefore deployment config set at T-0, never a compiled-in value or a subnet assumption, and every rule that names "the jump box" (SSH, etcd, mesh, call-home) is generated from that config. If it is on an attached network, agents reach it through the gateway and the egress allow is that one address and port.
+- **Rotated passwords can be handed to the scoring engine** (operator decision, 2026-11-10), so nothing blocks rotating every blue-team and service credential at T-0. The console has to make that hand-off a copy-paste (§11).
 - **Gray team accounts — never touched:** `grayteam`, `othergrayteam`, `violetgray`. No credential or key rotation, no disable, no session kill, no home-directory cleanup. Activity on them is alert-only (§7.3).
 - Blue team accounts, identical on every box, all starting on one shared default password: admins (in `sudo`) `charliebrown`, `lucyvanpelt`, `linusvanpelt`, `peppermintpatty`, `marcie`; normal local users `snoopy`, `woodstock`, `sallybrown`, `schroeder`, `pigpen`. On Linux these are local accounts.
 
@@ -111,7 +113,7 @@ We have the competition's **exact base image** (without scored services) and a *
 - eBPF hooks on exec, connect, accept, bind, socket creation; every event attributed to pid, binary path + hash, uid, parent chain, container (cgroup), and origin (unit, cron, SSH session, web request).
 - **Reverse shell:** shell/interpreter whose stdio fds are sockets, or a shell spawned by a network service (apache, mysqld, postfix children), or any new outbound connection to a non-allowlisted address.
 - **Egress attempt:** any outbound connect not in the allowlist (dropped by nftables; eBPF supplies the process attribution). *(Builder's call:)* hardening first disables stock services that phone home (snapd, motd-news, apt-daily timers, ubuntu-advantage/pro, timesyncd unless NTP is needed, Docker's update/registry pulls), and that disabled state is part of the baseline. A blocked attempt by a remaining baseline process is **alert-only**; kill applies to non-baseline processes, shells/interpreters, and anything matching a rule.
-- **DNS:** outbound DNS is blocked entirely. Any lookup attempt is an alert; high-entropy/long subdomains and bursts are scored higher.
+- **DNS:** outbound DNS is blocked by default (§8 DNS). Any lookup attempt while blocked is an alert; high-entropy/long subdomains and bursts are scored higher. With the DNS switch on, the same scoring runs on every query to the resolver and a query for a name outside the allowed list is an alert naming the process.
 - **Raw sockets:** processes holding `AF_PACKET`/`SOCK_RAW` sockets or attached socket BPF filters (rare on a stock server → high-signal).
 - **Listeners:** any listener not in baseline; `docker-proxy` and scored ports allowlisted.
 - **Container:** process and network events inside the Apache container are watched the same way (cgroup-aware).
@@ -183,7 +185,12 @@ Any process bound to a scored service's port (80/443, 25, 3306 — exact list fr
   - Outbound: established/related only, plus XDR peers/etcd/controller.
   - Forward (Docker): same egress policy for the container. Because a drop in any nf_tables chain is final, Docker's own accept rules can't override ours.
   - Default-deny, inverted workflow: scored services allowed first, additions approved in the console.
-- Postfix: disable reverse lookups (`smtpd_peername_lookup = no`) and anything else needing DNS; container gets a static hosts file — so DNS can stay fully blocked.
+- **DNS (decided 2026-11-10): off, with a switch.**
+  - *Default — hard-coded names.* No DNS leaves the box. The few names a box really needs (its own, the other team hosts, the domain, anything a scored service resolves) are written into `/etc/hosts` from signed config, `nsswitch.conf` is pinned to `files` for hosts, and the agent re-asserts both on drift. A DNS-tunnelling C2 has no resolver to talk through.
+  - *Switch on, per host, from the console.* Port 53 opens to the team resolver (`.1`) only, and only for names on an allowed list held in signed config: the agent answers allowed names itself from a local stub and forwards nothing else, so arbitrary subdomains never reach a resolver the red team can read. Turning it on is an operator action, shows on the host card, and can carry an expiry so it doesn't stay open by accident.
+  - Either way a query to any other server, or DNS over TCP/TLS/HTTPS to an outside address, is dropped by the egress policy and alerted.
+- Postfix: disable reverse lookups (`smtpd_peername_lookup = no`) and anything else needing DNS; the container gets the same static hosts file — so the default (DNS off) holds for all three scored services.
+- **Password rotation.** The controller generates each new password on the jump box and sends the agent only its hash (`chpasswd -e`); for service accounts (MySQL users and the like) where the service needs the cleartext, it is sent over the agent's mTLS channel and not stored on the target beyond what the service itself keeps. Cleartext lives in the controller's local store on the jump box, never in etcd where a rooted agent could read it. Gray accounts are refused (§3a).
 - Agent re-applies the ruleset on a short loop and alerts on drift.
 
 ## 9. Self-protection
@@ -238,7 +245,8 @@ Web UI served by the controller on the jump box. Primary use on desktop; must al
 - **Alerts:** auto-handled incidents with process chain, endpoint, hash, origin, and a checklist of actions taken (killed / rule written / pushed / pending).
 - **Approvals:** gated items (scored-port process, file/persistence removal with dry-run + undo, new users).
 - **SSH sessions:** pending sessions with countdown, approve / kill; session list.
-- **Hosts:** agent / firewall / baseline-drift / heartbeat per box; break-glass control.
+- **Hosts:** agent / firewall / baseline-drift / heartbeat per box; break-glass control; the DNS switch with its state and expiry.
+- **Credentials:** every rotated password, by host and account, each with a copy button, plus one "copy all" that produces a block to paste to the scoring engine (host, service, account, password). Values are masked until revealed or copied, show when they were last rotated, and a rotate-again action lives beside each. Copy must work on the phone as well as the desktop. Served only to the authenticated operator, from the jump box's local store.
 
 ## 12. Cut / demoted
 
@@ -247,7 +255,7 @@ Web UI served by the controller on the jump box. Primary use on desktop; must al
 ## 13. Open items
 
 - **Apache container:** rebuild from a clean pinned image we pre-stage (leaning this way) vs. keep theirs and baseline the docroot/image. Either way: docroot diff, image/restart-policy inspect, container egress under our forward chain.
-- Still unknown from the packet: where the jump box sits (address and subnet — it decides the SSH and etcd allow rules), the scored ports and whether the scorer logs in to any service with one of the listed accounts (rotating that account's password would then fail the check), whether the mail server moves to another network, and whether the Linux boxes need DNS or are domain-joined.
+- Still unknown from the packet: the scored ports, which names each scored service needs resolved (they go in the hard-coded hosts list), and whether the mail server moves to another network. Jump box placement stays unknown until the day and is handled as config (§3a).
 - Whether eBPF signal-blocking is available on the competition kernel (§9).
 
 ## 14. Left to the builder
