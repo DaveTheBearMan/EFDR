@@ -1,7 +1,10 @@
 // Package model holds types shared across xdr components.
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Kind is how a finding differs from the baseline.
 type Kind string
@@ -35,6 +38,21 @@ func (s Severity) String() string {
 
 // MarshalJSON encodes the severity as its name.
 func (s Severity) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
+
+// UnmarshalJSON decodes a severity from its name.
+func (s *Severity) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err != nil {
+		return err
+	}
+	for i, n := range sevNames {
+		if n == name {
+			*s = Severity(i)
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown severity %q", name)
+}
 
 // Finding is one difference between a baseline and a live snapshot.
 type Finding struct {

@@ -4,12 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"xdr/internal/config"
 	"xdr/internal/fw"
+	"xdr/internal/incident"
 )
 
 // fwConfirm is the file `fw confirm` writes and `fw try` waits for.
@@ -86,4 +90,57 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	fmt.Fprintln(stdout, "reverted")
 	return 1, nil
+}
+
+// defaultIncidents is where the agent keeps its incident log.
+const defaultIncidents = "/var/lib/xdr/incidents.jsonl"
+
+func incidentsCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("incidents", stderr)
+	path := fs.String("file", defaultIncidents, "incident log")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	f, err := os.Open(*path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // nothing has happened yet
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	incidents, err := incident.Read(f)
+	printIncidents(stdout, incidents)
+	return err
+}
+
+// printIncidents writes one line per incident:
+//
+//	TIME SEV kind action pid=N exe → addr:port detail
+//
+// Everything in an incident came from the watched host, so every field is
+// escaped.
+func printIncidents(w io.Writer, incidents []incident.Incident) {
+	for _, in := range incidents {
+		fields := []string{
+			in.Time.UTC().Format(time.RFC3339),
+			strings.ToUpper(in.Severity.String()),
+			printable(in.Kind, false),
+			printable(in.Action, false),
+			fmt.Sprintf("pid=%d", in.PID),
+		}
+		if in.Exe != "" {
+			fields = append(fields, printable(in.Exe, false))
+		}
+		if in.Remote != nil {
+			fields = append(fields, "→", printable(net.JoinHostPort(in.Remote.Addr, strconv.Itoa(int(in.Remote.Port))), false))
+		}
+		if in.Detail != "" {
+			fields = append(fields, printable(in.Detail, false))
+		}
+		if in.Count > 1 {
+			fields = append(fields, fmt.Sprintf("(x%d)", in.Count))
+		}
+		fmt.Fprintln(w, strings.Join(fields, " "))
+	}
 }

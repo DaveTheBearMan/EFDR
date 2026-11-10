@@ -34,6 +34,7 @@ commands:
   pkglist   list installed packages: pkglist --root DIR
   pkghash   package layer from debs: pkghash --debs DIR --out FILE
   fw        host firewall:          fw print|apply|try|confirm|remove --config FILE
+  incidents print the incident log: incidents [--file PATH]
   version   print the xdr version
 `
 
@@ -62,6 +63,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = pkghash(rest, stderr)
 	case "fw":
 		code, err = fwCmd(rest, stdout, stderr)
+	case "incidents":
+		err = incidentsCmd(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s", cmd, usage)
 		return 2
