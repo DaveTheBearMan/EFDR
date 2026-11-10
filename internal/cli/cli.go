@@ -35,6 +35,8 @@ commands:
   pkghash   package layer from debs: pkghash --debs DIR --out FILE
   fw        host firewall:          fw print|apply|try|confirm|remove --config FILE
   incidents print the incident log: incidents [--file PATH]
+  agent     watch and respond:      agent --config FILE [--baseline FILE]... [--sensor auto|ebpf|proc|none] [--log PATH]
+  listeners listeners, for config:  listeners [--config FILE]
   version   print the xdr version
 `
 
@@ -65,6 +67,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		code, err = fwCmd(rest, stdout, stderr)
 	case "incidents":
 		err = incidentsCmd(rest, stdout, stderr)
+	case "agent":
+		err = agentCmd(rest, stdout, stderr)
+	case "listeners":
+		err = listenersCmd(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s", cmd, usage)
 		return 2

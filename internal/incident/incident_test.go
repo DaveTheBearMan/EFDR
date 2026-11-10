@@ -221,3 +221,36 @@ func TestRead_BadLinesSkipped(t *testing.T) {
 		t.Fatalf("%d incidents, err %v", len(got), err)
 	}
 }
+
+func TestLog_OnWriteSeesEachLineAsWritten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "incidents.jsonl")
+	l, err := Open(path, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var seen []Incident
+	l.OnWrite = func(in Incident) { seen = append(seen, in) }
+	in := Incident{Kind: "egress", Action: "killed", Exe: "/tmp/x\xff", Detail: strings.Repeat("d", 3*maxString)}
+	for i := 0; i < 3; i++ {
+		if _, err := l.Add(in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("OnWrite called %d times for one line", len(seen))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	onDisk, err := Read(f)
+	if err != nil || len(onDisk) != 1 {
+		t.Fatalf("read %d, %v", len(onDisk), err)
+	}
+	got := seen[0]
+	if got.Time.IsZero() || got.Count != 1 || got.Exe != onDisk[0].Exe || got.Detail != onDisk[0].Detail || !got.Time.Equal(onDisk[0].Time) {
+		t.Fatalf("OnWrite saw %+v, the file has %+v", got, onDisk[0])
+	}
+}

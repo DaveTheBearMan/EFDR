@@ -80,6 +80,9 @@ type Log struct {
 	window time.Duration
 	now    func() time.Time
 	seen   map[foldKey]*folded
+
+	// OnWrite, when set, is called with every incident as it was written.
+	OnWrite func(Incident)
 }
 
 // Open opens the log at path for appending, creating it (0600) and its
@@ -138,6 +141,9 @@ func (l *Log) Add(in Incident) (written bool, err error) {
 		}
 	}
 	l.seen[key] = &folded{written: now}
+	if l.OnWrite != nil {
+		l.OnWrite(in)
+	}
 	return true, nil
 }
 

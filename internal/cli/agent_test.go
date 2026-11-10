@@ -2,11 +2,17 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"xdr/internal/config"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/testfs"
@@ -79,5 +85,63 @@ func TestIncidents_NoLogYet(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := Run([]string{"incidents", "--file", filepath.Join(t.TempDir(), "none.jsonl")}, &out, &errb); code != 0 || out.Len() != 0 {
 		t.Fatalf("exit %d, out %q, err %q", code, out.String(), errb.String())
+	}
+}
+
+func TestListenersCmd(t *testing.T) {
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	lo, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lo.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"listeners"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var got []config.Listener
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out.String())
+	}
+	tcp := config.Listener{Proto: "tcp", Port: uint16(l.Addr().(*net.TCPAddr).Port), Exe: exe}
+	udp := config.Listener{Proto: "udp", Port: uint16(lo.LocalAddr().(*net.UDPAddr).Port), Exe: exe}
+	if !slices.Contains(got, tcp) || !slices.Contains(got, udp) {
+		t.Fatalf("want %+v and %+v in\n%s", tcp, udp, out.String())
+	}
+
+	// With a config, a scored port is left out.
+	cfg := filepath.Join(t.TempDir(), "agent.json")
+	body := fmt.Sprintf(`{"host":"web01","jump":["192.0.2.7/32"],"scored":[{"proto":"tcp","port":%d}]}`, tcp.Port)
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"listeners", "--config", cfg}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	got = nil
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got, tcp) || !slices.Contains(got, udp) {
+		t.Fatalf("scored port listed, or the other one lost:\n%s", out.String())
+	}
+}
+
+func TestAgentCmd_NeedsConfig(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := Run([]string{"agent"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--config") {
+		t.Fatalf("exit %d, err %q", code, errb.String())
+	}
+	if code := Run([]string{"agent", "--config", filepath.Join(t.TempDir(), "none.json")}, &out, &errb); code != 2 {
+		t.Fatalf("missing config: exit %d", code)
 	}
 }

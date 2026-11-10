@@ -1,19 +1,25 @@
 package cli
 
 import (
+	"cmp"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"xdr/internal/agent"
 	"xdr/internal/config"
 	"xdr/internal/fw"
 	"xdr/internal/incident"
+	"xdr/internal/proc"
 )
 
 // fwConfirm is the file `fw confirm` writes and `fw try` waits for.
@@ -143,4 +149,74 @@ func printIncidents(w io.Writer, incidents []incident.Incident) {
 		}
 		fmt.Fprintln(w, strings.Join(fields, " "))
 	}
+}
+
+// agentCmd is `xdr agent`: it runs until it is stopped, printing each
+// incident as it is logged.
+func agentCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("agent", stderr)
+	path := fs.String("config", "", "deployment config (agent.json)")
+	var layers multi
+	fs.Var(&layers, "baseline", "baseline layer over the embedded one; repeat to compose in order")
+	mode := fs.String("sensor", "auto", "event source: auto, ebpf, proc or none")
+	log := fs.String("log", defaultIncidents, "incident log")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if *path == "" {
+		fmt.Fprint(stderr, "xdr agent: --config is required\n")
+		return errUsage
+	}
+	if !slices.Contains([]string{"auto", "ebpf", "proc", "none"}, *mode) {
+		fmt.Fprintf(stderr, "xdr agent: unknown sensor %q\n", *mode)
+		return errUsage
+	}
+	return agent.Run(context.Background(), agent.Options{
+		ConfigPath: *path,
+		Baselines:  layers,
+		Sensor:     *mode,
+		LogPath:    *log,
+		Stderr:     stderr,
+		OnIncident: func(in incident.Incident) { printIncidents(stdout, []incident.Incident{in}) },
+	})
+}
+
+// listenersCmd is `xdr listeners`: what listens on this box now and is not
+// a scored port, as the value of the config's "listeners". Loopback ones
+// are listed too, so that they can be silenced.
+func listenersCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("listeners", stderr)
+	path := fs.String("config", "", "deployment config (agent.json): its scored ports are left out")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	var scored []config.Port
+	if *path != "" {
+		c, err := config.Load(*path)
+		if err != nil {
+			return err
+		}
+		scored = c.Scored
+	}
+	s, err := proc.Read("/proc")
+	if err != nil {
+		return err
+	}
+	out := []config.Listener{}
+	for _, p := range s.Procs {
+		for _, sock := range s.Sockets(p) {
+			l := config.Listener{Proto: sock.Proto, Port: sock.Local.Port(), Exe: p.Exe}
+			if !sock.Listen || l.Proto != "tcp" && l.Proto != "udp" || l.Exe == "" ||
+				slices.Contains(scored, config.Port{Proto: l.Proto, Port: l.Port}) || slices.Contains(out, l) {
+				continue
+			}
+			out = append(out, l)
+		}
+	}
+	slices.SortFunc(out, func(x, y config.Listener) int {
+		return cmp.Or(cmp.Compare(x.Proto, y.Proto), cmp.Compare(x.Port, y.Port), cmp.Compare(x.Exe, y.Exe))
+	})
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
