@@ -563,7 +563,9 @@ func TestHunt_SummaryWhenAllAnswer(t *testing.T) {
 func TestHunt_CountsTowardFlood(t *testing.T) {
 	f := newFleet(t, "web01", "db01")
 	r := run(t, f, func(c *Controller) { c.floodLimit = 3 })
-	for i := range 5 {
+	// The put past the limit disables the host; a later one would race
+	// its loss of write access.
+	for i := range 4 {
 		putHunt(t, f, "web01", fmt.Sprintf("cmd %d", i))
 	}
 	eventually(t, "host-disabled", func() bool { return len(kinds(r.seen(), "host-disabled")) == 1 })
