@@ -3,17 +3,46 @@ package rules
 import (
 	"errors"
 	"net/netip"
+	"path"
+	"regexp"
 	"slices"
+	"strings"
 
 	"xdr/internal/baseline"
+	"xdr/internal/proc"
 )
 
 // Guard is what no rule may hit: the base image, the scored services and
 // the addresses the fleet itself depends on.
 type Guard struct {
-	Baseline  func(sha256 string) bool // a hash of the base image
-	GuardExes []string                 // scored-service binaries
-	Protect   []netip.Prefix           // jump box, peers, resolver, scorer allows
+	Baseline  func(sha256 string) bool  // a hash of the base image
+	GuardExes []string                  // scored-service binaries
+	Protect   []netip.Prefix            // jump box, peers, resolver, scorer allows
+	StockCron func(command string) bool // a command a base-image crontab runs
+}
+
+// maxPath caps the paths and commands a rule names.
+const maxPath = 512
+
+// launchers start sessions, jobs and containers: a shell under one of
+// them is how people and stock jobs work, so no parent rule may name it.
+var launchers = []string{"systemd", "init", "sshd", "sshd-session", "cron", "atd", "login", "sudo", "su", "tmux", "screen"}
+
+var unitName = regexp.MustCompile(`^[A-Za-z0-9:_.@-]{1,200}\.(service|timer|socket)$`)
+
+func launcher(exe string) bool {
+	name := path.Base(exe)
+	return slices.Contains(launchers, name) || strings.HasPrefix(name, "containerd-shim") || proc.Class(exe, "") != ""
+}
+
+func absPath(p string) error {
+	switch {
+	case len(p) > maxPath:
+		return errors.New("path too long")
+	case !path.IsAbs(p):
+		return errors.New("not an absolute path")
+	}
+	return nil
 }
 
 var broadcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})
@@ -47,6 +76,38 @@ func (g Guard) Validate(r Rule) error {
 			if p.Contains(a) {
 				return errors.New("protected address")
 			}
+		}
+	case "parent":
+		if err := absPath(r.ParentExe); err != nil {
+			return err
+		}
+		if err := absPath(r.Exe); err != nil {
+			return err
+		}
+		if proc.Class(r.Exe, "") == "" {
+			return errors.New("child is not a shell, interpreter or net tool")
+		}
+		if launcher(r.ParentExe) {
+			return errors.New("launcher parent")
+		}
+	case "unit":
+		if !unitName.MatchString(r.Unit) {
+			return errors.New("bad unit name")
+		}
+		if !hexSum(r.SHA256) {
+			return errors.New("bad hash")
+		}
+		if g.Baseline != nil && g.Baseline(r.SHA256) {
+			return errors.New("baseline hash")
+		}
+	case "cron":
+		switch {
+		case strings.TrimSpace(r.Command) == "":
+			return errors.New("no command")
+		case len(r.Command) > maxPath:
+			return errors.New("command too long")
+		case g.StockCron != nil && g.StockCron(r.Command):
+			return errors.New("stock cron")
 		}
 	default:
 		return errors.New("unknown kind")

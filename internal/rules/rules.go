@@ -18,22 +18,32 @@ import (
 
 // Rule is one thing every agent kills on sight.
 type Rule struct {
-	ID     string     `json:"id"`
-	Kind   string     `json:"kind"` // hash | remote
-	SHA256 string     `json:"sha256,omitempty"`
-	Exe    string     `json:"exe,omitempty"` // where it was seen; not matched on
-	Addr   netip.Addr `json:"addr,omitzero"`
-	Port   uint16     `json:"port,omitempty"`
-	Proto  string     `json:"proto,omitempty"`
-	From   string     `json:"from"` // the host that proposed it
-	Seen   time.Time  `json:"seen"` // when the incident happened
-	Detail string     `json:"detail,omitempty"`
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`             // hash | remote | parent | unit | cron
+	SHA256    string     `json:"sha256,omitempty"` // of the exe, or of the unit file
+	Exe       string     `json:"exe,omitempty"`    // where it was seen; matched only by parent
+	ParentExe string     `json:"parent_exe,omitempty"`
+	Unit      string     `json:"unit,omitempty"`
+	Command   string     `json:"command,omitempty"` // what a crontab line runs
+	Addr      netip.Addr `json:"addr,omitzero"`
+	Port      uint16     `json:"port,omitempty"`
+	Proto     string     `json:"proto,omitempty"`
+	From      string     `json:"from"` // the host that proposed it
+	Seen      time.Time  `json:"seen"` // when the incident happened
+	Detail    string     `json:"detail,omitempty"`
 }
 
 // Key is what makes two rules the same rule.
 func (r *Rule) Key() string {
-	if r.Kind == "hash" {
+	switch r.Kind {
+	case "hash":
 		return "hash:" + r.SHA256
+	case "parent":
+		return "parent:" + r.ParentExe + ">" + r.Exe
+	case "unit":
+		return "unit:" + r.Unit + "@" + r.SHA256
+	case "cron":
+		return "cron:" + r.Command
 	}
 	return "remote:" + netip.AddrPortFrom(r.Addr.Unmap(), r.Port).String() + "/" + r.Proto
 }
@@ -63,15 +73,25 @@ type RemoteKey struct {
 	Proto string
 }
 
+// ParentKey is the parent and child exe a parent rule names.
+type ParentKey struct{ Parent, Child string }
+
+// UnitKey is the unit and unit file hash a unit rule names.
+type UnitKey struct{ Name, SHA256 string }
+
 // Index is a set arranged for matching.
 type Index struct {
 	Hash   map[string]*Rule
 	Remote map[RemoteKey]*Rule
+	Parent map[ParentKey]*Rule
+	Unit   map[UnitKey]*Rule
+	Cron   map[string]*Rule
 }
 
 // Lookup indexes s.
 func (s *Set) Lookup() Index {
-	ix := Index{Hash: map[string]*Rule{}, Remote: map[RemoteKey]*Rule{}}
+	ix := Index{Hash: map[string]*Rule{}, Remote: map[RemoteKey]*Rule{},
+		Parent: map[ParentKey]*Rule{}, Unit: map[UnitKey]*Rule{}, Cron: map[string]*Rule{}}
 	for i := range s.Rules {
 		r := &s.Rules[i]
 		switch r.Kind {
@@ -79,6 +99,12 @@ func (s *Set) Lookup() Index {
 			ix.Hash[r.SHA256] = r
 		case "remote":
 			ix.Remote[RemoteKey{r.Addr.Unmap(), r.Port, r.Proto}] = r
+		case "parent":
+			ix.Parent[ParentKey{r.ParentExe, r.Exe}] = r
+		case "unit":
+			ix.Unit[UnitKey{r.Unit, r.SHA256}] = r
+		case "cron":
+			ix.Cron[r.Command] = r
 		}
 	}
 	return ix

@@ -341,7 +341,7 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 	case sensor.Exec:
 		// The exec is judged by what was executed: by now the pid may run
 		// something else, or nothing.
-		cls := class(ev.Filename, ev.Comm)
+		cls := proc.Class(ev.Filename, ev.Comm)
 		var out []Detection
 		var ancestors []*proc.Proc
 		if pr != nil {

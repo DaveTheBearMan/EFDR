@@ -101,6 +101,18 @@ func TestRule_Key(t *testing.T) {
 	if h.Key() == r.Key() || h.ID == r.ID || len(h.ID) != 16 {
 		t.Fatalf("%q %q %q %q", h.Key(), r.Key(), h.ID, r.ID)
 	}
+	for _, c := range []struct {
+		r    Rule
+		want string
+	}{
+		{Rule{Kind: "parent", ParentExe: "/usr/sbin/apache2", Exe: "/usr/bin/dash"}, "parent:/usr/sbin/apache2>/usr/bin/dash"},
+		{Rule{Kind: "unit", Unit: "evil.service", SHA256: sum}, "unit:evil.service@" + sum},
+		{Rule{Kind: "cron", Command: "curl x | sh"}, "cron:curl x | sh"},
+	} {
+		if got := c.r.Key(); got != c.want {
+			t.Errorf("key %q, want %q", got, c.want)
+		}
+	}
 	m := r
 	m.Addr = netip.MustParseAddr("::ffff:203.0.113.9")
 	m.SetID()
@@ -128,5 +140,18 @@ func TestLoadPrivate_Mode(t *testing.T) {
 	}
 	if pub, err := LoadPublic(pubPath); err != nil || !pub.Equal(priv.Public()) {
 		t.Fatalf("%v %v", pub, err)
+	}
+}
+
+func TestLookup_NewKinds(t *testing.T) {
+	s := &Set{Rules: []Rule{
+		{Kind: "parent", ParentExe: "/usr/sbin/apache2", Exe: "/usr/bin/dash"},
+		{Kind: "unit", Unit: "evil.service", SHA256: sum},
+		{Kind: "cron", Command: "curl x | sh"},
+	}}
+	ix := s.Lookup()
+	if ix.Parent[ParentKey{"/usr/sbin/apache2", "/usr/bin/dash"}] == nil || ix.Unit[UnitKey{"evil.service", sum}] == nil ||
+		ix.Cron["curl x | sh"] == nil || len(ix.Hash) != 0 {
+		t.Fatalf("%+v", ix)
 	}
 }

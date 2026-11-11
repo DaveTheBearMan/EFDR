@@ -4,9 +4,7 @@ package detect
 
 import (
 	"net/netip"
-	"path"
 	"slices"
-	"strings"
 
 	"xdr/internal/baseline"
 	"xdr/internal/config"
@@ -102,34 +100,6 @@ func (p *Policy) IsGray(s *proc.Snapshot, pr *proc.Proc) bool {
 	return false
 }
 
-var (
-	shells   = []string{"sh", "bash", "dash", "zsh", "ksh", "ash", "tcsh", "csh", "fish", "busybox"}
-	interps  = []string{"node", "nodejs", "gawk"}
-	interpsP = []string{"python", "perl", "ruby", "php", "lua"}
-	nettools = []string{"nc", "ncat", "netcat", "nc.openbsd", "nc.traditional", "socat", "telnet", "openssl"}
-)
-
 // Class sorts a process by what it runs: "shell", "interp", "nettool" or
-// "". It goes by the base name of Exe, and of Comm when there is no Exe.
-func Class(pr *proc.Proc) string { return class(pr.Exe, pr.Comm) }
-
-func class(exe, comm string) string {
-	name := comm
-	if exe != "" {
-		name = path.Base(exe)
-	}
-	switch {
-	case slices.Contains(shells, name):
-		return "shell"
-	case slices.Contains(nettools, name):
-		return "nettool"
-	case slices.Contains(interps, name):
-		return "interp"
-	}
-	for _, pre := range interpsP {
-		if strings.HasPrefix(name, pre) {
-			return "interp"
-		}
-	}
-	return ""
-}
+// "". See proc.Class.
+func Class(pr *proc.Proc) string { return proc.Class(pr.Exe, pr.Comm) }
