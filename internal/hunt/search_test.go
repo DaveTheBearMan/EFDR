@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"xdr/internal/proc"
 	"xdr/internal/testfs"
@@ -126,4 +127,48 @@ func TestSearch_SkipsKernelAndContainers(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	_ = os.Remove(filepath.Join(root, "/srv/x"))
+}
+
+// Network and FUSE mounts are not walked: one hung server would hang
+// every later hunt.
+func TestSearch_SkipsRemoteMounts(t *testing.T) {
+	root := testfs.Root(t)
+	testfs.File(t, root, "/mnt/share/x", implant, 0o644)
+	testfs.File(t, root, "/mnt/fuse/x", implant, 0o644)
+	testfs.File(t, root, "/srv/x", implant, 0o644)
+	mi := filepath.Join(t.TempDir(), "mountinfo")
+	table := fmt.Sprintf("22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+		"40 22 0:50 / %s rw,relatime - nfs4 192.0.2.7:/export rw\n"+
+		"41 22 0:51 / %s rw - fuse.sshfs u@192.0.2.8: rw\n",
+		filepath.Join(root, "mnt/share"), strings.ReplaceAll(filepath.Join(root, "mnt/fuse"), " ", `\040`))
+	if err := os.WriteFile(mi, []byte(table), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer SetMountinfo(mi)()
+	ioc := IOC{Files: []File{{SHA256: hexOf(implant), Size: int64(len(implant)), Path: "/mnt/share/x"}}}
+	if r := Search(context.Background(), root, req(ioc), nosnap, nil, DefaultBudget); kinds(r) != "file:/srv/x" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A slow or huge file stops at the time budget, not after the whole read.
+func TestSearch_HashStopsAtDeadline(t *testing.T) {
+	root := testfs.Root(t)
+	const size = 4 << 30
+	f, err := os.Create(filepath.Join(root, "big"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Skip("no sparse files:", err)
+	}
+	f.Close()
+	ioc := IOC{Files: []File{{SHA256: hexOf(implant), Size: size}}}
+	b := DefaultBudget
+	b.Hashed, b.Time = 8<<30, 200*time.Millisecond
+	start := time.Now()
+	r := Search(context.Background(), root, req(ioc), nosnap, nil, b)
+	if took := time.Since(start); took > 1500*time.Millisecond || r.Partial != "time budget" {
+		t.Fatalf("took %v: %+v", took, r)
+	}
 }

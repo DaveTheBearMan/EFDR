@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +55,10 @@ var DefaultBudget = Budget{Files: 500000, Hashed: 2 << 30, Time: 60 * time.Secon
 // checkEvery is how many walked entries pass between budget checks.
 const checkEvery = 256
 
+// mountinfo is the mount table the search reads to keep off network
+// and FUSE filesystems.
+var mountinfo = "/proc/self/mountinfo"
+
 // searcher is one search in progress.
 type searcher struct {
 	ctx      context.Context
@@ -61,7 +66,74 @@ type searcher struct {
 	b        Budget
 	deadline time.Time
 	hashed   int64
+	remote   map[string]bool // network and FUSE mount points
 	res      Result
+}
+
+// remoteMounts is the mount points of network and FUSE filesystems in the
+// mount table at file.
+func remoteMounts(file string) map[string]bool {
+	b, err := collect.ReadFile(file, 4<<20)
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for line := range strings.Lines(string(b)) {
+		pre, post, ok := strings.Cut(line, " - ")
+		f, g := strings.Fields(pre), strings.Fields(post)
+		if !ok || len(f) < 5 || len(g) < 1 {
+			continue
+		}
+		switch t := g[0]; {
+		case t == "nfs", t == "nfs4", t == "cifs", t == "smb3", t == "smbfs", t == "ncpfs", t == "afs",
+			t == "ceph", t == "glusterfs", t == "9p", t == "davfs", t == "fuse", strings.HasPrefix(t, "fuse."):
+			out[unescapeMount(f[4])] = true
+		}
+	}
+	return out
+}
+
+// unescapeMount undoes mountinfo's octal escapes (\040 for a space).
+func unescapeMount(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if n, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(n))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// onRemote reports whether full is on a network or FUSE mount.
+func (s *searcher) onRemote(full string) bool {
+	for d := full; ; d = filepath.Dir(d) {
+		if s.remote[d] {
+			return true
+		}
+		if d == filepath.Dir(d) {
+			return false
+		}
+	}
+}
+
+// budgetReader stops a read once the search is over budget.
+type budgetReader struct {
+	s *searcher
+	r io.Reader
+}
+
+var errOver = errors.New("over budget")
+
+func (b budgetReader) Read(p []byte) (int, error) {
+	if b.s.over() {
+		return 0, errOver
+	}
+	return b.r.Read(p)
 }
 
 func (s *searcher) stop(why string) {
@@ -101,7 +173,7 @@ func (s *searcher) hash(full string, size int64) string {
 		return ""
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, size+1))
+	n, err := io.Copy(h, budgetReader{s, io.LimitReader(f, size+1)})
 	s.hashed += n
 	if err != nil || n != size {
 		return "" // changed under us
@@ -113,7 +185,7 @@ func (s *searcher) hash(full string, size int64) string {
 // process snapshot. hash gives a process's exe hash. It reads only, and
 // stops at b or when ctx is done.
 func Search(ctx context.Context, root string, req *Request, snap *proc.Snapshot, hash func(*proc.Proc) string, b Budget) Result {
-	s := &searcher{ctx: ctx, root: filepath.Clean(root), b: b, deadline: time.Now().Add(b.Time)}
+	s := &searcher{ctx: ctx, root: filepath.Clean(root), b: b, deadline: time.Now().Add(b.Time), remote: remoteMounts(mountinfo)}
 	if s.over() {
 		return s.res
 	}
@@ -137,6 +209,9 @@ func Search(ctx context.Context, root string, req *Request, snap *proc.Snapshot,
 		}
 	}) {
 		full := filepath.Join(s.root, p)
+		if s.onRemote(full) {
+			continue
+		}
 		st, err := os.Lstat(full)
 		if err != nil || !st.Mode().IsRegular() {
 			continue
@@ -244,7 +319,7 @@ func (s *searcher) walk(sizes map[int64]bool, shas, paths map[string]bool, add f
 			rel = full
 		}
 		if d.IsDir() {
-			if matchAny(collect.Skipped, rel) || matchAny(collect.Sealed, rel) || collect.PseudoFS(full) {
+			if s.remote[full] || matchAny(collect.Skipped, rel) || matchAny(collect.Sealed, rel) || collect.PseudoFS(full) {
 				return filepath.SkipDir
 			}
 			return nil
