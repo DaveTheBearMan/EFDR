@@ -20,6 +20,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"xdr/internal/fleet"
+	"xdr/internal/hunt"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/pki"
@@ -28,14 +29,17 @@ import (
 
 const (
 	maxValue    = 16 << 10 // the most bytes of one proposal or incident
-	hostCap     = 256      // promoted rules per proposing host
-	totalCap    = 4096     // promoted rules in all
+	maxHunt     = 64 << 10
+	hostCap     = 256  // promoted rules per proposing host
+	totalCap    = 4096 // promoted rules in all
 	silentAfter = 15 * time.Second
 	opTimeout   = 5 * time.Second
 	writeTries  = 5
 	maxSet      = 1 << 20 // below etcd's 1.5 MiB request limit
 	floodLimit  = 600
 	floodWindow = time.Minute
+	huntWindow  = 60 * time.Second // how long a hunt waits for answers
+	maxHunts    = 256              // hunts waiting at once
 )
 
 // beat is what the controller knows of one host's heartbeat.
@@ -67,6 +71,15 @@ type Controller struct {
 	windowAt          time.Time
 	disabled          map[string]bool
 	users             map[string]bool // hosts with an etcd user, as far as Run knows
+	huntWindow        time.Duration
+	hunts             map[string]*openHunt // by id
+}
+
+// openHunt is a hunt waiting for answers.
+type openHunt struct {
+	id, from string
+	at       time.Time
+	found    map[string]bool // host → whether it found anything
 }
 
 // New is a controller over c that continues from the rule set in etcd.
@@ -76,6 +89,7 @@ func New(dir string, c *clientv3.Client, g rules.Guard, key ed25519.PrivateKey, 
 		now: time.Now, tick: time.Second, silentAfter: silentAfter,
 		hostCap: hostCap, totalCap: totalCap, maxSet: maxSet, floodLimit: floodLimit,
 		beats: map[string]*beat{}, writes: map[string]int{}, disabled: map[string]bool{}, users: map[string]bool{},
+		huntWindow: huntWindow, hunts: map[string]*openHunt{},
 	}
 	// Whatever the baselines say, the controller's own binary, which the
 	// operator also runs on the boxes, is never a hash rule.
@@ -366,6 +380,92 @@ func (ctl *Controller) ingest(host string, val []byte) {
 	}
 	in.Host = host
 	ctl.record(in)
+	if h := ctl.hunts[in.Hunt]; h != nil && host != h.from && (in.Kind == "hunt-hit" || in.Kind == "hunt-clean") {
+		h.found[host] = h.found[host] || in.Kind == "hunt-hit"
+		ctl.checkHunts(false)
+	}
+}
+
+// huntPut opens a hunt a host put.
+func (ctl *Controller) huntPut(host string, val []byte) {
+	var r hunt.Request
+	if len(val) > maxHunt || json.Unmarshal(val, &r) != nil || r.From != host || r.Bound() != nil {
+		ctl.record(incident.Incident{Kind: "hunt-dropped", Action: "alert", Severity: model.SevMedium, Host: host, Detail: "malformed hunt"})
+		return
+	}
+	if ctl.hunts[r.ID] != nil {
+		return
+	}
+	if len(ctl.hunts) >= maxHunts {
+		var oldest *openHunt
+		for _, h := range ctl.hunts {
+			if oldest == nil || h.at.Before(oldest.at) {
+				oldest = h
+			}
+		}
+		ctl.summarize(oldest)
+	}
+	i := r.IOC
+	n := len(i.Files) + len(i.Remotes) + len(i.Units) + len(i.Cron) + len(i.Users)
+	ctl.hunts[r.ID] = &openHunt{id: r.ID, from: host, at: ctl.now(), found: map[string]bool{}}
+	ctl.record(incident.Incident{Kind: "hunt", Action: "alert", Severity: model.SevMedium, Host: host, Hunt: r.ID,
+		Detail: fmt.Sprintf("hunt %s from %s: %d indicators", r.ID, host, n)})
+}
+
+// checkHunts sums up every hunt whose window is over, or that every
+// enrolled host but its sender has answered. With windowOnly it looks at
+// the window alone.
+func (ctl *Controller) checkHunts(windowOnly bool) {
+	if len(ctl.hunts) == 0 {
+		return
+	}
+	hosts, _ := pki.Hosts(ctl.dir)
+	for _, h := range ctl.hunts {
+		all := !windowOnly && len(hosts) > 0
+		for _, x := range hosts {
+			if _, ok := h.found[x]; !ok && x != h.from {
+				all = false
+			}
+		}
+		if all || ctl.now().Sub(h.at) >= ctl.huntWindow {
+			ctl.summarize(h)
+		}
+	}
+}
+
+// summarize records what came of hunt h and closes it.
+func (ctl *Controller) summarize(h *openHunt) {
+	delete(ctl.hunts, h.id)
+	hosts, _ := pki.Hosts(ctl.dir)
+	var found, clean, silent []string
+	for _, x := range hosts {
+		hit, ok := h.found[x]
+		switch {
+		case x == h.from:
+		case !ok:
+			silent = append(silent, x)
+		case hit:
+			found = append(found, x)
+		default:
+			clean = append(clean, x)
+		}
+	}
+	var parts []string
+	for _, p := range []struct {
+		say   string
+		hosts []string
+	}{{"found on ", found}, {"clean on ", clean}, {"no answer from ", silent}} {
+		if len(p.hosts) > 0 {
+			slices.Sort(p.hosts)
+			parts = append(parts, p.say+strings.Join(p.hosts, ", "))
+		}
+	}
+	sev := model.SevMedium
+	if len(found) > 0 {
+		sev = model.SevHigh
+	}
+	ctl.record(incident.Incident{Kind: "hunt-summary", Action: "alert", Severity: sev, Host: h.from, Hunt: h.id,
+		Detail: fmt.Sprintf("hunt %s from %s: %s", h.id, h.from, strings.Join(parts, "; "))})
 }
 
 func (ctl *Controller) heartbeat(host string, put bool) {
@@ -527,6 +627,11 @@ func (ctl *Controller) handle(ctx context.Context, ch change) {
 		if rest == "" {
 			ctl.heartbeat(host, !ch.del)
 		}
+	case fleet.HuntAll:
+		// Left in place for the agents; its lease takes it away.
+		if !ch.del {
+			ctl.huntPut(host, ch.val)
+		}
 	}
 }
 
@@ -543,7 +648,7 @@ func (ctl *Controller) Run(ctx context.Context) error {
 	ctl.started = ctl.now()
 	changes := make(chan change, 256)
 	var wg sync.WaitGroup
-	for _, p := range []string{fleet.ProposedAll, fleet.IncidentsAll, fleet.HeartbeatAll} {
+	for _, p := range []string{fleet.ProposedAll, fleet.IncidentsAll, fleet.HeartbeatAll, fleet.HuntAll} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -562,6 +667,7 @@ func (ctl *Controller) Run(ctx context.Context) error {
 		case <-tick.C:
 			ctl.addUsers(ctx)
 			ctl.checkSilent()
+			ctl.checkHunts(true)
 		}
 	}
 }

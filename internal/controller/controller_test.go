@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -18,7 +19,9 @@ import (
 
 	"xdr/internal/fleet"
 	"xdr/internal/fleettest"
+	"xdr/internal/hunt"
 	"xdr/internal/incident"
+	"xdr/internal/model"
 	"xdr/internal/rules"
 )
 
@@ -500,4 +503,68 @@ func TestPromote_VersionFloor(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(f.Dir, "rules.version")); strings.TrimSpace(string(b)) != "8" {
 		t.Fatalf("rules.version %q", b)
 	}
+}
+
+func putHunt(t *testing.T, f *fleettest.Fleet, host string, cron string) string {
+	t.Helper()
+	ioc := hunt.IOC{Cron: []string{cron}}
+	b, _ := json.Marshal(hunt.Request{ID: hunt.ID(ioc), From: host, IOC: ioc})
+	if _, err := hostClient(t, f, host).Put(ctx5(t), fleet.Hunt(host)+hunt.ID(ioc), string(b)); err != nil {
+		t.Fatal(err)
+	}
+	return hunt.ID(ioc)
+}
+
+func answer(t *testing.T, f *fleettest.Fleet, host, id string, hit bool) {
+	t.Helper()
+	in := incident.Incident{Kind: "hunt-clean", Action: "alert", Severity: model.SevInfo, Hunt: id}
+	if hit {
+		in.Kind, in.Severity = "hunt-hit", model.SevHigh
+	}
+	b, _ := json.Marshal(in)
+	if _, err := hostClient(t, f, host).Put(ctx5(t), fleet.Incidents(host)+"1", string(b)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHunt_Summary(t *testing.T) {
+	f := newFleet(t, "web01", "db01", "mail01")
+	r := run(t, f, func(c *Controller) { c.huntWindow = 300 * time.Millisecond })
+	id := putHunt(t, f, "web01", "curl x | sh")
+	eventually(t, "hunt", func() bool { return len(kinds(r.seen(), "hunt")) == 1 })
+	if in := kinds(r.seen(), "hunt")[0]; in.Detail != "hunt "+id+" from web01: 1 indicators" || in.Severity != model.SevMedium || in.Host != "web01" {
+		t.Fatalf("%+v", in)
+	}
+	answer(t, f, "db01", id, true)
+	eventually(t, "summary", func() bool { return len(kinds(r.seen(), "hunt-summary")) == 1 })
+	s := kinds(r.seen(), "hunt-summary")[0]
+	if s.Detail != "hunt "+id+" from web01: found on db01; no answer from mail01" || s.Severity != model.SevHigh || s.Hunt != id {
+		t.Fatalf("%+v", s)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if n := len(kinds(r.seen(), "hunt-summary")); n != 1 {
+		t.Fatalf("%d summaries", n)
+	}
+}
+
+func TestHunt_SummaryWhenAllAnswer(t *testing.T) {
+	f := newFleet(t, "web01", "db01", "mail01")
+	r := run(t, f, func(c *Controller) { c.huntWindow = time.Hour })
+	id := putHunt(t, f, "web01", "curl x | sh")
+	eventually(t, "hunt", func() bool { return len(kinds(r.seen(), "hunt")) == 1 })
+	answer(t, f, "db01", id, false)
+	answer(t, f, "mail01", id, false)
+	eventually(t, "summary", func() bool { return len(kinds(r.seen(), "hunt-summary")) == 1 })
+	if s := kinds(r.seen(), "hunt-summary")[0]; s.Detail != "hunt "+id+" from web01: clean on db01, mail01" || s.Severity != model.SevMedium {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestHunt_CountsTowardFlood(t *testing.T) {
+	f := newFleet(t, "web01", "db01")
+	r := run(t, f, func(c *Controller) { c.floodLimit = 3 })
+	for i := range 5 {
+		putHunt(t, f, "web01", fmt.Sprintf("cmd %d", i))
+	}
+	eventually(t, "host-disabled", func() bool { return len(kinds(r.seen(), "host-disabled")) == 1 })
 }
