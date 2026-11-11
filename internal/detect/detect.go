@@ -6,12 +6,14 @@ import (
 	"net/netip"
 	"path"
 	"slices"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
 	"xdr/internal/config"
 	"xdr/internal/incident"
 	"xdr/internal/model"
+	"xdr/internal/persist"
 	"xdr/internal/proc"
 	"xdr/internal/rules"
 	"xdr/internal/sensor"
@@ -228,6 +230,39 @@ func (p *Policy) ruleHash(pr *proc.Proc) *rules.Rule {
 	return p.Rules.Hash[sum]
 }
 
+// ruleNarrow is the parent, unit and cron rules pr hits.
+func (p *Policy) ruleNarrow(s *proc.Snapshot, pr *proc.Proc) []Detection {
+	if p.Rules == nil {
+		return nil
+	}
+	var out []Detection
+	if len(p.Rules.Parent) > 0 {
+		// A parent that started after its child holds a reused pid.
+		if par := s.Procs[pr.PPID]; par != nil && par.Start <= pr.Start {
+			if r := p.Rules.Parent[rules.ParentKey{Parent: par.Exe, Child: pr.Exe}]; r != nil {
+				out = append(out, ruleHit("rule-parent", pr.PID, pr.Start, r, nil))
+			}
+		}
+	}
+	if len(p.Rules.Unit) > 0 && p.UnitHash != nil {
+		if u := path.Base(pr.Cgroup); strings.HasSuffix(u, ".service") {
+			if sum := p.UnitHash(u); sum != "" {
+				if r := p.Rules.Unit[rules.UnitKey{Name: u, SHA256: sum}]; r != nil {
+					out = append(out, ruleHit("rule-unit", pr.PID, pr.Start, r, nil))
+				}
+			}
+		}
+	}
+	if len(p.Rules.Cron) > 0 {
+		if c := persist.CronCommand(s.Chain(pr.PID)); c != "" {
+			if r := p.Rules.Cron[c]; r != nil {
+				out = append(out, ruleHit("rule-cron", pr.PID, pr.Start, r, nil))
+			}
+		}
+	}
+	return out
+}
+
 // ruleRemote is the remote rule a connection to dst hits, or nil.
 func (p *Policy) ruleRemote(dst netip.AddrPort, proto string) *rules.Rule {
 	if p.Rules == nil {
@@ -260,6 +295,7 @@ func Sweep(s *proc.Snapshot, p *Policy) []Detection {
 		if r := p.ruleHash(pr); r != nil {
 			out = append(out, ruleHit("rule-hash", pid, pr.Start, r, nil))
 		}
+		out = append(out, p.ruleNarrow(s, pr)...)
 		seen := map[string]bool{}
 		raw := ""
 		for _, k := range s.Sockets(pr) {
@@ -349,6 +385,7 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 			if r := p.ruleHash(pr); r != nil {
 				out = append(out, ruleHit("rule-hash", ev.PID, pr.Start, r, nil))
 			}
+			out = append(out, p.ruleNarrow(s, pr)...)
 			ancestors = s.Chain(ev.PID)[1:]
 		} else if ev.PPID != 0 {
 			ancestors = s.Chain(ev.PPID)

@@ -109,3 +109,48 @@ func TestRules_HashSkipsContainerShells(t *testing.T) {
 	}
 	want(t, only(Sweep(snap(append(web(), mk(10, 1, "/tmp/sh", nil))), p), "rule-hash"), "rule-hash:10")
 }
+
+func TestRules_ParentHit(t *testing.T) {
+	p := withRules(pol(), rules.Rule{Kind: "parent", ParentExe: "/usr/sbin/apache2", Exe: "/usr/bin/dash", From: "db01"})
+	sshd := mk(800, 1, "/usr/sbin/sshd", nil)
+	ps := append(web(), sshd, mk(950, 901, "/usr/bin/dash", nil), mk(951, 800, "/usr/bin/dash", nil))
+	want(t, only(Sweep(snap(ps), p), "rule-parent"), "rule-parent:950")
+	// A reused parent pid: the "parent" started after the child.
+	late := mk(960, 970, "/usr/bin/dash", nil)
+	newer := mk(970, 1, "/usr/sbin/apache2", nil)
+	late.Start, newer.Start = 100, 200
+	want(t, only(Sweep(snap(append(web(), late, newer)), p), "rule-parent"))
+	ds := Event(sensor.Event{Kind: sensor.Exec, PID: 950, Filename: "/usr/bin/dash"}, snap(ps), p)
+	want(t, only(ds, "rule-parent"), "rule-parent:950")
+}
+
+func TestRules_UnitHit(t *testing.T) {
+	const fsum = "ab12000000000000000000000000000000000000000000000000000000000000"
+	p := withRules(pol(), rules.Rule{Kind: "unit", Unit: "evil.service", SHA256: fsum, From: "db01"})
+	x := mk(10, 1, "/opt/x", nil)
+	x.Cgroup = "0::/system.slice/evil.service"
+	p.UnitHash = func(u string) string {
+		if u == "evil.service" {
+			return fsum
+		}
+		return ""
+	}
+	want(t, only(Sweep(snap(append(web(), x)), p), "rule-unit"), "rule-unit:10")
+	ds := Event(sensor.Event{Kind: sensor.Exec, PID: 10, Filename: "/opt/x"}, snap(append(web(), x)), p)
+	want(t, only(ds, "rule-unit"), "rule-unit:10")
+	p.UnitHash = func(string) string { return "cd" + fsum[2:] }
+	want(t, only(Sweep(snap(append(web(), x)), p), "rule-unit"))
+}
+
+func TestRules_CronHit(t *testing.T) {
+	p := withRules(pol(), rules.Rule{Kind: "cron", Command: "curl x | sh", From: "db01"})
+	cron := mk(700, 1, "/usr/sbin/cron", nil)
+	sh := mk(701, 700, "/usr/bin/dash", nil)
+	sh.Cmdline = []string{"/bin/sh", "-c", "curl x | sh"}
+	want(t, only(Sweep(snap(append(web(), cron, sh)), p), "rule-cron"), "rule-cron:701")
+	ds := Event(sensor.Event{Kind: sensor.Exec, PID: 701, Filename: "/usr/bin/dash"}, snap(append(web(), cron, sh)), p)
+	want(t, only(ds, "rule-cron"), "rule-cron:701")
+	other := mk(702, 1, "/usr/bin/dash", nil)
+	other.Cmdline = sh.Cmdline
+	want(t, only(Sweep(snap(append(web(), other)), p), "rule-cron"))
+}

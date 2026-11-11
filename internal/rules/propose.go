@@ -3,6 +3,7 @@ package rules
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -13,7 +14,8 @@ import (
 const maxDetail = 256
 
 // FromIncident is the rules an incident proposes: the binary's hash
-// unless it is a base-image binary, and the remote endpoint. Only
+// unless it is a base-image binary, the remote endpoint, the parent that
+// spawned a reverse shell, and the unit or crontab line that started it. Only
 // reverse shells and blocked egress the agent acted on, or would have,
 // propose anything.
 func FromIncident(in incident.Incident, baselineExe bool) []Rule {
@@ -36,6 +38,15 @@ func FromIncident(in incident.Incident, baselineExe bool) []Rule {
 	}
 	if in.SHA256 != "" && !baselineExe {
 		add(Rule{Kind: "hash", SHA256: in.SHA256, Exe: in.Exe})
+	}
+	if (in.Kind == "revshell-stdio" || in.Kind == "service-shell") && len(in.Chain) >= 2 && in.Chain[1].Exe != "" && in.Exe != "" {
+		add(Rule{Kind: "parent", ParentExe: in.Chain[1].Exe, Exe: in.Exe})
+	}
+	if u, ok := strings.CutPrefix(in.Origin, "unit:"); ok && in.OriginSHA256 != "" {
+		add(Rule{Kind: "unit", Unit: u, SHA256: in.OriginSHA256})
+	}
+	if in.Cron != "" {
+		add(Rule{Kind: "cron", Command: in.Cron})
 	}
 	if e := in.Remote; e != nil && e.Port != 0 && (e.Proto == "tcp" || e.Proto == "udp") {
 		if a, err := netip.ParseAddr(e.Addr); err == nil {

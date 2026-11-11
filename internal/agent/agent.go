@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"xdr/internal/fw"
 	"xdr/internal/incident"
 	"xdr/internal/model"
+	"xdr/internal/persist"
 	"xdr/internal/proc"
 	"xdr/internal/respond"
 	"xdr/internal/rules"
@@ -102,13 +104,17 @@ type agent struct {
 	pinned  string          // the config and DNS switch the files were last asserted for
 	foreign map[string]bool // base chains of other tables already seen (nil: not looked yet)
 
-	fleet    fleetLink         // nil: a standalone agent
-	baseHash func(string) bool // a hash of the baseline; nil: none
-	selfHash string            // this binary's hash; "": unknown
-	ruleSet  *rules.Set        // the last verified set, before the agent's own check
+	fleet    fleetLink              // nil: a standalone agent
+	baseHash func(string) bool      // a hash of the baseline; nil: none
+	selfHash string                 // this binary's hash; "": unknown
+	ruleSet  *rules.Set             // the last verified set, before the agent's own check
+	exeSize  func(*proc.Proc) int64 // nil: unknown
 	snap     *proc.Snapshot
 	snapAt   time.Time
-	askers   map[int]*asker
+
+	unitMu sync.Mutex
+	units  map[string]string // unit → unit file hash, this sweep
+	askers map[int]*asker
 }
 
 // accounts reads passwd: the name of each uid, and the uids of the gray
@@ -201,7 +207,8 @@ func (a *agent) takeRules() {
 	if a.selfHash == "" {
 		baseHash = a.baseHash
 	}
-	g := rules.Guard{Baseline: baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected()}
+	g := rules.Guard{Baseline: baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected(),
+		StockCron: persist.StockCron(a.root, a.baseHash)}
 	var kept []rules.Rule
 	for _, r := range a.ruleSet.Rules {
 		if err := g.Validate(r); err != nil {
@@ -304,6 +311,33 @@ func (a *agent) describe(in *incident.Incident, s *proc.Snapshot, p *proc.Proc) 
 		in.Chain = append(in.Chain, incident.ProcRef{PID: c.PID, Comm: c.Comm, Exe: c.Exe})
 	}
 	in.Container, in.Origin = proc.Container(p.Cgroup), proc.Origin(chain)
+	if u, ok := strings.CutPrefix(in.Origin, "unit:"); ok {
+		if file, sum, err := persist.UnitFile(a.root, u); err == nil {
+			in.OriginFile = file
+			if a.baseHash == nil || !a.baseHash(sum) {
+				in.OriginSHA256 = sum
+			}
+		}
+	}
+	in.Cron = persist.CronCommand(chain)
+	if a.exeSize != nil {
+		in.Size = a.exeSize(p)
+	}
+}
+
+// unitHash is the hash of the file behind unit, kept for the sweep.
+func (a *agent) unitHash(unit string) string {
+	a.unitMu.Lock()
+	defer a.unitMu.Unlock()
+	if sum, ok := a.units[unit]; ok {
+		return sum
+	}
+	_, sum, _ := persist.UnitFile(a.root, unit)
+	if a.units == nil {
+		a.units = map[string]string{}
+	}
+	a.units[unit] = sum
+	return sum
 }
 
 // handle responds to the detections made on snapshot s and logs each.
@@ -531,6 +565,9 @@ func (a *agent) take() (*proc.Snapshot, *detect.Policy, error) {
 		return nil, nil, err
 	}
 	a.snap, a.snapAt = s, a.now()
+	a.unitMu.Lock()
+	a.units = nil
+	a.unitMu.Unlock()
 	for pid, ask := range a.askers {
 		if n := len(ask.times); n == 0 || a.snapAt.Sub(ask.times[n-1]) >= burstWindow {
 			delete(a.askers, pid)
@@ -682,6 +719,14 @@ func Run(ctx context.Context, o Options) error {
 		netns: netns,
 		logf:  logf,
 	}
+	a.exeSize = func(p *proc.Proc) int64 {
+		st, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(p.PID), "exe"))
+		if err != nil {
+			return 0
+		}
+		return st.Size()
+	}
+	a.pol.UnitHash = a.unitHash
 	a.setConfig(cfg)
 	a.baseHash = rules.BaselineHashes(base)
 	a.selfHash, _ = proc.ExeHash(procRoot, &proc.Proc{PID: os.Getpid()})

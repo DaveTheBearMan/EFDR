@@ -22,6 +22,9 @@ type Policy struct {
 	Local func(netip.Addr) bool   // an address of this host
 	Hash  func(*proc.Proc) string // "" on error
 	Rules *rules.Index            // the fleet's signed rules; nil: none
+	// UnitHash is the hash of the file behind a systemd unit, "" when
+	// unknown.
+	UnitHash func(unit string) string
 }
 
 var broadcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})

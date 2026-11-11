@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"xdr/internal/config"
 	"xdr/internal/detect"
 	"xdr/internal/incident"
+	"xdr/internal/model"
 	"xdr/internal/pathenc"
 	"xdr/internal/proc"
 	"xdr/internal/rules"
@@ -189,5 +192,56 @@ func TestSetRules_RefusesSelfHash(t *testing.T) {
 	r.a.setRules(&rules.Set{Version: 1, Rules: []rules.Rule{self}})
 	if n := len(r.kind("rules-refused")); n != 1 || len(r.a.pol.Rules.Hash) != 0 {
 		t.Fatalf("%d refused, %+v", n, r.a.pol.Rules)
+	}
+}
+
+// A reverse shell started by a crontab line proposes its parent and that
+// line, as well as its hash.
+func TestHandle_ProposesNarrowRules(t *testing.T) {
+	r, f := fleetRig(t)
+	cron := mk(50, 1, 0, "/usr/sbin/cron")
+	sh := mk(150, 50, 0, "/usr/bin/dash")
+	sh.Cmdline = []string{"/bin/sh", "-c", "/opt/app/srv"}
+	srv := mk(200, 150, 0, "/opt/app/srv")
+	x := mk(301, 200, 0, "/usr/bin/dash")
+	r.a.handle(tree(cron, sh, srv, x), []detect.Detection{{Kind: "revshell-stdio", PID: 301, Start: x.Start, Severity: model.SevCritical, Remote: c2, Detail: "stdio on a socket"}})
+	got := map[string]rules.Rule{}
+	for _, p := range f.proposed {
+		got[p.Kind] = p
+	}
+	if got["hash"].SHA256 != hexSum("/usr/bin/dash") || got["parent"].ParentExe != "/opt/app/srv" || got["parent"].Exe != "/usr/bin/dash" ||
+		got["cron"].Command != "/opt/app/srv" || len(r.kills) != 1 {
+		t.Fatalf("kills %d, proposed %+v", len(r.kills), f.proposed)
+	}
+	if in := r.kind("revshell-stdio"); len(in) != 1 || in[0].Cron != "/opt/app/srv" {
+		t.Fatalf("%+v", in)
+	}
+}
+
+// The file behind a unit: origin is named, and its hash kept only when it
+// is not a base-image hash.
+func TestDescribe_UnitOrigin(t *testing.T) {
+	r, _ := fleetRig(t)
+	unit := "[Service]\nExecStart=/tmp/x\n"
+	if err := os.MkdirAll(filepath.Join(r.root, "etc/systemd/system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.root, "etc/systemd/system/evil.service"), []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	x := mk(300, 1, 0, "/tmp/x")
+	x.Cgroup = "/system.slice/evil.service"
+	r.a.handle(tree(x), []detect.Detection{egress(x)})
+	in := r.kind("egress")
+	if len(in) != 1 || in[0].Origin != "unit:evil.service" || in[0].OriginFile != "/etc/systemd/system/evil.service" || in[0].OriginSHA256 != hexSum(unit) {
+		t.Fatalf("%+v", in)
+	}
+	r.got = nil
+	r.a.baseHash = func(s string) bool { return s == hexSum(unit) }
+	x2 := mk(310, 1, 0, "/tmp/x")
+	x2.Cgroup = x.Cgroup
+	r.a.handle(tree(x2), []detect.Detection{egress(x2)})
+	if in := r.kind("egress"); len(in) != 1 || in[0].OriginFile == "" || in[0].OriginSHA256 != "" {
+		t.Fatalf("baseline unit: %+v", in)
 	}
 }

