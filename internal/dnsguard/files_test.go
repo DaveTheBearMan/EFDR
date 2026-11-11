@@ -201,3 +201,16 @@ func TestAssert_MissingFilesCreated(t *testing.T) {
 		t.Fatalf("changed %v", changed)
 	}
 }
+
+// With no host name in the config there is no 127.0.1.1 line, rather
+// than one that names nothing.
+func TestAssert_HostsWithoutHostName(t *testing.T) {
+	root := etc(t)
+	c := cfg()
+	c.Host = ""
+	assert(t, root, c)
+	got := read(t, root, "/etc/hosts")
+	if strings.Contains(got, "127.0.1.1") || !strings.Contains(got, "127.0.0.1 localhost\n") {
+		t.Fatalf("hosts:\n%s", got)
+	}
+}

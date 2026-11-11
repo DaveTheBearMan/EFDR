@@ -98,7 +98,11 @@ func replace(full string, content []byte) error {
 // hosts is the whole of /etc/hosts: nothing in it but what the config names.
 func hosts(c *config.Config) []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\n", c.Host)
+	b.WriteString("127.0.0.1 localhost\n")
+	if c.Host != "" {
+		fmt.Fprintf(&b, "127.0.1.1 %s\n", c.Host)
+	}
+	b.WriteString("::1 localhost ip6-localhost ip6-loopback\n")
 	names := make([]string, 0, len(c.DNS.Hosts))
 	for name := range c.DNS.Hosts {
 		names = append(names, name)
