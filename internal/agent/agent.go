@@ -124,10 +124,11 @@ func (a *agent) setConfig(cfg *config.Config) {
 	a.cfg, a.pol, a.users = cfg, &pol, users
 }
 
-// reload takes a reloaded config into use, unless it changes who can
-// reach the box: the agent applies a table at once and keeps it, with no
+// reload takes a reloaded config into use, unless it moves the DNS stub
+// (which stays bound where it started) or changes who can reach the box: the agent applies a table at once and keeps it, with no
 // trial and no revert, so a wrong address there would be a lockout. Such a
-// change needs a restart, after `xdr fw try` with the new file.
+// change needs a restart, after `xdr fw try` with the new file for an
+// access change.
 func (a *agent) reload(cfg *config.Config) error {
 	a.mu.Lock()
 	old := a.cfg
@@ -144,6 +145,9 @@ func (a *agent) reload(cfg *config.Config) error {
 	}
 	if !slices.Equal(old.XDRPorts, cfg.XDRPorts) {
 		changed = append(changed, "xdr_ports")
+	}
+	if old.DNS.Listen != cfg.DNS.Listen {
+		changed = append(changed, "dns.listen") // the stub stays bound where it is
 	}
 	if changed != nil {
 		return fmt.Errorf("%s changed; restart the agent for that, after `xdr fw try`", strings.Join(changed, ", "))

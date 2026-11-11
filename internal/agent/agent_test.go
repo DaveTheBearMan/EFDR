@@ -626,6 +626,8 @@ func TestReload_RefusesAccessChange(t *testing.T) {
 		{"ssh_from", func(c *config.Config) { c.SSHFrom = []config.Net{pfx("198.51.100.0/24")} }},
 		{"ssh_port", func(c *config.Config) { c.SSHPort = 2222 }},
 		{"xdr_ports", func(c *config.Config) { c.XDRPorts = []uint16{7444} }},
+		// The stub stays where it is bound; resolv.conf would point elsewhere.
+		{"dns.listen", func(c *config.Config) { c.DNS.Listen = "127.0.0.2:53" }},
 	} {
 		r := newRig(t)
 		old := r.a.cfg
