@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,9 @@ const (
 	perSecond   = 20 // requests from one address before 429
 	seenHunts   = 1024
 	huntQueue   = 64 // hunts waiting to go to one peer
+	peerHunts   = 30 // new hunts taken from one address per peerWindow
+	peerWindow  = 10 * time.Minute
+	maxSenders  = 256 // addresses tracked for peerHunts
 )
 
 // Rules is the agent's verified rule set: Offer takes a newer signed set
@@ -78,14 +82,29 @@ type Mesh struct {
 	seen    map[string]bool
 	order   []string // seen, oldest first
 	window  time.Time
-	counts  map[netip.Addr]int
-	huntsIn atomic.Int64 // hunt posts received, for tests
+	counts  map[rateKey]int
+	senders map[netip.Addr]*sender // new hunts per address
+	huntsIn atomic.Int64           // hunt posts received, for tests
+}
+
+// rateKey is one bucket of the per-address rate: beats have their own, so
+// a burst of posts cannot make a peer look silent.
+type rateKey struct {
+	a    netip.Addr
+	beat bool
+}
+
+// sender is the new hunts one address sent in the window, and whether a
+// drop was already reported.
+type sender struct {
+	times []time.Time
+	told  bool
 }
 
 // New is a mesh for cfg; Run starts it.
 func New(cfg Config) *Mesh {
 	m := &Mesh{cfg: cfg, beatEvery: beatEvery, silentAfter: silentAfter,
-		peers: map[netip.Addr]*peer{}, seen: map[string]bool{}, counts: map[netip.Addr]int{}}
+		peers: map[netip.Addr]*peer{}, seen: map[string]bool{}, counts: map[rateKey]int{}, senders: map[netip.Addr]*sender{}}
 	for _, p := range cfg.Peers {
 		m.peers[p.Addr().Unmap()] = &peer{addr: p, kick: make(chan struct{}, 1), hunts: make(chan *hunt.Request, huntQueue)}
 	}
@@ -123,17 +142,57 @@ func (m *Mesh) remember(id string) bool {
 	return true
 }
 
+// known reports whether id is a hunt already seen.
+func (m *Mesh) known(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.seen[id]
+}
+
 // allow counts one request from a and reports whether it is within the
 // rate.
-func (m *Mesh) allow(a netip.Addr) bool {
+func (m *Mesh) allow(a netip.Addr, beat bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if now := time.Now(); now.Sub(m.window) >= time.Second {
 		m.window = now
 		clear(m.counts)
 	}
-	m.counts[a]++
-	return m.counts[a] <= perSecond
+	k := rateKey{a, beat}
+	m.counts[k]++
+	return m.counts[k] <= perSecond
+}
+
+// admit counts one new hunt from a and reports whether it is within
+// peerHunts, and whether a drop should be reported.
+func (m *Mesh) admit(a netip.Addr, now time.Time) (ok, report bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.senders) >= maxSenders && m.senders[a] == nil {
+		for k, s := range m.senders {
+			if len(s.times) == 0 || now.Sub(s.times[len(s.times)-1]) >= peerWindow {
+				delete(m.senders, k)
+			}
+		}
+		if len(m.senders) >= maxSenders {
+			return false, false
+		}
+	}
+	s := m.senders[a]
+	if s == nil {
+		s = &sender{}
+		m.senders[a] = s
+	}
+	s.times = slices.DeleteFunc(s.times, func(t time.Time) bool { return now.Sub(t) >= peerWindow })
+	if len(s.times) == 0 {
+		s.told = false
+	}
+	if len(s.times) >= peerHunts {
+		report, s.told = !s.told, true
+		return false, report
+	}
+	s.times = append(s.times, now)
+	return true, false
 }
 
 // PushRules sends the set in force to every peer now.
@@ -254,6 +313,17 @@ func (m *Mesh) handler() http.Handler {
 			http.Error(w, "bad hunt", http.StatusBadRequest)
 			return
 		}
+		if m.known(h.ID) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if ok, report := m.admit(from(r), time.Now()); !ok {
+			if report {
+				m.alert("hunt-dropped", model.SevMedium, fmt.Sprintf("more than %d hunts from peer %s (%s) in %s", peerHunts, from(r), cn(r), peerWindow))
+			}
+			http.Error(w, "too many hunts", http.StatusTooManyRequests)
+			return
+		}
 		if m.remember(h.ID) {
 			if m.cfg.OnHunt != nil {
 				m.cfg.OnHunt(&h, from(r))
@@ -263,7 +333,7 @@ func (m *Mesh) handler() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !m.allow(from(r)) {
+		if !m.allow(from(r), r.URL.Path == "/beat") {
 			http.Error(w, "slow down", http.StatusTooManyRequests)
 			return
 		}

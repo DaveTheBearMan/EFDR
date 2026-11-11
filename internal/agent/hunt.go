@@ -43,6 +43,19 @@ type hunter struct {
 	order   []string
 	senders map[string][]time.Time // searches per sender in the window
 	dropped map[string]bool        // senders already told about this window
+	fullAt  time.Time              // when a full queue was last reported
+}
+
+// full reports whether a full queue should be reported now: once per
+// senderWindow.
+func (h *hunter) full(now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.fullAt.IsZero() && now.Sub(h.fullAt) < senderWindow {
+		return false
+	}
+	h.fullAt = now
+	return true
 }
 
 func newHunter() *hunter {
@@ -131,17 +144,25 @@ func (a *agent) offerHunt(r *hunt.Request, via string) {
 		a.recordLocked(incident.Incident{Kind: "hunt-dropped", Action: "alert", Severity: model.SevMedium, Hunt: r.ID,
 			Detail: fmt.Sprintf("hunt %s from %s via %s: %s", r.ID, r.From, via, why)})
 	}
-	ok, report := h.admit(r.From, a.now())
+	// etcd vouches for From; over the mesh only the relaying peer is
+	// known, so the cap is on it.
+	sender := r.From
+	if strings.HasPrefix(via, "peer ") {
+		sender = via
+	}
+	ok, report := h.admit(sender, a.now())
 	if !ok {
 		if report {
-			drop(fmt.Sprintf("more than %d hunts from %s in %s", perSender, r.From, senderWindow))
+			drop(fmt.Sprintf("more than %d hunts from %s in %s", perSender, sender, senderWindow))
 		}
 		return
 	}
 	select {
 	case h.queue <- r:
 	default:
-		drop("queue full")
+		if h.full(a.now()) {
+			drop(fmt.Sprintf("queue full (told once per %s)", senderWindow))
+		}
 	}
 }
 

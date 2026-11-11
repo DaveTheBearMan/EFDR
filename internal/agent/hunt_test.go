@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -205,6 +206,45 @@ func TestHunt_PerSenderCap(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n.Load() != 30 {
 		t.Fatalf("%d searches", n.Load())
+	}
+}
+
+// Over the mesh, the cap is on the peer that relayed the hunt: a peer
+// cannot dodge it by naming a new sender each time.
+func TestHunt_PerRelayCap(t *testing.T) {
+	r, _, _ := huntRig(t)
+	n := atomic.Int32{}
+	r.a.search = func(context.Context, *hunt.Request) hunt.Result { n.Add(1); return hunt.Result{} }
+	for i := range 31 {
+		r.a.offerHunt(fileHunt(fmt.Sprintf("h%02d", i), hunt.File{SHA256: sumOf("x"), Size: int64(i)}), "peer 192.0.2.4")
+		if i < 30 {
+			waitFor(t, "searched", func() bool { return n.Load() == int32(i+1) })
+		}
+	}
+	waitFor(t, "hunt-dropped", func() bool { return len(r.kindLocked("hunt-dropped")) == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if n.Load() != 30 {
+		t.Fatalf("%d searches", n.Load())
+	}
+}
+
+// A full queue is reported once per window, not once per hunt.
+func TestHunt_QueueFullToldOnce(t *testing.T) {
+	r, _, _ := huntRig(t)
+	block, started := make(chan struct{}), make(chan struct{}, 1)
+	r.a.search = func(context.Context, *hunt.Request) hunt.Result {
+		started <- struct{}{}
+		<-block
+		return hunt.Result{}
+	}
+	defer close(block)
+	r.a.offerHunt(fileHunt("h00", hunt.File{SHA256: sumOf("x"), Size: 0}), "etcd")
+	<-started
+	for i := 1; i <= huntQueue+5; i++ {
+		r.a.offerHunt(fileHunt(fmt.Sprintf("h%02d", i), hunt.File{SHA256: sumOf("x"), Size: int64(i)}), "etcd")
+	}
+	if d := r.kindLocked("hunt-dropped"); len(d) != 1 {
+		t.Fatalf("%d drop alerts", len(d))
 	}
 }
 

@@ -330,3 +330,38 @@ func TestMesh_PeerSilent(t *testing.T) {
 		t.Fatalf("%+v", ins)
 	}
 }
+
+// A peer flooding hunts gets a bounded number taken and relayed, one
+// alert for it, and cannot crowd out its own or others' beats.
+func TestMesh_HuntFloodBounded(t *testing.T) {
+	r := newRig(t, "a", "b")
+	a := r.node(t, "a", 2, 3)
+	a.start(t)
+	url := "https://" + a.addr.String()
+	_, bcli := r.tls(t, "b")
+	cl := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{TLSClientConfig: bcli}}
+	post := func(path string, body []byte) int {
+		resp, err := cl.Post(url+path, "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	n := 0
+	for range 3 {
+		time.Sleep(time.Second) // a fresh rate window
+		for range 20 {
+			b, _ := json.Marshal(req(fmt.Sprintf("cmd %d", n)))
+			n++
+			post("/hunt", b)
+		}
+		if code := post("/beat", []byte(`{"host":"b"}`)); code != http.StatusOK {
+			t.Fatalf("beat after hunts: %d", code)
+		}
+	}
+	h, ins := a.got()
+	if len(h) != PeerHunts || len(kinds(ins, "hunt-dropped")) != 1 {
+		t.Fatalf("%d hunts, %d drop alerts", len(h), len(kinds(ins, "hunt-dropped")))
+	}
+}
