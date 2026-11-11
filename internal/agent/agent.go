@@ -27,11 +27,13 @@ import (
 	"xdr/internal/config"
 	"xdr/internal/detect"
 	"xdr/internal/dnsguard"
+	"xdr/internal/fleet"
 	"xdr/internal/fw"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/proc"
 	"xdr/internal/respond"
+	"xdr/internal/rules"
 	"xdr/internal/sensor"
 )
 
@@ -59,6 +61,14 @@ type Options struct {
 	LogPath    string                  // default /var/lib/xdr/incidents.jsonl
 	Stderr     io.Writer               // sensor and reload messages
 	OnIncident func(incident.Incident) // called for every line written
+}
+
+// fleetLink is the agent's link to the controller (fleet.Client).
+type fleetLink interface {
+	Cached() (*rules.Set, error)
+	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident))
+	Propose([]rules.Rule)
+	Report(incident.Incident)
 }
 
 type firewall interface {
@@ -91,9 +101,13 @@ type agent struct {
 	applied string          // the ruleset last applied, as text
 	pinned  string          // the config and DNS switch the files were last asserted for
 	foreign map[string]bool // base chains of other tables already seen (nil: not looked yet)
-	snap    *proc.Snapshot
-	snapAt  time.Time
-	askers  map[int]*asker
+
+	fleet    fleetLink         // nil: a standalone agent
+	baseHash func(string) bool // a hash of the baseline; nil: none
+	ruleSet  *rules.Set        // the last verified set, before the agent's own check
+	snap     *proc.Snapshot
+	snapAt   time.Time
+	askers   map[int]*asker
 }
 
 // accounts reads passwd: the name of each uid, and the uids of the gray
@@ -160,7 +174,65 @@ func (a *agent) reload(cfg *config.Config) error {
 		return fmt.Errorf("%s changed; restart the agent for that, after `xdr fw try`", strings.Join(changed, ", "))
 	}
 	a.setConfig(cfg)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.takeRules() // what is protected may have changed
 	return nil
+}
+
+// setRules takes a verified rule set into use.
+func (a *agent) setRules(s *rules.Set) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ruleSet = s
+	a.takeRules()
+}
+
+// takeRules checks the rules of the set in force against this box's own
+// config, as the controller did against the fleet's, and enforces those
+// that pass. The caller holds a.mu.
+func (a *agent) takeRules() {
+	if a.ruleSet == nil {
+		return
+	}
+	g := rules.Guard{Baseline: a.baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected()}
+	var kept []rules.Rule
+	for _, r := range a.ruleSet.Rules {
+		if err := g.Validate(r); err != nil {
+			a.record(incident.Incident{Kind: "rules-refused", Action: "alert", Severity: model.SevHigh,
+				Detail: fmt.Sprintf("rule %s from %s, version %d: %v", r.ID, r.From, a.ruleSet.Version, err)})
+			continue
+		}
+		kept = append(kept, r)
+	}
+	ix := (&rules.Set{Rules: kept}).Lookup()
+	pol := *a.pol
+	pol.Rules = &ix
+	a.pol = &pol
+}
+
+// recordLocked is record for callers that do not hold a.mu.
+func (a *agent) recordLocked(in incident.Incident) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.record(in)
+}
+
+// startFleet enforces the cached rule set, then starts f. stop waits for
+// it after ctx is done.
+func (a *agent) startFleet(ctx context.Context, f fleetLink) (stop func()) {
+	a.fleet = f
+	if s, err := f.Cached(); err != nil {
+		a.recordLocked(incident.Incident{Kind: "rules-refused", Action: "alert", Severity: model.SevHigh, Detail: "cached rule set: " + err.Error()})
+	} else if s != nil {
+		a.setRules(s)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.Run(ctx, a.setRules, a.recordLocked)
+	}()
+	return func() { <-done }
 }
 
 // async returns fn run on its own goroutine behind a queue of n: the
@@ -203,8 +275,14 @@ func async(fn func(incident.Incident), n int) (call func(incident.Incident), sto
 // record writes one incident.
 func (a *agent) record(in incident.Incident) {
 	in.Host = a.cfg.Host
+	if in.Time.IsZero() {
+		in.Time = a.now()
+	}
 	if _, err := a.log.Add(in); err != nil {
 		a.logf("incident log: %v", err)
+	}
+	if a.fleet != nil {
+		a.fleet.Report(in)
 	}
 }
 
@@ -274,6 +352,11 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 			}
 		}
 		a.record(in)
+		if a.fleet != nil {
+			p := s.Procs[d.PID]
+			in.Host, in.Time = a.cfg.Host, a.now()
+			a.fleet.Propose(rules.FromIncident(in, p != nil && p.Start == d.Start && a.pol.Baseline(p)))
+		}
 	}
 }
 
@@ -591,9 +674,21 @@ func Run(ctx context.Context, o Options) error {
 		logf:  logf,
 	}
 	a.setConfig(cfg)
+	a.baseHash = rules.BaselineHashes(base)
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	if cfg.Fleet != nil {
+		// Without its keys the agent still enforces on its own.
+		if pub, err := rules.LoadPublic(filepath.Join(cfg.Fleet.Dir, "rules.pub")); err != nil {
+			a.recordLocked(incident.Incident{Kind: "fleet", Action: "alert", Severity: model.SevHigh, Detail: "not joining the fleet: " + err.Error()})
+		} else {
+			fctx, cancel := context.WithCancel(ctx)
+			wait := a.startFleet(fctx, fleet.New(cfg.Host, *cfg.Fleet, cfg.RulesCache, pub))
+			defer wait()
+			defer cancel()
+		}
+	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
