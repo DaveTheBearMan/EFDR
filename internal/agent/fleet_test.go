@@ -74,6 +74,24 @@ func TestHandle_KillProposes(t *testing.T) {
 	}
 }
 
+// A killed process has no /proc/<pid>/exe to hash, so whether it ran a
+// base-image binary is settled before the kill.
+func TestHandle_BaselineJudgedBeforeKill(t *testing.T) {
+	r, f := fleetRig(t)
+	bash := mk(301, 100, 1000, "/usr/bin/bash")
+	r.a.pol.Base = &baseline.Baseline{Files: map[string]baseline.FileEntry{pathenc.Encode("/usr/bin/bash"): {SHA256: hexSum("/usr/bin/bash")}}}
+	r.a.pol.Hash = func(p *proc.Proc) string {
+		if len(r.kills) > 0 {
+			return ""
+		}
+		return hexSum(p.Exe)
+	}
+	r.a.handle(tree(bash), []detect.Detection{egress(bash)})
+	if len(r.kills) != 1 || len(f.proposed) != 1 || f.proposed[0].Kind != "remote" {
+		t.Fatalf("kills %d, proposed %+v", len(r.kills), f.proposed)
+	}
+}
+
 func TestSetRules_RefusesProtected(t *testing.T) {
 	r, _ := fleetRig(t)
 	r.a.baseHash = func(s string) bool { return s == hexSum("/usr/bin/bash") }

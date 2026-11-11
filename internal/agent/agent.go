@@ -323,8 +323,11 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 	killed := map[int]bool{}
 	for _, d := range ds {
 		in := incident.Incident{Kind: d.Kind, Severity: d.Severity, PID: d.PID, Remote: d.Remote, Detail: d.Detail}
+		// Settled now: once killed, the process has no exe left to hash.
+		base := false
 		if p := s.Procs[d.PID]; p != nil && p.Start == d.Start {
 			a.describe(&in, s, p)
+			base = a.fleet != nil && a.pol.Baseline(p)
 		}
 		switch decided := respond.Decide(d, s, a.pol); {
 		case killed[d.PID]:
@@ -353,9 +356,8 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 		}
 		a.record(in)
 		if a.fleet != nil {
-			p := s.Procs[d.PID]
 			in.Host, in.Time = a.cfg.Host, a.now()
-			a.fleet.Propose(rules.FromIncident(in, p != nil && p.Start == d.Start && a.pol.Baseline(p)))
+			a.fleet.Propose(rules.FromIncident(in, base))
 		}
 	}
 }
