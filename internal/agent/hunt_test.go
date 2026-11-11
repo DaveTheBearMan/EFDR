@@ -233,7 +233,10 @@ func TestHunt_QueueFullToldOnce(t *testing.T) {
 	r, _, _ := huntRig(t)
 	block, started := make(chan struct{}), make(chan struct{}, 1)
 	r.a.search = func(context.Context, *hunt.Request) hunt.Result {
-		started <- struct{}{}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
 		<-block
 		return hunt.Result{}
 	}
