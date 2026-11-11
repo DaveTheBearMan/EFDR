@@ -528,27 +528,6 @@ func localAddrs() map[netip.Addr]bool {
 	return out
 }
 
-func loadBaseline(paths []string) (*baseline.Baseline, error) {
-	base, err := baseline.Embedded()
-	if err != nil {
-		return nil, err
-	}
-	layers := []*baseline.Baseline{base}
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		b, err := baseline.Load(f)
-		f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		layers = append(layers, b)
-	}
-	return baseline.Compose(layers...), nil
-}
-
 // Run is the agent: it loads the firewall, pins name resolution, serves
 // the DNS stub, and watches and judges processes until ctx is done or it
 // is told to stop (SIGTERM, SIGINT). SIGHUP reloads the config. The
@@ -565,7 +544,7 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	base, err := loadBaseline(o.Baselines)
+	base, err := baseline.LoadLayers(o.Baselines)
 	if err != nil {
 		return err
 	}

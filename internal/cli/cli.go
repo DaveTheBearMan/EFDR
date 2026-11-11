@@ -37,7 +37,8 @@ commands:
   incidents print the incident log: incidents [--file PATH]
   agent     watch and respond:      agent --config FILE [--baseline FILE]... [--sensor auto|ebpf|proc|none] [--log PATH]
   listeners listeners, for config:  listeners [--config FILE]
-  controller jump box:              controller init --dir D --name ADDR... | enroll --dir D --host H --out DIR
+  controller jump box:              controller init --dir D --name ADDR... | enroll --dir D --host H --out DIR | run --dir D [--config FILE]
+  rules     the signed rule set:    rules list|revoke --dir D [--endpoint ADDR] [ID]
   version   print the xdr version
 `
 
@@ -74,6 +75,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = listenersCmd(rest, stdout, stderr)
 	case "controller":
 		err = controllerCmd(rest, stdout, stderr)
+	case "rules":
+		err = rulesCmd(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s", cmd, usage)
 		return 2
