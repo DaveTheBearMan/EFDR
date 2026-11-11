@@ -94,3 +94,18 @@ func TestRules_NotSelf(t *testing.T) {
 		t.Fatal(ds)
 	}
 }
+
+// A container's own shells and interpreters are not in the host baseline,
+// so their hashes could pass validation; a hash rule never matches them.
+// The same names on the host, outside the baseline, still match.
+func TestRules_HashSkipsContainerShells(t *testing.T) {
+	hashes["/tmp/sh"] = "e1"
+	defer delete(hashes, "/tmp/sh")
+	p := withRules(pol(), rules.Rule{Kind: "hash", SHA256: "e1", From: "db01"})
+	sh := mk(10, 1, "/tmp/sh", nil)
+	sh.Cgroup = "0::/system.slice/docker-" + strings.Repeat("ab", 32) + ".scope"
+	if ds := only(Sweep(snap(append(web(), sh)), p), "rule-hash"); len(ds) != 0 {
+		t.Fatalf("container shell: %+v", ds)
+	}
+	want(t, only(Sweep(snap(append(web(), mk(10, 1, "/tmp/sh", nil))), p), "rule-hash"), "rule-hash:10")
+}

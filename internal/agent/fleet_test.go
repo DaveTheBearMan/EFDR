@@ -167,3 +167,27 @@ func TestReload_RevalidatesRules(t *testing.T) {
 		t.Fatalf("after reload: %+v %+v", r.a.pol.Rules, r.got)
 	}
 }
+
+// A container's shell killed for a reverse shell proposes only the
+// endpoint: its hash is the image's own shell.
+func TestHandle_ContainerShellNoHash(t *testing.T) {
+	r, f := fleetRig(t)
+	sh := mk(301, 100, 1000, "/bin/sh")
+	sh.Cgroup = "0::/system.slice/docker-" + strings.Repeat("ab", 32) + ".scope"
+	r.a.handle(tree(sh), []detect.Detection{egress(sh)})
+	if len(f.proposed) != 1 || f.proposed[0].Kind != "remote" {
+		t.Fatalf("%+v", f.proposed)
+	}
+}
+
+// No rule may name the agent's own binary.
+func TestSetRules_RefusesSelfHash(t *testing.T) {
+	r, _ := fleetRig(t)
+	r.a.selfHash = hexSum("/usr/local/sbin/xdr")
+	self := rules.Rule{Kind: "hash", SHA256: hexSum("/usr/local/sbin/xdr"), From: "db01"}
+	self.SetID()
+	r.a.setRules(&rules.Set{Version: 1, Rules: []rules.Rule{self}})
+	if n := len(r.kind("rules-refused")); n != 1 || len(r.a.pol.Rules.Hash) != 0 {
+		t.Fatalf("%d refused, %+v", n, r.a.pol.Rules)
+	}
+}

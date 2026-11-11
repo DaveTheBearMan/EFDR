@@ -133,3 +133,12 @@ func TestEtcd_BootstrapTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// History is compacted, or a stream of puts fills etcd's quota.
+func TestEtcd_AutoCompaction(t *testing.T) {
+	f := newFleet(t)
+	c := f.Etcd.Config()
+	if c.AutoCompactionMode != "periodic" || c.AutoCompactionRetention != "5m" {
+		t.Fatalf("mode %q retention %q", c.AutoCompactionMode, c.AutoCompactionRetention)
+	}
+}

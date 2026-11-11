@@ -5,13 +5,16 @@ package fleet
 import "strings"
 
 // The etcd keys. A host writes only under its own Proposed, Incidents and
-// Heartbeat keys; only the controller writes RulesKey.
+// Heartbeat keys; only the controller writes RulesKey, and only it reads
+// or writes Revoked and Disabled.
 const (
 	Prefix       = "/xdr/"
 	RulesKey     = "/xdr/rules"
 	ProposedAll  = "/xdr/proposed/"
 	IncidentsAll = "/xdr/incidents/"
 	HeartbeatAll = "/xdr/heartbeat/"
+	RevokedAll   = "/xdr/revoked/"  // rule ids never to promote again
+	DisabledAll  = "/xdr/disabled/" // hosts whose writes were taken away
 )
 
 // Proposed is the prefix of host's proposed rules, one key per rule id.

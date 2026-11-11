@@ -1,7 +1,9 @@
 package rules
 
 import (
+	"fmt"
 	"net/netip"
+	"time"
 	"unicode/utf8"
 
 	"xdr/internal/incident"
@@ -41,6 +43,23 @@ func FromIncident(in incident.Incident, baselineExe bool) []Rule {
 		}
 	}
 	return out
+}
+
+// maxExe is the most bytes of the path a hash rule names.
+const maxExe = 512
+
+// Bound cuts or refuses what a proposer controls beyond the match itself,
+// so no proposal can bloat the signed set: Detail is cut, Seen is never
+// later than now, and an over-long Exe is refused.
+func (r *Rule) Bound(now time.Time) error {
+	if len(r.Exe) > maxExe {
+		return fmt.Errorf("exe of %d bytes", len(r.Exe))
+	}
+	r.Detail = cut(r.Detail, maxDetail)
+	if r.Seen.IsZero() || r.Seen.After(now) {
+		r.Seen = now
+	}
+	return nil
 }
 
 func cut(s string, n int) string {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run\n")
+		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
@@ -71,6 +72,44 @@ func controllerCmd(args []string, stdout, stderr io.Writer) error {
 			*cfgPath = filepath.Join(*dir, "controller.json")
 		}
 		return controllerRun(*dir, *cfgPath, stdout)
+	case "disable-host":
+		fs := flags("controller disable-host", stderr)
+		dir := fs.String("dir", "", "controller directory")
+		host := fs.String("host", "", "enrolled host to take write access from")
+		endpoint := fs.String("endpoint", "", "etcd address (default: listen in DIR/controller.json)")
+		if err := parse(fs, rest); err != nil {
+			return err
+		}
+		if *dir == "" || *host == "" {
+			fmt.Fprint(stderr, "xdr controller disable-host: --dir and --host are required\n")
+			return errUsage
+		}
+		hosts, err := pki.Hosts(*dir)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(hosts, *host) {
+			return fmt.Errorf("%s is not enrolled", *host)
+		}
+		key, err := rules.LoadPrivate(filepath.Join(*dir, "rules.key"))
+		if err != nil {
+			return err
+		}
+		c, err := rootClient(*dir, *endpoint)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		ctl, err := controller.New(*dir, c, rules.Guard{}, key, nil)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := ctl.DisableHost(ctx, *host, "by the operator"); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "disabled %s: it can no longer propose, report or send heartbeats\n", *host)
 	default:
 		fmt.Fprintf(stderr, "xdr controller: unknown subcommand %q\n", sub)
 		return errUsage

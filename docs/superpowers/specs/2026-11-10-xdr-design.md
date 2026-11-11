@@ -89,7 +89,10 @@ Non-baseline binary hashes, remote IPs and parent→child patterns are promoted.
   - Proposals come from reverse-shell, service-shell and egress incidents that were killed, would have been (`kill: false`) or held. A base-image binary proposes only its endpoint.
   - Every rule is checked twice, by the controller before signing and by the agent before enforcing, against the baseline, `guard_exes` and protected addresses (the controller's `protect`; the agent's own jump, peers, ssh_from, allow_out, resolver and dhcp_server). Caps: 256 promoted rules per proposing host, 4096 in all.
   - The set carries a version that only rises; an agent refuses an older or badly signed set (`rules-refused`) and keeps the last verified one on disk, enforcing it from start, before etcd answers.
-  - Only the operator removes a rule (`xdr rules revoke`). Rules do not expire.
+  - Only the operator removes a rule (`xdr rules revoke`), and a revoked rule is never promoted again. Rules do not expire.
+  - A container's shells and interpreters propose no hash and match no hash rule: they are the image's own, in no host baseline. Neither the agent's nor the controller's own binary can ever be a hash rule.
+  - The controller cuts what a proposer controls (detail to 256 bytes, exe to 512, seen no later than now) and refuses a set over 1 MiB, below etcd's request limit.
+  - A host writing more than 600 keys a minute (proposals, incidents, heartbeats) loses its write access for good (`host-disabled`); the operator can do the same by hand (`xdr controller disable-host`). etcd history is compacted every 5 minutes, so a stream of puts cannot fill its quota.
   - Heartbeats are an etcd key on a 10 s lease; the controller reports `agent-silent` when it lapses (or none came within 15 s of its start) and `agent-back` on the next one. Agent incidents are copied into the controller's own log.
 
 **Fleet communication (decided: boxes must learn about problems on other boxes immediately):**

@@ -2,9 +2,13 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/netip"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -350,5 +354,117 @@ func TestHeartbeat_SilentAndBack(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if n := len(kinds(r.seen(), "agent-silent")); n != 2 {
 		t.Fatalf("silent reported %d times", n)
+	}
+}
+
+// Fields a proposer controls are cut or refused before they are signed.
+func TestPromote_FieldsBounded(t *testing.T) {
+	f := newFleet(t, "web01")
+	r := run(t, f, nil)
+	h := rules.Rule{Kind: "hash", SHA256: sumN(1), Exe: "/tmp/x", Detail: strings.Repeat("d", 10000), Seen: time.Now().Add(1000 * time.Hour)}
+	propose(t, f, "web01", h)
+	eventually(t, "v1", func() bool { return version(t, f) == 1 })
+	got := published(t, f).Rules[0]
+	if len(got.Detail) != 256 || got.Seen.After(time.Now()) {
+		t.Fatalf("detail %d bytes, seen %v", len(got.Detail), got.Seen)
+	}
+	propose(t, f, "web01", rules.Rule{Kind: "hash", SHA256: sumN(2), Exe: "/" + strings.Repeat("e", 600)})
+	eventually(t, "long exe refused", func() bool {
+		rej := kinds(r.seen(), "rule-rejected")
+		return len(rej) == 1 && strings.Contains(rej[0].Detail, "exe")
+	})
+}
+
+// A set too big for etcd to take is refused before it is written, so
+// the set in force keeps growing for others below the limit.
+func TestPromote_SetSizeLimit(t *testing.T) {
+	f := newFleet(t, "web01")
+	r := run(t, f, func(c *Controller) { c.maxSet = 3000 })
+	for i := range 20 {
+		propose(t, f, "web01", rules.Rule{Kind: "hash", SHA256: sumN(i), Detail: strings.Repeat("d", 200)})
+	}
+	eventually(t, "fleet size", func() bool {
+		rej := kinds(r.seen(), "rule-rejected")
+		return len(rej) > 0 && strings.Contains(rej[0].Detail, "fleet size")
+	})
+	e, _ := f.Root.Get(ctx5(t), fleet.RulesKey)
+	if n := len(e.Kvs[0].Value); n > 3000 {
+		t.Fatalf("%d bytes published", n)
+	}
+}
+
+// A revoked rule proposed again stays out.
+func TestRevoke_Sticks(t *testing.T) {
+	f := newFleet(t, "web01")
+	r := run(t, f, nil)
+	rule := remote("203.0.113.9", 1)
+	propose(t, f, "web01", rule)
+	eventually(t, "v1", func() bool { return version(t, f) == 1 })
+	if err := r.ctl.Revoke(ctx5(t), published(t, f).Rules[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	propose(t, f, "web01", rule)
+	eventually(t, "revoked", func() bool {
+		rej := kinds(r.seen(), "rule-rejected")
+		return len(rej) == 1 && strings.Contains(rej[0].Detail, "revoked")
+	})
+	if v := version(t, f); v != 2 {
+		t.Fatalf("version %d", v)
+	}
+}
+
+// The controller's own binary can never become a hash rule.
+func TestPromote_SelfHashRefused(t *testing.T) {
+	f := newFleet(t, "web01")
+	r := run(t, f, nil)
+	propose(t, f, "web01", rules.Rule{Kind: "hash", SHA256: selfSum(t)})
+	eventually(t, "refused", func() bool {
+		rej := kinds(r.seen(), "rule-rejected")
+		return len(rej) == 1 && strings.Contains(rej[0].Detail, "baseline hash")
+	})
+}
+
+func selfSum(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+// A host writing faster than any agent does loses its write access, for
+// good, and the others keep theirs.
+func TestFlood_DisablesHost(t *testing.T) {
+	f := newFleet(t, "web01", "db01")
+	r := run(t, f, func(c *Controller) { c.floodLimit = 5 })
+	web := hostClient(t, f, "web01")
+	for i := range 8 {
+		if _, err := web.Put(ctx5(t), fleet.Incidents("web01")+strconv.Itoa(i), `{"kind":"x"}`); err != nil {
+			break
+		}
+	}
+	eventually(t, "host-disabled", func() bool { return len(kinds(r.seen(), "host-disabled")) == 1 })
+	if _, err := web.Put(ctx5(t), fleet.Incidents("web01")+"z", "{}"); !denied(err) {
+		t.Fatalf("incident put: %v", err)
+	}
+	if _, err := web.Put(ctx5(t), fleet.Proposed("web01")+"z", "{}"); !denied(err) {
+		t.Fatalf("proposal put: %v", err)
+	}
+	if _, err := hostClient(t, f, "db01").Put(ctx5(t), fleet.Incidents("db01")+"1", "{}"); err != nil {
+		t.Fatalf("db01: %v", err)
+	}
+
+	// A restart, which bootstraps again, keeps it disabled.
+	r.stop()
+	f.Stop()
+	f.Start(t)
+	if _, err := hostClient(t, f, "web01").Put(ctx5(t), fleet.Incidents("web01")+"y", "{}"); !denied(err) {
+		t.Fatalf("after restart: %v", err)
 	}
 }

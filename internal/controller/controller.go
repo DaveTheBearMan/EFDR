@@ -3,10 +3,15 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +31,9 @@ const (
 	silentAfter = 15 * time.Second
 	opTimeout   = 5 * time.Second
 	writeTries  = 5
+	maxSet      = 1 << 20 // below etcd's 1.5 MiB request limit
+	floodLimit  = 600
+	floodWindow = time.Minute
 )
 
 // beat is what the controller knows of one host's heartbeat.
@@ -46,11 +54,16 @@ type Controller struct {
 	now               func() time.Time
 	tick, silentAfter time.Duration
 	hostCap, totalCap int
+	maxSet            int // the most bytes of a published envelope
+	floodLimit        int // writes by one host in floodWindow before it is disabled
 	mu                sync.Mutex
 	set               *rules.Set
 	rev               int64 // ModRevision of the rules key; 0: absent
 	beats             map[string]*beat
 	started           time.Time
+	writes            map[string]int // per host, in the window since windowAt
+	windowAt          time.Time
+	disabled          map[string]bool
 }
 
 // New is a controller over c that continues from the rule set in etcd.
@@ -58,15 +71,45 @@ func New(dir string, c *clientv3.Client, g rules.Guard, key ed25519.PrivateKey, 
 	ctl := &Controller{
 		dir: dir, c: c, guard: g, key: key, log: log,
 		now: time.Now, tick: time.Second, silentAfter: silentAfter,
-		hostCap: hostCap, totalCap: totalCap,
-		beats: map[string]*beat{},
+		hostCap: hostCap, totalCap: totalCap, maxSet: maxSet, floodLimit: floodLimit,
+		beats: map[string]*beat{}, writes: map[string]int{}, disabled: map[string]bool{},
+	}
+	// Whatever the baselines say, the controller's own binary, which the
+	// operator also runs on the boxes, is never a hash rule.
+	if self, err := selfHash(); err == nil {
+		base := g.Baseline
+		ctl.guard.Baseline = func(s string) bool { return s == self || base != nil && base(s) }
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
 	if err := ctl.load(ctx); err != nil {
 		return nil, err
 	}
+	resp, err := c.Get(ctx, fleet.DisabledAll, clientv3.WithPrefix(), clientv3.WithKeysOnly())
+	if err != nil {
+		return nil, err
+	}
+	for _, kv := range resp.Kvs {
+		ctl.disabled[strings.TrimPrefix(string(kv.Key), fleet.DisabledAll)] = true
+	}
 	return ctl, nil
+}
+
+func selfHash() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // load reads the published set.
@@ -125,6 +168,9 @@ func (ctl *Controller) write(ctx context.Context, change func(*rules.Set) error)
 		if err != nil {
 			return nil, err
 		}
+		if len(b) > ctl.maxSet {
+			return nil, fmt.Errorf("fleet size (%d bytes)", ctl.maxSet)
+		}
 		resp, err := ctl.c.Txn(ctx).
 			If(clientv3.Compare(clientv3.ModRevision(fleet.RulesKey), "=", ctl.rev)).
 			Then(clientv3.OpPut(fleet.RulesKey, string(b))).
@@ -143,7 +189,8 @@ func (ctl *Controller) write(ctx context.Context, change func(*rules.Set) error)
 	return nil, errors.New("rule set: another writer keeps winning")
 }
 
-// Revoke publishes the next version without rule id.
+// Revoke publishes the next version without rule id, and keeps id from
+// being promoted again.
 func (ctl *Controller) Revoke(ctx context.Context, id string) error {
 	_, err := ctl.write(ctx, func(s *rules.Set) error {
 		i := slices.IndexFunc(s.Rules, func(r rules.Rule) bool { return r.ID == id })
@@ -153,7 +200,39 @@ func (ctl *Controller) Revoke(ctx context.Context, id string) error {
 		s.Rules = slices.Delete(s.Rules, i, i+1)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	_, err = ctl.c.Put(ctx, fleet.RevokedAll+id, ctl.now().UTC().Format(time.RFC3339))
 	return err
+}
+
+// DisableHost takes away host's write access, for good: its agent keeps
+// the rule set but can no longer propose, report or send heartbeats.
+func (ctl *Controller) DisableHost(ctx context.Context, host, why string) error {
+	if _, err := ctl.c.Put(ctx, fleet.DisabledAll+host, why); err != nil {
+		return err
+	}
+	if err := revokeWrites(ctx, ctl.c, host); err != nil {
+		return err
+	}
+	ctl.mu.Lock()
+	ctl.disabled[host] = true
+	ctl.mu.Unlock()
+	ctl.record(incident.Incident{Kind: "host-disabled", Action: "alert", Severity: model.SevCritical, Host: host, Detail: why})
+	return nil
+}
+
+// flooded counts one write by host and reports whether it is past the
+// limit for the first time in this window.
+func (ctl *Controller) flooded(host string) bool {
+	now := ctl.now()
+	if now.Sub(ctl.windowAt) >= floodWindow {
+		clear(ctl.writes)
+		ctl.windowAt = now
+	}
+	ctl.writes[host]++
+	return ctl.writes[host] == ctl.floodLimit+1
 }
 
 func (ctl *Controller) record(in incident.Incident) {
@@ -195,8 +274,19 @@ func (ctl *Controller) propose(ctx context.Context, host, id string, val []byte)
 		reject(r, "id does not match the rule")
 		return
 	}
+	if err := r.Bound(ctl.now().UTC()); err != nil {
+		reject(r, err.Error())
+		return
+	}
 	if err := ctl.guard.Validate(r); err != nil {
 		reject(r, err.Error())
+		return
+	}
+	if resp, err := ctl.c.Get(ctx, fleet.RevokedAll+r.ID, clientv3.WithKeysOnly()); err != nil {
+		reject(r, err.Error())
+		return
+	} else if len(resp.Kvs) > 0 {
+		reject(r, "revoked")
 		return
 	}
 	s, err := ctl.write(ctx, func(s *rules.Set) error {
@@ -335,6 +425,25 @@ func (ctl *Controller) handle(ctx context.Context, ch change) {
 	host, rest, ok := fleet.HostOf(ch.key, ch.prefix)
 	if !ok {
 		return
+	}
+	if !ch.del {
+		ctl.mu.Lock()
+		off := ctl.disabled[host]
+		ctl.mu.Unlock()
+		switch {
+		case off:
+			if ch.prefix != fleet.HeartbeatAll {
+				ctl.delete(ctx, ch.key)
+			}
+			return
+		case ctl.flooded(host):
+			why := fmt.Sprintf("more than %d writes in %s", ctl.floodLimit, floodWindow)
+			if err := ctl.DisableHost(ctx, host, why); err != nil {
+				ctl.record(incident.Incident{Kind: "host-disabled", Action: "alert", Severity: model.SevCritical, Host: host, Detail: why + ": not disabled: " + err.Error()})
+			}
+			ctl.delete(ctx, ch.key)
+			return
+		}
 	}
 	switch ch.prefix {
 	case fleet.ProposedAll:

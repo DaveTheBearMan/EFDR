@@ -96,3 +96,29 @@ func TestRules_ListRevokeCLI(t *testing.T) {
 		t.Fatalf("unknown id: %d %q", code, se.String())
 	}
 }
+
+func TestDisableHostCLI(t *testing.T) {
+	f := fleettest.New(t, func(t *testing.T, dir, listen string) (*embed.Etcd, *clientv3.Client) {
+		e, c, err := controller.StartEtcd(dir, listen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e, c
+	}, "web01")
+	defer f.Stop()
+	var so, se bytes.Buffer
+	if code := Run([]string{"controller", "disable-host", "--dir", f.Dir, "--endpoint", f.Listen, "--host", "web01"}, &so, &se); code != 0 {
+		t.Fatalf("%d %s", code, se.String())
+	}
+	if !strings.Contains(so.String(), "disabled web01") {
+		t.Fatalf("%q", so.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if resp, err := f.Root.Get(ctx, fleet.DisabledAll+"web01"); err != nil || len(resp.Kvs) != 1 {
+		t.Fatalf("%v %v", resp, err)
+	}
+	if code := Run([]string{"controller", "disable-host", "--dir", f.Dir, "--host", "nope"}, &so, &se); code == 0 {
+		t.Fatal("an unenrolled host was disabled")
+	}
+}

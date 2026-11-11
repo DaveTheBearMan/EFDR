@@ -104,6 +104,7 @@ type agent struct {
 
 	fleet    fleetLink         // nil: a standalone agent
 	baseHash func(string) bool // a hash of the baseline; nil: none
+	selfHash string            // this binary's hash; "": unknown
 	ruleSet  *rules.Set        // the last verified set, before the agent's own check
 	snap     *proc.Snapshot
 	snapAt   time.Time
@@ -195,7 +196,12 @@ func (a *agent) takeRules() {
 	if a.ruleSet == nil {
 		return
 	}
-	g := rules.Guard{Baseline: a.baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected()}
+	// Whatever the baselines say, this binary is never a hash rule.
+	baseHash := func(s string) bool { return s == a.selfHash || a.baseHash != nil && a.baseHash(s) }
+	if a.selfHash == "" {
+		baseHash = a.baseHash
+	}
+	g := rules.Guard{Baseline: baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected()}
 	var kept []rules.Rule
 	for _, r := range a.ruleSet.Rules {
 		if err := g.Validate(r); err != nil {
@@ -323,11 +329,12 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 	killed := map[int]bool{}
 	for _, d := range ds {
 		in := incident.Incident{Kind: d.Kind, Severity: d.Severity, PID: d.PID, Remote: d.Remote, Detail: d.Detail}
-		// Settled now: once killed, the process has no exe left to hash.
+		// Settled now: once killed, the process has no exe left to hash. A
+		// container's shells and interpreters count as base-image too.
 		base := false
 		if p := s.Procs[d.PID]; p != nil && p.Start == d.Start {
 			a.describe(&in, s, p)
-			base = a.fleet != nil && a.pol.Baseline(p)
+			base = a.fleet != nil && (a.pol.Baseline(p) || detect.Class(p) != "" && proc.Container(p.Cgroup) != "")
 		}
 		switch decided := respond.Decide(d, s, a.pol); {
 		case killed[d.PID]:
@@ -677,6 +684,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	a.setConfig(cfg)
 	a.baseHash = rules.BaselineHashes(base)
+	a.selfHash, _ = proc.ExeHash(procRoot, &proc.Proc{PID: os.Getpid()})
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

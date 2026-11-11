@@ -216,6 +216,11 @@ func (p *Policy) ruleHash(pr *proc.Proc) *rules.Rule {
 	if p.Rules == nil || len(p.Rules.Hash) == 0 || p.Hash == nil {
 		return nil
 	}
+	// A container's shells and interpreters are its image's own, in no host
+	// baseline: one container's could be a rule and kill every container's.
+	if Class(pr) != "" && proc.Container(pr.Cgroup) != "" {
+		return nil
+	}
 	sum := p.Hash(pr)
 	if sum == "" {
 		return nil

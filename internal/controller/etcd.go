@@ -58,6 +58,9 @@ func StartEtcd(dir, listen string) (*embed.Etcd, *clientv3.Client, error) {
 		TrustedCAFile:  filepath.Join(dir, "ca.pem"),
 		ClientCertAuth: true,
 	}
+	// Without compaction every put stays in history until the backend
+	// quota is full, and then etcd refuses all writes, fleet-wide.
+	cfg.AutoCompactionMode, cfg.AutoCompactionRetention = "periodic", "5m"
 	cfg.LogLevel = "error"
 	cfg.LogOutputs = []string{filepath.Join(dir, "etcd.log")}
 	e, err := embed.StartEtcd(cfg)
@@ -102,6 +105,23 @@ func user(ctx context.Context, c *clientv3.Client, name, role string) error {
 	return nil
 }
 
+// revokeWrites takes away host's write access; it may still read the
+// rule set.
+func revokeWrites(ctx context.Context, c *clientv3.Client, h string) error {
+	for _, p := range []struct{ key, end string }{
+		{fleet.Proposed(h), clientv3.GetPrefixRangeEnd(fleet.Proposed(h))},
+		{fleet.Incidents(h), clientv3.GetPrefixRangeEnd(fleet.Incidents(h))},
+		{fleet.Heartbeat(h), ""},
+	} {
+		// No role yet: the next Bootstrap sees DisabledAll and revokes then.
+		_, err := c.RoleRevokePermission(ctx, "host-"+h, p.key, p.end)
+		if err != nil && !errors.Is(err, rpctypes.ErrPermissionNotGranted) && !errors.Is(err, rpctypes.ErrRoleNotFound) {
+			return fmt.Errorf("role host-%s: %w", h, err)
+		}
+	}
+	return nil
+}
+
 func role(ctx context.Context, c *clientv3.Client, name string) error {
 	if _, err := c.RoleAdd(ctx, name); err != nil && !exists(err) {
 		return fmt.Errorf("role %s: %w", name, err)
@@ -141,6 +161,15 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 		}
 		if err := user(ctx, c, h, r); err != nil {
 			return err
+		}
+		resp, err := c.Get(ctx, fleet.DisabledAll+h)
+		if err != nil {
+			return err
+		}
+		if len(resp.Kvs) > 0 {
+			if err := revokeWrites(ctx, c, h); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := c.AuthEnable(ctx); err != nil {
