@@ -92,6 +92,13 @@ func client(cn string) *x509.Certificate {
 	}
 }
 
+// hostCert is an agent's: it dials the controller, and peers dial it.
+func hostCert(cn string) *x509.Certificate {
+	c := client(cn)
+	c.ExtKeyUsage = append(c.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+	return c
+}
+
 // Init makes a new controller directory: the CA, a server cert for
 // serverNames (addresses or DNS names), the controller's own client cert
 // (CN root) and the rule-signing key.
@@ -191,7 +198,7 @@ func Enroll(dir, host, out string) error {
 	if err := os.Mkdir(out, 0o700); err != nil {
 		return err
 	}
-	if _, err := issue(out, "host", client(host), c); err != nil {
+	if _, err := issue(out, "host", hostCert(host), c); err != nil {
 		return err
 	}
 	for _, name := range []string{"ca.pem", "rules.pub"} {
@@ -257,4 +264,47 @@ func ClientTLS(caPath, certPath, keyPath string) (*tls.Config, error) {
 		return nil, err
 	}
 	return &tls.Config{Certificates: []tls.Certificate{pair}, RootCAs: p, MinVersion: tls.VersionTLS13}, nil
+}
+
+// PeerTLS is a host's side of host-to-host links: TLS 1.3, a cert from
+// the CA required both ways, and the other end's CN a host name other
+// than self. Peers are dialled by address, so no name is checked.
+func PeerTLS(caPath, certPath, keyPath, self string) (server, client *tls.Config, err error) {
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	p, err := pool(caPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	verify := func(usage x509.ExtKeyUsage) func(tls.ConnectionState) error {
+		return func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("peer: no certificate")
+			}
+			inter := x509.NewCertPool()
+			for _, c := range cs.PeerCertificates[1:] {
+				inter.AddCert(c)
+			}
+			leaf := cs.PeerCertificates[0]
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: p, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
+				return fmt.Errorf("peer: %w", err)
+			}
+			if cn := leaf.Subject.CommonName; !config.Hostname(cn) || cn == self || cn == "root" {
+				return fmt.Errorf("peer: CN %q is not another host", cn)
+			}
+			return nil
+		}
+	}
+	server = &tls.Config{
+		Certificates: []tls.Certificate{pair}, ClientCAs: p, ClientAuth: tls.RequireAndVerifyClientCert,
+		MinVersion: tls.VersionTLS13, VerifyConnection: verify(x509.ExtKeyUsageClientAuth),
+	}
+	client = &tls.Config{
+		Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS13,
+		InsecureSkipVerify: true, // the chain and CN are checked by VerifyConnection
+		VerifyConnection:   verify(x509.ExtKeyUsageServerAuth),
+	}
+	return server, client, nil
 }

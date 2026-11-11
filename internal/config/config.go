@@ -82,6 +82,7 @@ type Config struct {
 	Kill       bool       `json:"kill"`        // false: log would-kill instead
 	DNS        DNS        `json:"dns"`
 	Fleet      *Fleet     `json:"fleet"`       // nil: a standalone agent
+	Mesh       *Mesh      `json:"mesh"`        // nil: no peer links
 	RulesCache string     `json:"rules_cache"` // the last verified rule set
 }
 
@@ -89,6 +90,11 @@ type Config struct {
 type Fleet struct {
 	Endpoints []string `json:"endpoints"` // address:port, each in jump
 	Dir       string   `json:"dir"`       // ca.pem, host.pem, host-key.pem, rules.pub
+}
+
+// Mesh is the agent's links to its peers, the fleet's backup channel.
+type Mesh struct {
+	Port uint16 `json:"port"` // listened on, and dialled on each peer
 }
 
 // Load reads and validates the config at path. A field it does not know is
@@ -200,8 +206,30 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dns.hosts: bad entry %q", n)
 		}
 	}
+	if c.Mesh != nil {
+		if err := c.validateMesh(); err != nil {
+			return err
+		}
+	}
 	if c.Fleet != nil {
 		return c.validateFleet()
+	}
+	return nil
+}
+
+// validateMesh refuses peer links the firewall would not let through or
+// that name more than one box.
+func (c *Config) validateMesh() error {
+	if c.Fleet == nil {
+		return fmt.Errorf("mesh: needs fleet, for the certificates and the rule key")
+	}
+	if !slices.Contains(c.XDRPorts, c.Mesh.Port) {
+		return fmt.Errorf("mesh.port: %d is not in xdr_ports", c.Mesh.Port)
+	}
+	for _, n := range c.Peers {
+		if n.Bits() != n.Addr().BitLen() {
+			return fmt.Errorf("mesh: peers %s is not one address", n.Prefix)
+		}
 	}
 	return nil
 }

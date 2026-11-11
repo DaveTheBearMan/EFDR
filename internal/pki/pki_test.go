@@ -102,6 +102,32 @@ func TestEnroll_HandshakeAndCN(t *testing.T) {
 	if cn, err := handshake(t, srv, stranger); err == nil || cn != "" {
 		t.Fatalf("a cert from another CA got in: %q", cn)
 	}
+
+	// Host to host, as the mesh does: each host cert serves as well.
+	db := filepath.Join(t.TempDir(), "db01")
+	if err := Enroll(dir, "db01", db); err != nil {
+		t.Fatal(err)
+	}
+	peer := func(b, host string) (*tls.Config, *tls.Config) {
+		s, c, err := PeerTLS(filepath.Join(b, "ca.pem"), filepath.Join(b, "host.pem"), filepath.Join(b, "host-key.pem"), host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, c
+	}
+	webSrv, webCli := peer(out, "web01")
+	_, dbCli := peer(db, "db01")
+	if cn, err := handshake(t, webSrv, dbCli); err != nil || cn != "db01" {
+		t.Fatalf("peer handshake: %q %v", cn, err)
+	}
+	// A host never talks to itself, and a cert from another CA is refused.
+	if _, err := handshake(t, webSrv, webCli); err == nil {
+		t.Fatal("web01 accepted its own name")
+	}
+	_, strangerCli := peer(otherOut, "db01")
+	if _, err := handshake(t, webSrv, strangerCli); err == nil {
+		t.Fatal("a peer cert from another CA got in")
+	}
 }
 
 func TestEnroll_NoSecretsInBundle(t *testing.T) {

@@ -165,3 +165,22 @@ func TestProtected(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestValidate_Mesh(t *testing.T) {
+	base := `{"host":"web01","jump":["192.0.2.7"],"xdr_ports":[7443,2379],"fleet":{"endpoints":["192.0.2.7:2379"]},`
+	for frag, want := range map[string]string{
+		`"peers":["192.0.2.4"],"mesh":{"port":7444}}`:    "mesh.port: 7444 is not in xdr_ports",
+		`"peers":["192.0.2.0/24"],"mesh":{"port":7443}}`: "mesh: peers 192.0.2.0/24 is not one address",
+	} {
+		if _, err := load(t, base+frag); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want %q", frag, err, want)
+		}
+	}
+	if _, err := load(t, `{"host":"web01","jump":["192.0.2.7"],"mesh":{"port":7443}}`); err == nil || !strings.Contains(err.Error(), "mesh: needs fleet") {
+		t.Errorf("no fleet: %v", err)
+	}
+	c, err := load(t, base+`"peers":["192.0.2.4","2001:db8::4"],"mesh":{"port":7443}}`)
+	if err != nil || c.Mesh == nil || c.Mesh.Port != 7443 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
