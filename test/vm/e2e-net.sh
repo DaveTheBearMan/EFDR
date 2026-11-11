@@ -303,6 +303,15 @@ else ok drift; fi
 no_egress drift
 scored drift
 
+echo "== foreign-nat"
+mark
+x nft add table ip sneaky
+x nft add chain ip sneaky out '{ type nat hook output priority 0; }'
+if wait_inc 6 fw-foreign alert "'ip sneaky/out' in i['detail']"; then ok foreign-nat
+else fail foreign-nat "no fw-foreign incident for a nat chain after ours"; fi
+x nft delete table ip sneaky
+scored foreign-nat
+
 echo "== agent-dead"
 x systemctl kill -s KILL --kill-whom=main xdr-agent
 sleep 1
@@ -331,7 +340,7 @@ echo "== incidents"
 x xdr incidents --file "$LOG" > "$OUT/incidents.txt"; rc=$?
 lines=$(x sh -c "wc -l < $LOG")
 missing=""
-for k in listener egress revshell-stdio service-shell dns-query dns rawsock fw-drift dns-files; do
+for k in listener egress revshell-stdio service-shell dns-query dns rawsock fw-drift dns-files fw-foreign; do
   grep -q " $k " "$OUT/incidents.txt" || missing+=" $k"
 done
 if [ $rc -ne 0 ]; then fail incidents "exit $rc"

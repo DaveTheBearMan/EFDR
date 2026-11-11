@@ -195,3 +195,38 @@ func TestKernel_Remove(t *testing.T) {
 		t.Fatalf("second Remove: %v", err)
 	}
 }
+
+// Base chains of other tables are listed; a nat chain on output after
+// ours could rewrite a destination we already let through, and is Late.
+func TestKernel_ForeignBaseChains(t *testing.T) {
+	f, _ := applied(t)
+	if got, err := f.Foreign(); err != nil || len(got) != 0 {
+		t.Fatalf("fresh netns: %v %v", got, err)
+	}
+	c, err := nftables.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nat := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "sneaky"})
+	early, late := nftables.ChainPriority(-100), nftables.ChainPriority(0)
+	c.AddChain(&nftables.Chain{Name: "pre", Table: nat, Type: nftables.ChainTypeNAT, Hooknum: nftables.ChainHookOutput, Priority: &early})
+	c.AddChain(&nftables.Chain{Name: "post", Table: nat, Type: nftables.ChainTypeNAT, Hooknum: nftables.ChainHookOutput, Priority: &late})
+	c.AddChain(&nftables.Chain{Name: "plain", Table: nat}) // not a base chain
+	if err := c.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.Foreign()
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	byName := map[string]BaseChain{}
+	for _, b := range got {
+		byName[b.Name] = b
+	}
+	if byName["pre"].Late() || !byName["post"].Late() || byName["post"].Table != "sneaky" || byName["post"].Family != "ip" {
+		t.Fatalf("%+v", got)
+	}
+	if s := byName["post"].String(); s != "ip sneaky/post nat output priority 0" {
+		t.Fatalf("String() = %q", s)
+	}
+}

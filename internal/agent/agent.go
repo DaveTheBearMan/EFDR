@@ -63,6 +63,7 @@ type Options struct {
 type firewall interface {
 	Apply(fw.Ruleset) error
 	Drifted() (bool, error)
+	Foreign() ([]fw.BaseChain, error)
 }
 
 // asker is one process's recent DNS queries.
@@ -86,8 +87,9 @@ type agent struct {
 	users map[uint32]string
 	logf  func(string, ...any)
 
-	applied string // the ruleset last applied, as text
-	pinned  string // the config and DNS switch the files were last asserted for
+	applied string          // the ruleset last applied, as text
+	pinned  string          // the config and DNS switch the files were last asserted for
+	foreign map[string]bool // base chains of other tables already seen (nil: not looked yet)
 	snap    *proc.Snapshot
 	snapAt  time.Time
 	askers  map[int]*asker
@@ -318,6 +320,37 @@ func (a *agent) assert(report bool) {
 	}
 	if err != nil {
 		a.record(incident.Incident{Kind: "dns-files", Action: "alert", Severity: model.SevMedium, Detail: err.Error()})
+	}
+	a.checkForeign()
+}
+
+// checkForeign reports base chains of other tables: one that appears after
+// start (those there at start are the box's own, Docker's nat), and a nat
+// chain on output after ours at any time, since it can send what our table
+// let out somewhere else. Each is reported once.
+func (a *agent) checkForeign() {
+	chains, err := a.fw.Foreign()
+	if err != nil {
+		return // the table check above reports an unreachable nftables
+	}
+	first := a.foreign == nil
+	if first {
+		a.foreign = map[string]bool{}
+	}
+	for _, b := range chains {
+		desc := b.String()
+		if a.foreign[desc] {
+			continue
+		}
+		a.foreign[desc] = true
+		switch {
+		case b.Late():
+			a.record(incident.Incident{Kind: "fw-foreign", Action: "alert", Severity: model.SevHigh,
+				Detail: "nat on output after the xdr filter can redirect what it lets out: " + desc})
+		case !first:
+			a.record(incident.Incident{Kind: "fw-foreign", Action: "alert", Severity: model.SevHigh,
+				Detail: "base chain appeared: " + desc})
+		}
 	}
 }
 

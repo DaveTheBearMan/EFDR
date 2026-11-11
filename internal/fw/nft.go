@@ -340,3 +340,54 @@ func nfproto(a netip.Addr) byte {
 	}
 	return unix.NFPROTO_IPV6
 }
+
+// BaseChain is a base chain of a table other than ours.
+type BaseChain struct {
+	Family, Table, Name, Type string
+	Hook                      uint32 // unix.NF_INET_*
+	Priority                  int32
+}
+
+var familyNames = map[nftables.TableFamily]string{
+	nftables.TableFamilyINet: "inet", nftables.TableFamilyIPv4: "ip", nftables.TableFamilyIPv6: "ip6",
+	nftables.TableFamilyARP: "arp", nftables.TableFamilyNetdev: "netdev", nftables.TableFamilyBridge: "bridge",
+}
+
+var hookNames = map[uint32]string{
+	unix.NF_INET_PRE_ROUTING: "prerouting", unix.NF_INET_LOCAL_IN: "input", unix.NF_INET_FORWARD: "forward",
+	unix.NF_INET_LOCAL_OUT: "output", unix.NF_INET_POST_ROUTING: "postrouting",
+}
+
+func (b BaseChain) String() string {
+	hook := hookNames[b.Hook]
+	if hook == "" {
+		hook = fmt.Sprintf("hook%d", b.Hook)
+	}
+	return fmt.Sprintf("%s %s/%s %s %s priority %d", b.Family, b.Table, b.Name, b.Type, hook, b.Priority)
+}
+
+// Late reports whether b is a nat chain on output that runs after ours:
+// it could send a packet we let through to some other address.
+func (b BaseChain) Late() bool {
+	return b.Type == string(nftables.ChainTypeNAT) && b.Hook == unix.NF_INET_LOCAL_OUT && b.Priority > priority
+}
+
+// Foreign lists the base chains of every table but ours, in every family.
+func (f *Firewall) Foreign() ([]BaseChain, error) {
+	chains, err := f.conn.ListChains()
+	if err != nil {
+		return nil, fmt.Errorf("nftables: %w", err)
+	}
+	var out []BaseChain
+	for _, ch := range chains {
+		if ch.Hooknum == nil || ch.Table.Family == nftables.TableFamilyINet && ch.Table.Name == tableName {
+			continue
+		}
+		b := BaseChain{Family: familyNames[ch.Table.Family], Table: ch.Table.Name, Name: ch.Name, Type: string(ch.Type), Hook: uint32(*ch.Hooknum)}
+		if ch.Priority != nil {
+			b.Priority = int32(*ch.Priority)
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}

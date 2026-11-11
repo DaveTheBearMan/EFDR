@@ -33,6 +33,7 @@ type fakeFW struct {
 	applied []fw.Ruleset
 	drift   bool
 	err     error
+	foreign []fw.BaseChain
 }
 
 func (f *fakeFW) Apply(rs fw.Ruleset) error {
@@ -42,7 +43,8 @@ func (f *fakeFW) Apply(rs fw.Ruleset) error {
 	}
 	return f.err
 }
-func (f *fakeFW) Drifted() (bool, error) { return f.drift, nil }
+func (f *fakeFW) Drifted() (bool, error)           { return f.drift, nil }
+func (f *fakeFW) Foreign() ([]fw.BaseChain, error) { return f.foreign, nil }
 
 type killCall struct {
 	pid     int
@@ -714,5 +716,41 @@ func TestAsync_NeverBlocks(t *testing.T) {
 	stop()
 	if n := got.Load(); n < 1 || n > 5 {
 		t.Fatalf("%d lines delivered, want the few that fit", n)
+	}
+}
+
+var (
+	dockerNat = fw.BaseChain{Family: "ip", Table: "nat", Name: "PREROUTING", Type: "nat", Hook: unix.NF_INET_PRE_ROUTING, Priority: -100}
+	lateNat   = fw.BaseChain{Family: "ip", Table: "sneaky", Name: "out", Type: "nat", Hook: unix.NF_INET_LOCAL_OUT, Priority: 0}
+	newFilter = fw.BaseChain{Family: "ip", Table: "filter", Name: "OUTPUT", Type: "filter", Hook: unix.NF_INET_LOCAL_OUT, Priority: 0}
+)
+
+// Base chains in other tables that were there at start are the box's own
+// (Docker's nat); one that appears later is reported once.
+func TestGuard_ForeignChainAppeared(t *testing.T) {
+	r := newRig(t)
+	r.fw.foreign = []fw.BaseChain{dockerNat}
+	r.a.assert(false)
+	r.a.guard()
+	if len(r.got) != 0 {
+		t.Fatalf("incidents at start: %+v", r.got)
+	}
+	r.fw.foreign = append(r.fw.foreign, newFilter)
+	r.a.guard()
+	r.a.guard()
+	if got := r.kind("fw-foreign"); len(got) != 1 || got[0].Action != "alert" || got[0].Severity != model.SevHigh || !strings.Contains(got[0].Detail, "ip filter/OUTPUT") {
+		t.Fatalf("incidents = %+v", r.got)
+	}
+}
+
+// A nat chain on output after ours is reported even when it was there at
+// start: it can redirect what the table let out.
+func TestGuard_LateNatReportedAtStart(t *testing.T) {
+	r := newRig(t)
+	r.fw.foreign = []fw.BaseChain{dockerNat, lateNat}
+	r.a.assert(false)
+	r.a.guard()
+	if got := r.kind("fw-foreign"); len(got) != 1 || !strings.Contains(got[0].Detail, "ip sneaky/out") || !strings.Contains(got[0].Detail, "after the xdr filter") {
+		t.Fatalf("incidents = %+v", r.got)
 	}
 }
