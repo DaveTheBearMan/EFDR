@@ -27,6 +27,8 @@ func TestWalk_VolatileKeepsPrivilegedAndPersistence(t *testing.T) {
 	testfs.File(t, root, "var/lib/mysql/.ssh/authorized_keys", "ssh-ed25519 AAAA evil\n", 0o600)
 	testfs.File(t, root, "var/lib/cloud/scripts/per-boot/x.sh", "#!/bin/sh\n", 0o755)
 	testfs.File(t, root, "run/user/1000/systemd/user/x.service", "[Service]\n", 0o644)
+	testfs.File(t, root, "var/lib/samba/private/secrets.tdb", "churn", 0o600)
+	testfs.File(t, root, "var/lib/samba/usershares/evil", "path=/etc\n", 0o644)
 	files, _ := Walk(root)
 	for _, p := range suid {
 		e := files[p]
@@ -34,12 +36,12 @@ func TestWalk_VolatileKeepsPrivilegedAndPersistence(t *testing.T) {
 			t.Errorf("%s: setuid file must be recorded, got %+v", p, e)
 		}
 	}
-	for _, p := range []string{"/var/log/syslog", "/var/log", "/var/lib/mysql"} {
+	for _, p := range []string{"/var/log/syslog", "/var/log", "/var/lib/mysql", "/var/lib/samba/private/secrets.tdb"} {
 		if has(files, p) {
 			t.Errorf("%s: plain entries in volatile trees are not inventoried", p)
 		}
 	}
-	for _, p := range []string{"/var/lib/mysql/.ssh/authorized_keys", "/var/lib/cloud/scripts/per-boot/x.sh", "/run/user/1000/systemd/user/x.service"} {
+	for _, p := range []string{"/var/lib/mysql/.ssh/authorized_keys", "/var/lib/cloud/scripts/per-boot/x.sh", "/run/user/1000/systemd/user/x.service", "/var/lib/samba/usershares/evil"} {
 		if e := files[p]; e.Content == nil {
 			t.Errorf("%s: persistence path must be recorded with content, got %+v", p, e)
 		}

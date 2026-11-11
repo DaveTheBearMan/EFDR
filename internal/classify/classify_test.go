@@ -37,6 +37,11 @@ func TestPath_Table(t *testing.T) {
 		{"/var/lib/cloud/scripts/per-boot/x.sh", "cloud-init", true},
 		{"/var/lib/cloud/instances/i-1/scripts/runcmd", "cloud-init", true},
 		{"/etc/ld.so.cache", "resolver", false},
+		// Samba's config runs commands (root preexec, magic script);
+		// usershares define shares outside smb.conf
+		{"/etc/samba/smb.conf", "samba", true},
+		{"/etc/samba/conf.d/x.conf", "samba", true},
+		{"/var/lib/samba/usershares/evil", "samba", true},
 		// password hashes are never copied into a baseline
 		{"/etc/passwd", "account-db", true},
 		{"/etc/shadow", "account-db", false},

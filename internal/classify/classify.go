@@ -45,6 +45,9 @@ var rules = []rule{
 	{Class{"cloud-init", model.SevHigh, true}, []string{"/etc/cloud/**", "/var/lib/cloud/scripts/**", "/var/lib/cloud/{instance,instances/*}/scripts/**"}},
 	{Class{"udev", model.SevHigh, true}, []string{"/etc/udev/rules.d/**", "/usr/lib/udev/rules.d/**"}},
 	{Class{"mail", model.SevHigh, true}, []string{"/etc/aliases", "/etc/postfix/**", home + "/.forward"}},
+	// smb.conf can run commands (root preexec, magic script); usershares
+	// define shares outside it.
+	{Class{"samba", model.SevHigh, true}, []string{"/etc/samba/**", "/var/lib/samba/usershares/**"}},
 	{Class{"account-db", model.SevMedium, true}, []string{"/etc/{passwd,group}"}},
 	// Password hashes are compared by digest only, never copied into a baseline.
 	{Class{"account-db", model.SevMedium, false}, []string{"/etc/{shadow,gshadow}"}},

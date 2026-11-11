@@ -40,6 +40,7 @@ var Volatile = []string{
 	"/var/lib/cloud",
 	"/var/lib/mysql",     // database files: inspected separately
 	"/var/spool/postfix", // mail queue
+	"/var/lib/samba",     // tdb state; usershares are kept by class
 	"/var/backups",
 	"/lost+found",
 }
