@@ -246,25 +246,6 @@ func pool(caPath string) (*x509.CertPool, error) {
 	return p, nil
 }
 
-// ServerTLS is the controller's listener config: its server cert, and
-// client certs from the CA required.
-func ServerTLS(dir string) (*tls.Config, error) {
-	pair, err := tls.LoadX509KeyPair(filepath.Join(dir, "server.pem"), filepath.Join(dir, "server-key.pem"))
-	if err != nil {
-		return nil, err
-	}
-	p, err := pool(filepath.Join(dir, "ca.pem"))
-	if err != nil {
-		return nil, err
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{pair},
-		ClientCAs:    p,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS13,
-	}, nil
-}
-
 // ClientTLS is a client config presenting cert and trusting only the CA.
 func ClientTLS(caPath, certPath, keyPath string) (*tls.Config, error) {
 	pair, err := tls.LoadX509KeyPair(certPath, keyPath)

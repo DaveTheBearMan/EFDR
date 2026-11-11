@@ -78,7 +78,7 @@ func TestEnroll_HandshakeAndCN(t *testing.T) {
 	if err := Enroll(dir, "web01", out); err != nil {
 		t.Fatal(err)
 	}
-	srv, err := ServerTLS(dir)
+	srv, err := serverTLS(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,4 +143,23 @@ func TestEnroll_BadHost(t *testing.T) {
 			t.Errorf("%q enrolled", h)
 		}
 	}
+}
+
+// serverTLS is a listener as etcd's is set up: the server cert, client
+// certs from the CA required.
+func serverTLS(dir string) (*tls.Config, error) {
+	pair, err := tls.LoadX509KeyPair(filepath.Join(dir, "server.pem"), filepath.Join(dir, "server-key.pem"))
+	if err != nil {
+		return nil, err
+	}
+	p, err := pool(filepath.Join(dir, "ca.pem"))
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		ClientCAs:    p,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
 }

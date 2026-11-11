@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -310,4 +311,42 @@ func TestClient_Reconnects(t *testing.T) {
 		return len(fl) == 2 && strings.Contains(fl[1].Detail, "reconnected")
 	})
 	eventually(t, "rules after reconnect", 5*time.Second, func() bool { s, _ := a.got(); return len(s) == 1 })
+}
+
+// A connection that answers and then fails, again and again, is as good
+// as none: the alert still comes.
+func TestClient_FlappingAlerts(t *testing.T) {
+	f := newFleet(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The rule set can be read, but every heartbeat is refused.
+	if _, err := f.Root.RoleRevokePermission(ctx, "host-web01", fleet.Heartbeat("web01"), ""); err != nil {
+		t.Fatal(err)
+	}
+	// As in production, the alert threshold is longer than the backoff.
+	a := newAgent(t, f, f.Listen)
+	fleet.Tune(a.c, 2, 100*time.Millisecond, 1500*time.Millisecond)
+	a.run(t)
+	eventually(t, "fleet alert", 5*time.Second, func() bool { _, ins := a.got(); return len(of(ins, "fleet")) >= 1 })
+	if _, ins := a.got(); strings.Contains(of(ins, "fleet")[0].Detail, "reconnected") {
+		t.Fatalf("%+v", of(ins, "fleet"))
+	}
+}
+
+// Stopping never waits on a dial that hangs.
+func TestClient_StopDuringDial(t *testing.T) {
+	f := newFleet(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0") // accepts, never speaks TLS
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	a := newAgent(t, f, ln.Addr().String()).run(t)
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	a.cancel()
+	<-a.done
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("stop took %s", d)
+	}
 }

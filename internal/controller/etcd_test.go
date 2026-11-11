@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,5 +141,21 @@ func TestEtcd_AutoCompaction(t *testing.T) {
 	c := f.Etcd.Config()
 	if c.AutoCompactionMode != "periodic" || c.AutoCompactionRetention != "5m" {
 		t.Fatalf("mode %q retention %q", c.AutoCompactionMode, c.AutoCompactionRetention)
+	}
+}
+
+// The listener speaks TLS 1.3 only, as the clients do.
+func TestEtcd_TLS13Only(t *testing.T) {
+	f := newFleet(t, "web01")
+	b := f.Bundle("web01")
+	tc, err := pki.ClientTLS(filepath.Join(b, "ca.pem"), filepath.Join(b, "host.pem"), filepath.Join(b, "host-key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.MinVersion, tc.MaxVersion = tls.VersionTLS12, tls.VersionTLS12
+	conn, err := tls.Dial("tcp", f.Listen, tc)
+	if err == nil {
+		conn.Close()
+		t.Fatal("a TLS 1.2 client got in")
 	}
 }

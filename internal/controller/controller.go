@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +66,7 @@ type Controller struct {
 	writes            map[string]int // per host, in the window since windowAt
 	windowAt          time.Time
 	disabled          map[string]bool
+	users             map[string]bool // hosts with an etcd user, as far as Run knows
 }
 
 // New is a controller over c that continues from the rule set in etcd.
@@ -72,7 +75,7 @@ func New(dir string, c *clientv3.Client, g rules.Guard, key ed25519.PrivateKey, 
 		dir: dir, c: c, guard: g, key: key, log: log,
 		now: time.Now, tick: time.Second, silentAfter: silentAfter,
 		hostCap: hostCap, totalCap: totalCap, maxSet: maxSet, floodLimit: floodLimit,
-		beats: map[string]*beat{}, writes: map[string]int{}, disabled: map[string]bool{},
+		beats: map[string]*beat{}, writes: map[string]int{}, disabled: map[string]bool{}, users: map[string]bool{},
 	}
 	// Whatever the baselines say, the controller's own binary, which the
 	// operator also runs on the boxes, is never a hash rule.
@@ -112,8 +115,41 @@ func selfHash() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// load reads the published set.
+// floor is the highest version published from this directory, kept
+// beside etcd's data so that losing it does not start the versions over.
+func (ctl *Controller) floor() uint64 {
+	b, err := os.ReadFile(filepath.Join(ctl.dir, "rules.version"))
+	if err != nil {
+		return 0
+	}
+	v, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return v
+}
+
+func (ctl *Controller) setFloor(v uint64) error {
+	path := filepath.Join(ctl.dir, "rules.version")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// load reads the published set. A set older than the floor goes on from
+// the floor: agents refuse any version below one they hold.
 func (ctl *Controller) load(ctx context.Context) error {
+	if err := ctl.read(ctx); err != nil {
+		return err
+	}
+	if f := ctl.floor(); f > ctl.set.Version {
+		ctl.record(incident.Incident{Kind: "rules-reset", Action: "alert", Severity: model.SevCritical,
+			Detail: fmt.Sprintf("etcd holds version %d but %d was published: continuing from %d; rules since are lost", ctl.set.Version, f, f)})
+		ctl.set.Version = f
+	}
+	return nil
+}
+
+func (ctl *Controller) read(ctx context.Context) error {
 	resp, err := ctl.c.Get(ctx, fleet.RulesKey)
 	if err != nil {
 		return err
@@ -180,6 +216,9 @@ func (ctl *Controller) write(ctx context.Context, change func(*rules.Set) error)
 		}
 		if resp.Succeeded {
 			ctl.set, ctl.rev = &next, resp.Header.Revision
+			if err := ctl.setFloor(next.Version); err != nil {
+				ctl.record(incident.Incident{Kind: "rules-reset", Action: "alert", Severity: model.SevHigh, Detail: "version floor: " + err.Error()})
+			}
 			return &next, nil
 		}
 		if err := ctl.load(ctx); err != nil {
@@ -348,6 +387,32 @@ func (ctl *Controller) heartbeat(host string, put bool) {
 	}
 }
 
+// addUsers gives hosts enrolled since the last look their etcd user, so
+// enrolling needs no restart.
+func (ctl *Controller) addUsers(ctx context.Context) {
+	hosts, err := pki.Hosts(ctl.dir)
+	if err != nil {
+		return
+	}
+	var add []string
+	for _, h := range hosts {
+		if !ctl.users[h] {
+			add = append(add, h)
+		}
+	}
+	if len(add) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	if err := Bootstrap(ctx, ctl.c, add); err != nil {
+		return // tried again next tick
+	}
+	for _, h := range add {
+		ctl.users[h] = true
+	}
+}
+
 // checkSilent reports enrolled hosts that have not sent a heartbeat since
 // the controller started.
 func (ctl *Controller) checkSilent() {
@@ -495,6 +560,7 @@ func (ctl *Controller) Run(ctx context.Context) error {
 		case ch := <-changes:
 			ctl.handle(ctx, ch)
 		case <-tick.C:
+			ctl.addUsers(ctx)
 			ctl.checkSilent()
 		}
 	}

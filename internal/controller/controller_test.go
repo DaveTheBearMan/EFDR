@@ -468,3 +468,33 @@ func TestFlood_DisablesHost(t *testing.T) {
 		t.Fatalf("after restart: %v", err)
 	}
 }
+
+// A host enrolled while the controller runs can write without a restart.
+func TestEnroll_WhileRunning(t *testing.T) {
+	f := newFleet(t, "web01")
+	run(t, f, nil)
+	f.Enroll(t, "db01")
+	db := hostClient(t, f, "db01")
+	eventually(t, "db01 can report", func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := db.Put(ctx, fleet.Incidents("db01")+"1", "{}")
+		return err == nil
+	})
+}
+
+// With etcd's data lost, the version still goes on from the highest one
+// published, or every agent would refuse every set from then on.
+func TestPromote_VersionFloor(t *testing.T) {
+	f := newFleet(t, "web01")
+	if err := os.WriteFile(filepath.Join(f.Dir, "rules.version"), []byte("7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, f, nil)
+	eventually(t, "rules-reset", func() bool { return len(kinds(r.seen(), "rules-reset")) == 1 })
+	propose(t, f, "web01", remote("203.0.113.9", 1))
+	eventually(t, "v8", func() bool { return version(t, f) == 8 })
+	if b, _ := os.ReadFile(filepath.Join(f.Dir, "rules.version")); strings.TrimSpace(string(b)) != "8" {
+		t.Fatalf("rules.version %q", b)
+	}
+}

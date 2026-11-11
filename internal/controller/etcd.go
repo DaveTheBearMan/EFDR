@@ -58,6 +58,7 @@ func StartEtcd(dir, listen string) (*embed.Etcd, *clientv3.Client, error) {
 		TrustedCAFile:  filepath.Join(dir, "ca.pem"),
 		ClientCertAuth: true,
 	}
+	cfg.TlsMinVersion = "TLS1.3"
 	// Without compaction every put stays in history until the backend
 	// quota is full, and then etcd refuses all writes, fleet-wide.
 	cfg.AutoCompactionMode, cfg.AutoCompactionRetention = "periodic", "5m"
@@ -146,15 +147,29 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 		if err := role(ctx, c, r); err != nil {
 			return err
 		}
-		for _, p := range []struct {
+		// A disabled host is never granted its writes, not even for a moment.
+		resp, err := c.Get(ctx, fleet.DisabledAll+h)
+		if err != nil {
+			return err
+		}
+		disabled := len(resp.Kvs) > 0
+		perms := []struct {
 			key, end string
 			perm     clientv3.PermissionType
 		}{
-			{fleet.Proposed(h), clientv3.GetPrefixRangeEnd(fleet.Proposed(h)), rw},
-			{fleet.Incidents(h), clientv3.GetPrefixRangeEnd(fleet.Incidents(h)), rw},
-			{fleet.Heartbeat(h), "", rw},
 			{fleet.RulesKey, "", clientv3.PermissionType(clientv3.PermRead)},
-		} {
+		}
+		if !disabled {
+			perms = append(perms, []struct {
+				key, end string
+				perm     clientv3.PermissionType
+			}{
+				{fleet.Proposed(h), clientv3.GetPrefixRangeEnd(fleet.Proposed(h)), rw},
+				{fleet.Incidents(h), clientv3.GetPrefixRangeEnd(fleet.Incidents(h)), rw},
+				{fleet.Heartbeat(h), "", rw},
+			}...)
+		}
+		for _, p := range perms {
 			if _, err := c.RoleGrantPermission(ctx, r, p.key, p.end, p.perm); err != nil {
 				return fmt.Errorf("role %s: %w", r, err)
 			}
@@ -162,11 +177,7 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 		if err := user(ctx, c, h, r); err != nil {
 			return err
 		}
-		resp, err := c.Get(ctx, fleet.DisabledAll+h)
-		if err != nil {
-			return err
-		}
-		if len(resp.Kvs) > 0 {
+		if disabled {
 			if err := revokeWrites(ctx, c, h); err != nil {
 				return err
 			}

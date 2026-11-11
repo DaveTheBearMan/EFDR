@@ -84,7 +84,8 @@ Hostnames are placeholders and the mail server's network is not final, so nothin
 - block an allowlisted address (scorer, blue team, XDR).
 Non-baseline binary hashes, remote IPs and parent→child patterns are promoted. A compromised node can therefore only push narrow rules that the controller has checked. Promoted rules are **signed with the jump box key**, and agents enforce only signed rules.
 - *(Builder's calls, plan 3a:)*
-  - etcd is embedded in `xdr controller run`; the jump box needs no etcd install. TLS only, client certs required; a cert's CN is its etcd user.
+  - etcd is embedded in `xdr controller run`; the jump box needs no etcd install. TLS 1.3 only, client certs required; a cert's CN is its etcd user. A host enrolled while the controller runs gets its etcd user within a second.
+  - The controller keeps the highest version it published in `rules.version` beside etcd's data; if etcd's data is lost it goes on from there (`rules-reset`), since agents refuse any lower version.
   - Rule kinds so far: binary hash, and remote address+port+proto. A remote rule kills local processes connected to that endpoint and never blocks inbound traffic (the scorer shares a subnet with the red team); a socket on a scored port never matches. Parent→child and persistence rules come with plan 3b.
   - Proposals come from reverse-shell, service-shell and egress incidents that were killed, would have been (`kill: false`) or held. A base-image binary proposes only its endpoint.
   - Every rule is checked twice, by the controller before signing and by the agent before enforcing, against the baseline, `guard_exes` and protected addresses (the controller's `protect`; the agent's own jump, peers, ssh_from, allow_out, resolver and dhcp_server). Caps: 256 promoted rules per proposing host, 4096 in all.

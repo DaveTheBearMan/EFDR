@@ -287,7 +287,10 @@ func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), o
 // goroutines, one call at a time.
 func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident)) {
 	var mu sync.Mutex // one callback at a time; guards the state below
-	up, reported, downSince := false, false, time.Now()
+	// A session is healthy once it has lasted unreachableAfter: one that
+	// answers and then fails, again and again, is as good as none.
+	up, healthy, reported, downSince := false, false, false, time.Now()
+	var upAt time.Time
 	var lastErr error
 	alert := func(detail string) {
 		onIncident(incident.Incident{Time: time.Now(), Kind: "fleet", Action: "alert", Severity: model.SevHigh, Detail: detail})
@@ -314,7 +317,14 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 			case <-t.C:
 			}
 			locked(func() {
-				if !up && !reported && time.Since(downSince) >= c.unreachableAfter {
+				switch {
+				case up && !healthy && time.Since(upAt) >= c.unreachableAfter:
+					healthy = true
+					if reported {
+						reported = false
+						alert("etcd reconnected")
+					}
+				case !up && !healthy && !reported && time.Since(downSince) >= c.unreachableAfter:
 					reported = true
 					alert(fmt.Sprintf("etcd unreachable for %s: %v", c.unreachableAfter, lastErr))
 				}
@@ -327,25 +337,24 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 		cli, err := c.dial()
 		if err == nil {
 			err = c.session(ctx, cli, func() {
-				locked(func() {
-					if reported {
-						alert("etcd reconnected")
-					}
-					up, reported = true, false
-				})
-				backoff = time.Second
+				locked(func() { up, upAt = true, time.Now() })
 			}, safeRules, safeIncident)
 			cli.Close()
 		}
 		if ctx.Err() != nil {
 			return
 		}
+		wasHealthy := false
 		locked(func() {
-			if up {
-				up, downSince = false, time.Now()
+			wasHealthy = healthy
+			if healthy {
+				healthy, downSince = false, time.Now()
 			}
-			lastErr = err
+			up, lastErr = false, err
 		})
+		if wasHealthy {
+			backoff = time.Second
+		}
 		select {
 		case <-ctx.Done():
 			return
