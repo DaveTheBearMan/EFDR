@@ -34,27 +34,30 @@ It only has to work once, for one competition, on a known OS. That justifies har
 ## 3. Environment and constraints
 
 - Targets: Ubuntu 24.04, matched to the competition's exact point release. Linux only.
-- Scored services: Apache (in Docker, HTTP/HTTPS), SMTP, MySQL.
+- Scored services: Apache (in Docker, HTTP/HTTPS), SMTP, MySQL, Samba.
 - We start with root.
 - Legitimate outbound traffic from target boxes: **none**, other than replies to inbound score checks, blue-team access, and XDR traffic (peers, etcd, control plane).
 - Operator works from a desktop (primary) / laptop / phone, connecting to the control plane.
 - Deployment: Ansible during the setup window; nothing built live.
 
-## 3a. Competition environment (from the packet, 2026-11-10)
+## 3a. Competition environment (from the packet, 2026-11-10; revised 2026-11-11)
 
 Hostnames are placeholders and the mail server's network is not final, so nothing below is compiled in: it is deployment config, keyed by team number.
 
 | Host | OS | IP | Scored service | XDR |
 |------|----|----|----------------|-----|
-| SecurityBlanket | Windows Server 2022 | 192.168.N.1 | AD, DNS | out of scope |
-| PsychiatricBooth | Windows Server 2022 | 192.168.N.2 | IIS | out of scope |
+| SecurityBlanket | Windows Server 2019 | 192.168.N.1 | AD, DNS | out of scope |
+| PsychiatricBooth | Windows Server 2019 | 192.168.N.2 | IIS | out of scope |
 | KiteTree | Ubuntu 24.04 | 192.168.N.3 | MySQL | agent |
 | ToyPiano | Ubuntu 24.04 | 192.168.N.4 | SMTP | agent |
 | Doghouse | Ubuntu 24.04 | 192.168.N.5 | Apache (Docker) | agent |
+| Typewriter (cloud) | Windows Server 2019 | 10.0.N.1 | IIS | out of scope |
+| Snowman (cloud) | Ubuntu 24.04 | 10.0.N.2 | Samba | agent |
 
-- One flat /24 per team (`192.168.N.0/24`, N = team number; team 1 shown in the packet), gateway `.254` (OpenStack router). Domain `TEAMN.PEANUTS.LOCAL`. **No separate management interface.**
+- Two networks per team (revised 2026-11-11): the **local** /24 (`192.168.N.0/24`, N = team number; team 1 shown in the packet), gateway `.254` (OpenStack router), with five boxes; and a **cloud** subnet (`10.0.N.0/24` by the packet's addresses) with two: a Windows IIS box and the Samba box. Domain `TEAMN.PEANUTS.LOCAL` (Windows only; Samba is not stated to join it). **No separate management interface.** So: 3 Windows and 4 Linux boxes, 4 agents.
+- **The cloud subnet is routed, not shared.** Mesh, etcd and SSH to Snowman cross a router; whether the jump box can reach it, and whether it uses DHCP, a different gateway, or a cloud metadata address, is unknown until T-0. All of that is per-host config (peers, jump, `dhcp`/`dhcp_server`, `allow_out`), never a subnet assumption. *(Builder's call:)* if Snowman takes its address by DHCP, its config must set `dhcp` with that subnet's DHCP server, or the firewall stops lease renewal and takes the box (and Samba) offline by our own action.
 - The scoring engine and the red team's attack boxes **share one subnet** outside ours. A source address therefore never proves "this is the scorer": scored ports stay open to that subnet, and every other control has to work without source-based trust.
-- The two Windows boxes sit on our subnet and are not covered by this tool. Treat them as untrusted neighbours: a compromised Windows box is an attacker inside the /24. Nothing is allowed from `.1`/`.2` to the Linux boxes beyond what a scored service needs, and DNS replies from `.1`.
+- The Windows boxes (two local, one cloud) are not covered by this tool. Treat them as untrusted neighbours: a compromised Windows box is an attacker inside its subnet. Nothing is allowed from them to the Linux boxes beyond what a scored service needs, and DNS replies from the local `.1`.
 - DNS for the team is the AD box (`.1`). The Linux boxes do not use it by default (§8 DNS); when the switch is on, `.1` is the only resolver they may talk to.
 - **Jump box placement is not known in advance:** it may be on the team subnet or on an attached network. Either way it is out of the red team's scope. Its address(es) are therefore deployment config set at T-0, never a compiled-in value or a subnet assumption, and every rule that names "the jump box" (SSH, etcd, mesh, call-home) is generated from that config. If it is on an attached network, agents reach it through the gateway and the egress allow is that one address and port.
 - **Rotated passwords can be handed to the scoring engine** (operator decision, 2026-11-10), so nothing blocks rotating every blue-team and service credential at T-0. The console has to make that hand-off a copy-paste (§11).
@@ -168,6 +171,7 @@ We have the competition's **exact base image** (without scored services) and a *
 - SMTP: `/etc/aliases` and `.forward` pipe-to-command entries, `master.cf`.
 - MySQL: new users/grants, UDFs in the plugin dir, triggers, events. *(Builder's call:)* the agent queries as MySQL root over the local unix socket (`auth_socket`, Ubuntu's default) — no new MySQL accounts, no scorer credentials touched. Falls back to on-disk inspection of the plugin dir if socket auth isn't available.
 - Docker: new images/containers, exposed `docker.sock`.
+- Samba: `smb.conf` and its includes (`root preexec`/`preexec`/`postexec`, `magic script`, `add user script` and other script hooks, `usershare` definitions, writable shares that are exec-able paths such as a docroot or `/etc`), new Samba users in its passdb. *(Builder's call:)* Samba's passdb passwords are separate from Unix ones, so T-0 rotation (§10 tooling) covers them with `smbpasswd` for blue-team accounts the scorer uses, and never gray accounts.
 
 ### 6.3 "Altered" (content diff)
 - Hash stock files vs clean baseline.
