@@ -65,20 +65,21 @@ type DNS struct {
 
 // Config is one box's deployment configuration.
 type Config struct {
-	Host      string     `json:"host"`
-	Jump      []Net      `json:"jump"`       // SSH and XDR are allowed from here
-	Peers     []Net      `json:"peers"`      // the other agents
-	SSHFrom   []Net      `json:"ssh_from"`   // further SSH sources
-	SSHPort   uint16     `json:"ssh_port"`   //
-	XDRPorts  []uint16   `json:"xdr_ports"`  //
-	Scored    []Port     `json:"scored"`     // open to anyone
-	AllowOut  []Dest     `json:"allow_out"`  // outbound a scored service needs
-	GuardExes []string   `json:"guard_exes"` // scored-service binaries, never killed
-	Listeners []Listener `json:"listeners"`  // known listeners
-	GrayUsers []string   `json:"gray_users"` // accounts that are never touched
-	DHCP      bool       `json:"dhcp"`       //
-	Kill      bool       `json:"kill"`       // false: log would-kill instead
-	DNS       DNS        `json:"dns"`
+	Host       string     `json:"host"`
+	Jump       []Net      `json:"jump"`        // SSH and XDR are allowed from here
+	Peers      []Net      `json:"peers"`       // the other agents
+	SSHFrom    []Net      `json:"ssh_from"`    // further SSH sources
+	SSHPort    uint16     `json:"ssh_port"`    //
+	XDRPorts   []uint16   `json:"xdr_ports"`   //
+	Scored     []Port     `json:"scored"`      // open to anyone
+	AllowOut   []Dest     `json:"allow_out"`   // outbound a scored service needs
+	GuardExes  []string   `json:"guard_exes"`  // scored-service binaries, never killed
+	Listeners  []Listener `json:"listeners"`   // known listeners
+	GrayUsers  []string   `json:"gray_users"`  // accounts that are never touched
+	DHCP       bool       `json:"dhcp"`        //
+	DHCPServer []Net      `json:"dhcp_server"` // where renewals and replies may go and come from
+	Kill       bool       `json:"kill"`        // false: log would-kill instead
+	DNS        DNS        `json:"dns"`
 }
 
 // Load reads and validates the config at path. A field it does not know is

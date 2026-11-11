@@ -246,3 +246,24 @@ func TestVerdict_JumpSessionPickedUpMidStream(t *testing.T) {
 		{"jump's ssh port is not jump's any port", picked(tcp(HookOutput, box, jump, 4444, 50000), false), Drop},
 	})
 }
+
+// DHCP may not carry traffic to or from anywhere: requests go to the
+// broadcast address or the DHCP server, replies come from the server.
+func TestVerdict_DHCPPinned(t *testing.T) {
+	bcast := netip.MustParseAddr("255.255.255.255")
+	server := netip.MustParseAddr("192.0.2.254")
+	c := fixture()
+	check(t, Build(c, now), []vcase{
+		{"broadcast request", udp(HookOutput, box, bcast, 68, 67), Accept},
+		{"request to a stranger", udp(HookOutput, box, stranger, 68, 67), Drop},
+		{"unknown server: reply", udp(HookInput, server, box, 67, 68), Accept},
+	})
+	c.DHCPServer = []config.Net{nets("192.0.2.254")[0]}
+	check(t, Build(c, now), []vcase{
+		{"broadcast request", udp(HookOutput, box, bcast, 68, 67), Accept},
+		{"renewal to the server", udp(HookOutput, box, server, 68, 67), Accept},
+		{"request to a stranger", udp(HookOutput, box, stranger, 68, 67), Drop},
+		{"reply from the server", udp(HookInput, server, box, 67, 68), Accept},
+		{"reply from a stranger", udp(HookInput, stranger, box, 67, 68), Drop},
+	})
+}

@@ -20,6 +20,7 @@
   ],
   "gray_users": ["gray1"],
   "dhcp": true,
+  "dhcp_server": ["192.0.2.254"],
   "kill": true,
   "dns": {
     "resolver": "192.0.2.1",

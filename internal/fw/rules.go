@@ -160,8 +160,17 @@ func Build(c *config.Config, now time.Time) Ruleset {
 	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMP, 8 })
 	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMPV6, 128 })
 	icmp(in, unix.IPPROTO_ICMPV6, 135, 136, 134)
-	if c.DHCP {
+	// DHCP replies come from the server when it is known; requests (below)
+	// go to the broadcast address or to it.
+	dhcpServers := union(c.DHCPServer)
+	if c.DHCP && len(dhcpServers) == 0 {
 		add(in, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 67, 68 })
+	}
+	for _, src := range dhcpServers {
+		if !c.DHCP {
+			break
+		}
+		add(in, func(r *Rule) { r.Src, r.Proto, r.SPort, r.DPort = &src, unix.IPPROTO_UDP, 67, 68 })
 	}
 	for _, p := range c.Scored {
 		allow(in, out, func(r *Rule) { r.Proto, r.DPort = protoNum(p.Proto), p.Port })
@@ -183,7 +192,10 @@ func Build(c *config.Config, now time.Time) Ruleset {
 	// Outbound.
 	icmp(out, unix.IPPROTO_ICMPV6, 135, 136, 133)
 	if c.DHCP {
-		add(out, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 68, 67 })
+		bcast := netip.MustParsePrefix("255.255.255.255/32")
+		for _, dst := range append([]netip.Prefix{bcast}, dhcpServers...) {
+			add(out, func(r *Rule) { r.Dst, r.Proto, r.SPort, r.DPort = &dst, unix.IPPROTO_UDP, 68, 67 })
+		}
 	}
 	for _, dst := range xdr {
 		for _, port := range c.XDRPorts {

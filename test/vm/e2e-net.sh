@@ -52,6 +52,7 @@ print(json.dumps({
         {"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"},
         {"proto": "udp", "port": 68, "exe": "/usr/lib/systemd/systemd-networkd"},
     ],
+    "dhcp_server": [host],
     "kill": kill,
     "dns": {"resolver": host, "hosts": {"scoring.test": "192.0.2.10"}},
 }, indent=2))
