@@ -53,3 +53,6 @@ gone() {
   for _ in $(seq $(($1 * 4))); do x pgrep -f "$2" >/dev/null || return 0; sleep 0.25; done
   return 1
 }
+# on VMNAME HELPER ARGS...: run a helper against another VM. Bash scoping
+# is dynamic, so the helpers see this VM; MARK, ERR and fails stay global.
+on() { local VM=$1; shift; "$@"; }
