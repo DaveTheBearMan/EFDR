@@ -119,7 +119,7 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	if c.Host != "" && !hostname(c.Host) {
+	if c.Host != "" && !Hostname(c.Host) {
 		return fmt.Errorf("host: %q is not a host name", c.Host)
 	}
 	if c.SSHPort == 0 {
@@ -178,12 +178,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("dns.listen: %q is not address:port", c.DNS.Listen)
 	}
 	for _, n := range c.DNS.Allow {
-		if !hostname(n) {
+		if !Hostname(n) {
 			return fmt.Errorf("dns.allow: %q is not a lower-case host name", n)
 		}
 	}
 	for n, a := range c.DNS.Hosts {
-		if !hostname(n) || !a.IsValid() {
+		if !Hostname(n) || !a.IsValid() {
 			return fmt.Errorf("dns.hosts: bad entry %q", n)
 		}
 	}
@@ -200,8 +200,8 @@ func transport(field, proto string, port uint16) error {
 	return nil
 }
 
-// hostname reports whether s is a lower-case DNS name with no trailing dot.
-func hostname(s string) bool {
+// Hostname reports whether s is a lower-case DNS name with no trailing dot.
+func Hostname(s string) bool {
 	if s == "" || len(s) > 253 {
 		return false
 	}
