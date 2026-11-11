@@ -1,12 +1,15 @@
 package fleet_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"net"
 	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +22,7 @@ import (
 	"xdr/internal/controller"
 	"xdr/internal/fleet"
 	"xdr/internal/fleettest"
+	"xdr/internal/hunt"
 	"xdr/internal/incident"
 	"xdr/internal/pki"
 	"xdr/internal/rules"
@@ -46,6 +50,7 @@ type agent struct {
 	mu     sync.Mutex
 	sets   []*rules.Set
 	ins    []incident.Incident
+	hunts  []*hunt.Request
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -62,13 +67,17 @@ func (a *agent) stop() {
 }
 
 func newAgent(t *testing.T, f *fleettest.Fleet, endpoint string) *agent {
+	return newAgentAs(t, f, "web01", endpoint)
+}
+
+func newAgentAs(t *testing.T, f *fleettest.Fleet, host, endpoint string) *agent {
 	t.Helper()
-	pub, err := rules.LoadPublic(filepath.Join(f.Bundle("web01"), "rules.pub"))
+	pub, err := rules.LoadPublic(filepath.Join(f.Bundle(host), "rules.pub"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := &agent{cache: filepath.Join(t.TempDir(), "rules.json"), done: make(chan struct{})}
-	a.c = fleet.New("web01", config.Fleet{Endpoints: []string{endpoint}, Dir: f.Bundle("web01")}, a.cache, pub)
+	a.c = fleet.New(host, config.Fleet{Endpoints: []string{endpoint}, Dir: f.Bundle(host)}, a.cache, pub)
 	fleet.Tune(a.c, 2, 100*time.Millisecond, 300*time.Millisecond)
 	return a
 }
@@ -80,7 +89,8 @@ func (a *agent) run(t *testing.T) *agent {
 		defer close(a.done)
 		a.c.Run(ctx,
 			func(s *rules.Set) { a.mu.Lock(); a.sets = append(a.sets, s); a.mu.Unlock() },
-			func(in incident.Incident) { a.mu.Lock(); a.ins = append(a.ins, in); a.mu.Unlock() })
+			func(in incident.Incident) { a.mu.Lock(); a.ins = append(a.ins, in); a.mu.Unlock() },
+			func(r *hunt.Request) { a.mu.Lock(); a.hunts = append(a.hunts, r); a.mu.Unlock() })
 	}()
 	t.Cleanup(func() {
 		select {
@@ -349,5 +359,96 @@ func TestClient_StopDuringDial(t *testing.T) {
 	<-a.done
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("stop took %s", d)
+	}
+}
+
+func TestClient_HuntRoundTrip(t *testing.T) {
+	f := fleettest.New(t, start, "web01", "db01")
+	t.Cleanup(f.Stop)
+	web := newAgentAs(t, f, "web01", f.Listen).run(t)
+	db := newAgentAs(t, f, "db01", f.Listen).run(t)
+	eventually(t, "both up", 3*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		r, err := f.Root.Get(ctx, fleet.HeartbeatAll, clientv3.WithPrefix())
+		return err == nil && len(r.Kvs) == 2
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := f.Root.Put(ctx, fleet.Hunt("web01")+"junk", "not json"); err != nil {
+		t.Fatal(err)
+	}
+	ioc := hunt.IOC{Cron: []string{"curl x | sh"}}
+	req := &hunt.Request{ID: hunt.ID(ioc), From: "web01", Time: time.Now().UTC().Truncate(time.Second), IOC: ioc}
+	// A hunt put under one host's key that claims another is ignored.
+	liar := *req
+	liar.From = "mail01"
+	b, _ := json.Marshal(liar)
+	if _, err := f.Root.Put(ctx, fleet.Hunt("web01")+"liar", string(b)); err != nil {
+		t.Fatal(err)
+	}
+	web.c.PutHunt(req)
+	eventually(t, "db01 got the hunt", 2*time.Second, func() bool {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return len(db.hunts) == 1
+	})
+	db.mu.Lock()
+	got := db.hunts[0]
+	db.mu.Unlock()
+	if !reflect.DeepEqual(got, req) {
+		t.Fatalf("got %+v, want %+v", got, req)
+	}
+	r, err := f.Root.Get(ctx, fleet.Hunt("web01")+req.ID)
+	if err != nil || len(r.Kvs) != 1 || r.Kvs[0].Lease == 0 {
+		t.Fatalf("hunt key %+v %v", r, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.hunts) != 1 {
+		t.Fatalf("%d hunts", len(db.hunts))
+	}
+}
+
+func TestClient_OfferAndEnvelope(t *testing.T) {
+	f := newFleet(t)
+	key := signing(t, f)
+	a := newAgent(t, f, "127.0.0.1:1")
+	env := func(k ed25519.PrivateKey, v uint64) []byte {
+		r := c2(uint16(4000 + v))
+		r.SetID()
+		e, err := rules.Sign(&rules.Set{Version: v, Rules: []rules.Rule{r}}, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := rules.Marshal(e)
+		return b
+	}
+	// Before Run: verified and cached only.
+	if !a.c.Offer(env(key, 2)) {
+		t.Fatal("v2 not taken before run")
+	}
+	if raw, v := a.c.Envelope(); v != 2 || !bytes.Equal(raw, env(key, 2)) {
+		t.Fatalf("envelope v%d", v)
+	}
+	a.run(t)
+	// Run has started once it says etcd is out of reach.
+	eventually(t, "run started", 3*time.Second, func() bool { _, ins := a.got(); return len(of(ins, "fleet")) == 1 })
+	if !a.c.Offer(env(key, 3)) {
+		t.Fatal("v3 not taken")
+	}
+	eventually(t, "v3 applied", time.Second, func() bool { sets, _ := a.got(); return len(sets) == 1 && sets[0].Version == 3 })
+	cached, err := a.c.Cached()
+	if err != nil || cached == nil || cached.Version != 3 {
+		t.Fatalf("cache %+v %v", cached, err)
+	}
+	_, forger, _ := ed25519.GenerateKey(rand.Reader)
+	if a.c.Offer(env(key, 1)) || a.c.Offer(env(forger, 9)) || a.c.Offer(env(key, 3)) {
+		t.Fatal("older, forged or same set taken")
+	}
+	eventually(t, "two refusals", time.Second, func() bool { _, ins := a.got(); return len(of(ins, "rules-refused")) == 2 })
+	if _, v := a.c.Envelope(); v != 3 {
+		t.Fatalf("envelope v%d", v)
 	}
 }

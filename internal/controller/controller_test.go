@@ -456,6 +456,9 @@ func TestFlood_DisablesHost(t *testing.T) {
 	if _, err := web.Put(ctx5(t), fleet.Proposed("web01")+"z", "{}"); !denied(err) {
 		t.Fatalf("proposal put: %v", err)
 	}
+	if _, err := web.Put(ctx5(t), fleet.Hunt("web01")+"z", "{}"); !denied(err) {
+		t.Fatalf("hunt put: %v", err)
+	}
 	if _, err := hostClient(t, f, "db01").Put(ctx5(t), fleet.Incidents("db01")+"1", "{}"); err != nil {
 		t.Fatalf("db01: %v", err)
 	}

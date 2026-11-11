@@ -113,6 +113,7 @@ func revokeWrites(ctx context.Context, c *clientv3.Client, h string) error {
 		{fleet.Proposed(h), clientv3.GetPrefixRangeEnd(fleet.Proposed(h))},
 		{fleet.Incidents(h), clientv3.GetPrefixRangeEnd(fleet.Incidents(h))},
 		{fleet.Heartbeat(h), ""},
+		{fleet.Hunt(h), clientv3.GetPrefixRangeEnd(fleet.Hunt(h))},
 	} {
 		// No role yet: the next Bootstrap sees DisabledAll and revokes then.
 		_, err := c.RoleRevokePermission(ctx, "host-"+h, p.key, p.end)
@@ -131,8 +132,8 @@ func role(ctx context.Context, c *clientv3.Client, name string) error {
 }
 
 // Bootstrap sets up users and roles and turns auth on: root may do
-// anything; each host may write its own proposals, incidents and
-// heartbeat, and read the rule set. Running it again adds hosts enrolled
+// anything; each host may write its own proposals, incidents, heartbeat
+// and hunts, and read the rule set and every hunt. Running it again adds hosts enrolled
 // since.
 func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 	if err := role(ctx, c, "root"); err != nil {
@@ -158,6 +159,7 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 			perm     clientv3.PermissionType
 		}{
 			{fleet.RulesKey, "", clientv3.PermissionType(clientv3.PermRead)},
+			{fleet.HuntAll, clientv3.GetPrefixRangeEnd(fleet.HuntAll), clientv3.PermissionType(clientv3.PermRead)},
 		}
 		if !disabled {
 			perms = append(perms, []struct {
@@ -167,6 +169,7 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 				{fleet.Proposed(h), clientv3.GetPrefixRangeEnd(fleet.Proposed(h)), rw},
 				{fleet.Incidents(h), clientv3.GetPrefixRangeEnd(fleet.Incidents(h)), rw},
 				{fleet.Heartbeat(h), "", rw},
+				{fleet.Hunt(h), clientv3.GetPrefixRangeEnd(fleet.Hunt(h)), rw},
 			}...)
 		}
 		for _, p := range perms {

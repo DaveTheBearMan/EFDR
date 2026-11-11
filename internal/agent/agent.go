@@ -30,6 +30,7 @@ import (
 	"xdr/internal/dnsguard"
 	"xdr/internal/fleet"
 	"xdr/internal/fw"
+	"xdr/internal/hunt"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/persist"
@@ -68,9 +69,12 @@ type Options struct {
 // fleetLink is the agent's link to the controller (fleet.Client).
 type fleetLink interface {
 	Cached() (*rules.Set, error)
-	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident))
+	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request))
 	Propose([]rules.Rule)
 	Report(incident.Incident)
+	PutHunt(*hunt.Request)
+	Offer([]byte) bool
+	Envelope() ([]byte, uint64)
 }
 
 type firewall interface {
@@ -243,7 +247,7 @@ func (a *agent) startFleet(ctx context.Context, f fleetLink) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.Run(ctx, a.setRules, a.recordLocked)
+		f.Run(ctx, a.setRules, a.recordLocked, func(*hunt.Request) {})
 	}()
 	return func() { <-done }
 }

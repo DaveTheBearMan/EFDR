@@ -4,8 +4,8 @@ package fleet
 
 import "strings"
 
-// The etcd keys. A host writes only under its own Proposed, Incidents and
-// Heartbeat keys; only the controller writes RulesKey, and only it reads
+// The etcd keys. A host writes only under its own Proposed, Incidents,
+// Heartbeat and Hunt keys; only the controller writes RulesKey, and only it reads
 // or writes Revoked and Disabled.
 const (
 	Prefix       = "/xdr/"
@@ -15,7 +15,11 @@ const (
 	HeartbeatAll = "/xdr/heartbeat/"
 	RevokedAll   = "/xdr/revoked/"  // rule ids never to promote again
 	DisabledAll  = "/xdr/disabled/" // hosts whose writes were taken away
+	HuntAll      = "/xdr/hunt/"     // every host reads every hunt
 )
+
+// Hunt is the prefix of the hunts host started, one key per hunt id.
+func Hunt(host string) string { return HuntAll + host + "/" }
 
 // Proposed is the prefix of host's proposed rules, one key per rule id.
 func Proposed(host string) string { return ProposedAll + host + "/" }

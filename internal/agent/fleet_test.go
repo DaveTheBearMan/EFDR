@@ -14,6 +14,7 @@ import (
 	"xdr/internal/baseline"
 	"xdr/internal/config"
 	"xdr/internal/detect"
+	"xdr/internal/hunt"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/pathenc"
@@ -25,16 +26,20 @@ type fakeFleet struct {
 	cached   *rules.Set
 	proposed []rules.Rule
 	reported []incident.Incident
+	hunts    []*hunt.Request
 	running  chan struct{}
 }
 
 func (f *fakeFleet) Cached() (*rules.Set, error) { return f.cached, nil }
-func (f *fakeFleet) Run(ctx context.Context, _ func(*rules.Set), _ func(incident.Incident)) {
+func (f *fakeFleet) Run(ctx context.Context, _ func(*rules.Set), _ func(incident.Incident), _ func(*hunt.Request)) {
 	close(f.running)
 	<-ctx.Done()
 }
 func (f *fakeFleet) Propose(rs []rules.Rule)     { f.proposed = append(f.proposed, rs...) }
 func (f *fakeFleet) Report(in incident.Incident) { f.reported = append(f.reported, in) }
+func (f *fakeFleet) PutHunt(r *hunt.Request)     { f.hunts = append(f.hunts, r) }
+func (f *fakeFleet) Offer([]byte) bool           { return false }
+func (f *fakeFleet) Envelope() ([]byte, uint64)  { return nil, 0 }
 
 // hexSum is a hash the rig's Hash gives exe, in the form rules accept.
 func hexSum(exe string) string {

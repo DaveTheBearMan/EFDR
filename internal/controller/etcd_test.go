@@ -80,7 +80,13 @@ func TestEtcd_HostRBAC(t *testing.T) {
 	if _, err := c.Put(ctx, fleet.Incidents("web01")+"1", "i"); err != nil {
 		t.Fatalf("own incident: %v", err)
 	}
-	for _, key := range []string{fleet.Proposed("db01") + "x", fleet.RulesKey, fleet.Heartbeat("db01"), fleet.Proposed("web01x") + "y", "/other"} {
+	if _, err := c.Put(ctx, fleet.Hunt("web01")+"x", "h"); err != nil {
+		t.Fatalf("own hunt: %v", err)
+	}
+	if r, err := c.Get(ctx, fleet.HuntAll, clientv3.WithPrefix()); err != nil || len(r.Kvs) != 1 {
+		t.Fatalf("read hunts: %v", err)
+	}
+	for _, key := range []string{fleet.Proposed("db01") + "x", fleet.RulesKey, fleet.Heartbeat("db01"), fleet.Proposed("web01x") + "y", fleet.Hunt("db01") + "x", "/other"} {
 		if _, err := c.Put(ctx, key, "x"); !denied(err) {
 			t.Errorf("put %s: %v", key, err)
 		}
