@@ -157,6 +157,43 @@ func (a *agent) reload(cfg *config.Config) error {
 	return nil
 }
 
+// async returns fn run on its own goroutine behind a queue of n: the
+// returned function never blocks, and drops what does not fit. stop waits
+// for the queue to drain; a call after stop is dropped.
+func async(fn func(incident.Incident), n int) (call func(incident.Incident), stop func()) {
+	q := make(chan incident.Incident, n)
+	done := make(chan struct{})
+	var mu sync.Mutex
+	closed := false
+	go func() {
+		defer close(done)
+		for in := range q {
+			fn(in)
+		}
+	}()
+	call = func(in incident.Incident) {
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			return
+		}
+		select {
+		case q <- in:
+		default:
+		}
+	}
+	stop = func() {
+		mu.Lock()
+		if !closed {
+			closed = true
+			close(q)
+		}
+		mu.Unlock()
+		<-done
+	}
+	return call, stop
+}
+
 // record writes one incident.
 func (a *agent) record(in incident.Incident) {
 	in.Host = a.cfg.Host
@@ -509,7 +546,11 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	defer log.Close()
-	log.OnWrite = o.OnIncident
+	if o.OnIncident != nil {
+		onWrite, stop := async(o.OnIncident, 256)
+		defer stop()
+		log.OnWrite = onWrite
+	}
 
 	var local atomic.Pointer[map[netip.Addr]bool]
 	addrs := localAddrs()

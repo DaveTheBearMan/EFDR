@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sync/atomic"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -686,5 +687,32 @@ func TestOnQuery_UnknownAskerFloodRereadsRarely(t *testing.T) {
 	}
 	if n := r.reads - before; n > 5 {
 		t.Fatalf("%d reads of /proc for 100 queries in 100 ms", n)
+	}
+}
+
+// A slow OnIncident (a stalled terminal) never holds up the agent: lines
+// it cannot take are dropped.
+func TestAsync_NeverBlocks(t *testing.T) {
+	release := make(chan struct{})
+	var got atomic.Int32
+	fn, stop := async(func(incident.Incident) { <-release; got.Add(1) }, 4)
+	done := make(chan struct{})
+	go func() {
+		for range 1000 {
+			fn(incident.Incident{Kind: "egress"})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnIncident blocked the caller")
+	}
+	close(release)
+	stop()
+	fn(incident.Incident{Kind: "late"}) // after stop: dropped, no panic
+	stop()
+	if n := got.Load(); n < 1 || n > 5 {
+		t.Fatalf("%d lines delivered, want the few that fit", n)
 	}
 }
