@@ -120,18 +120,38 @@ func TestHunt_Search(t *testing.T) {
 
 func TestHunt_VariantProposed(t *testing.T) {
 	r, f, _ := huntRig(t)
-	if err := os.MkdirAll(filepath.Join(r.root, "opt"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(r.root, "var/tmp"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(r.root, "opt/v"), []byte("variant"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(r.root, "var/tmp/v"), []byte("variant"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	r.snap = tree()
-	r.a.offerHunt(fileHunt("db01", hunt.File{SHA256: sumOf("original"), Size: 8, Path: "/opt/v"}), "etcd")
+	r.a.offerHunt(fileHunt("db01", hunt.File{SHA256: sumOf("original"), Size: 8, Path: "/var/tmp/v"}), "etcd")
 	waitFor(t, "hunt-hit", func() bool { return len(r.kindLocked("hunt-hit")) == 1 })
 	r.a.mu.Lock()
 	defer r.a.mu.Unlock()
-	if len(f.proposed) != 1 || f.proposed[0].Kind != "hash" || f.proposed[0].SHA256 != sumOf("variant") || f.proposed[0].Exe != "/opt/v" {
+	if len(f.proposed) != 1 || f.proposed[0].Kind != "hash" || f.proposed[0].SHA256 != sumOf("variant") || f.proposed[0].Exe != "/var/tmp/v" {
+		t.Fatalf("%+v", f.proposed)
+	}
+}
+
+// A new hash at a hunted path outside the drop directories is reported,
+// not proposed: a peer could name a real service binary to have it ruled.
+func TestHunt_VariantOutsideDropDirsNotProposed(t *testing.T) {
+	r, f, _ := huntRig(t)
+	if err := os.MkdirAll(filepath.Join(r.root, "usr/lib/postfix/sbin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.root, "usr/lib/postfix/sbin/qmgr"), []byte("genuine"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.snap = tree()
+	r.a.offerHunt(fileHunt("db01", hunt.File{SHA256: sumOf("original"), Size: 8, Path: "/usr/lib/postfix/sbin/qmgr"}), "peer 192.0.2.4")
+	waitFor(t, "hunt-hit", func() bool { return len(r.kindLocked("hunt-hit")) == 1 })
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	if len(f.proposed) != 0 {
 		t.Fatalf("%+v", f.proposed)
 	}
 }

@@ -169,8 +169,18 @@ func (a *agent) startHunts(ctx context.Context) (stop func()) {
 	return func() { <-done }
 }
 
+// dropDirs are where an attacker's own files land. Only a variant there is
+// proposed: a hunt may name any path, and a "variant" of a real service
+// binary elsewhere would have it ruled fleet-wide.
+var dropDirs = []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/root/", "/run/user/"}
+
+func inDropDir(p string) bool {
+	return slices.ContainsFunc(dropDirs, func(d string) bool { return strings.HasPrefix(p, d) })
+}
+
 // runHunt searches for r and records what came of it. A file at a hunted
-// path with a new hash is a variant, proposed as a hash rule.
+// path with a new hash is a variant, proposed as a hash rule when it is in
+// a drop directory.
 func (a *agent) runHunt(ctx context.Context, r *hunt.Request) {
 	res := a.search(ctx, r)
 	in := incident.Incident{Kind: "hunt-clean", Action: "alert", Severity: model.SevInfo, Hunt: r.ID,
@@ -190,7 +200,7 @@ func (a *agent) runHunt(ctx context.Context, r *hunt.Request) {
 				s += fmt.Sprintf(" (pid %d)", h.PID)
 			}
 			say = append(say, s)
-			if h.Kind == "path" && h.SHA256 != "" && !hunted[h.SHA256] && (a.baseHash == nil || !a.baseHash(h.SHA256)) {
+			if h.Kind == "path" && h.SHA256 != "" && !hunted[h.SHA256] && inDropDir(h.Path) && (a.baseHash == nil || !a.baseHash(h.SHA256)) {
 				v := rules.Rule{Kind: "hash", SHA256: h.SHA256, Exe: h.Path, From: a.cfg.Host, Seen: a.now(),
 					Detail: fmt.Sprintf("hunt %s from %s: variant at %s", r.ID, r.From, h.Path)}
 				v.SetID()
