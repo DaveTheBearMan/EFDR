@@ -98,6 +98,27 @@ func TestHunt_StartedFromKill(t *testing.T) {
 	}
 }
 
+// Gray-team and system accounts are never user indicators: every box
+// has them, so every box would report a hit.
+func TestHunt_GrayAndSystemUsersNotHunted(t *testing.T) {
+	r, f, _ := huntRig(t)
+	r.a.users[110] = "mysql"
+	for i, uid := range []uint32{2001, 110} {
+		x := mk(300+i, 100, uid, "/tmp/.x")
+		d := egress(x)
+		d.Kind = "revshell-stdio" // killed even for a gray account
+		r.a.handle(tree(x), []detect.Detection{d})
+	}
+	if len(f.hunts) != 2 {
+		t.Fatalf("%d hunts", len(f.hunts))
+	}
+	for _, h := range f.hunts {
+		if len(h.IOC.Users) != 0 {
+			t.Fatalf("users %v", h.IOC.Users)
+		}
+	}
+}
+
 func TestHunt_Search(t *testing.T) {
 	r, _, _ := huntRig(t)
 	body := "implant"

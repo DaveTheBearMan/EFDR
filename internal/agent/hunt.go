@@ -26,6 +26,7 @@ const (
 	perSender    = 30   // hunts searched for one sender per senderWindow
 	senderWindow = 10 * time.Minute
 	maxHuntText  = 1 << 10
+	firstUserUID = 1000 // below it, system and package accounts
 )
 
 // meshLink is the agent's view of the peer mesh.
@@ -91,11 +92,19 @@ func (a *agent) startHunt(in incident.Incident, baseExe bool) {
 	if a.fleet == nil || a.hunts == nil {
 		return
 	}
+	// Base, gray-team and system accounts (packages add those) are on
+	// every box: as indicators they would hit everywhere.
 	users := map[string]bool{}
 	if a.pol.Base != nil {
 		for _, acct := range a.pol.Base.Accounts {
 			users[acct.Name] = true
 		}
+	}
+	for _, u := range a.cfg.GrayUsers {
+		users[u] = true
+	}
+	if in.UID < firstUserUID {
+		users[in.User] = true
 	}
 	r := hunt.FromIncident(in, hunt.Base{
 		Exe:  func(string, string) bool { return baseExe },
