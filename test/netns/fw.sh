@@ -22,6 +22,7 @@ cleanup() {
 	pkill -f "$tmp/net.py" 2>/dev/null
 	for n in xa xb xc; do ip netns del $n 2>/dev/null; done
 	rm -rf "$tmp"
+	rm -f /run/xdr/fw-confirm /run/xdr/fw-kept.json
 }
 trap cleanup EXIT
 for n in xa xb xc; do ip netns del $n 2>/dev/null; done
@@ -207,5 +208,24 @@ sleep 1
 fw confirm
 wait $try
 expect try-confirmed "exit 0, table present" "exit $?, table $(table)"
+
+# A try killed with its session reverts at once, to the last confirmed
+# table; a hangup alone does not stop it. A try that times out goes back
+# to that table too, not to none.
+sed 's/, {"proto": "tcp", "port": 8080}//' "$tmp/agent.json" > "$tmp/other.json"
+other() { in_ns xa "$XDR" fw try --config "$tmp/other.json" "$@" >/dev/null; }
+open8080() { in_ns xa nft list table inet xdr 2>/dev/null | grep -q 'dport 8080' && echo open || echo closed; }
+# Not through a function: $! must be xdr itself (ip netns exec execs it).
+ip netns exec xa "$XDR" fw try --config "$tmp/other.json" --timeout 30s >/dev/null &
+try=$!
+sleep 1
+got=$(open8080)
+kill -HUP $try; sleep 0.5
+kill -0 $try 2>/dev/null && hup=survives || hup=died
+kill -TERM $try
+wait $try
+expect try-killed-reverts "8080 closed, hup survives, exit 1, 8080 open" "8080 $got, hup $hup, exit $?, 8080 $(open8080)"
+other --timeout 1s
+expect try-restores-confirmed "exit 1, 8080 open" "exit $?, 8080 $(open8080)"
 
 [ $fails = 0 ]

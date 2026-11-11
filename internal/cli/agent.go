@@ -9,10 +9,12 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"xdr/internal/agent"
@@ -24,6 +26,10 @@ import (
 
 // fwConfirm is the file `fw confirm` writes and `fw try` waits for.
 var fwConfirm = "/run/xdr/fw-confirm"
+
+// fwKept is a copy of the config of the last confirmed `fw try`: a try
+// that is not confirmed goes back to its table.
+var fwKept = "/run/xdr/fw-kept.json"
 
 // fwCmd is `xdr fw print|apply|try|confirm|remove`.
 func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
@@ -39,6 +45,7 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	var rules fw.Ruleset
+	var raw []byte
 	switch verb {
 	case "print", "apply", "try":
 		if *path == "" {
@@ -50,6 +57,9 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, err
 		}
 		rules = fw.Build(c, time.Now())
+		if raw, err = os.ReadFile(*path); err != nil {
+			return 0, err
+		}
 	case "confirm", "remove":
 	default:
 		fmt.Fprintf(stderr, "xdr fw: unknown verb %q\n", verb)
@@ -77,7 +87,13 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	case "apply":
 		return 0, f.Apply(rules)
 	}
-	// try: a table that locks the operator out removes itself.
+	// try: a table that locks the operator out takes itself back. The
+	// session it runs in may be the one it cuts, so a hangup does not
+	// stop it, and being killed reverts at once.
+	signal.Ignore(syscall.SIGHUP)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stop)
 	if err := os.Remove(fwConfirm); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, err
 	}
@@ -85,17 +101,40 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	fmt.Fprintf(stdout, "applied; run `xdr fw confirm` within %s to keep it\n", *timeout)
-	for deadline := time.Now().Add(*timeout); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-		if _, err := os.Lstat(fwConfirm); err == nil {
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for deadline := time.After(*timeout); ; {
+		select {
+		case <-tick.C:
+			if _, err := os.Lstat(fwConfirm); err != nil {
+				continue
+			}
+			if err := os.WriteFile(fwKept, raw, 0o600); err != nil {
+				fmt.Fprintf(stderr, "xdr fw try: confirmed, but %v: a later try that is not confirmed removes the table\n", err)
+			}
 			fmt.Fprintln(stdout, "confirmed")
 			return 0, nil
+		case <-stop:
+		case <-deadline:
+		}
+		return 1, revert(f, stdout)
+	}
+}
+
+// revert goes back to the table of the last confirmed try, or removes the
+// table when there was none.
+func revert(f *fw.Firewall, stdout io.Writer) error {
+	if c, err := config.Load(fwKept); err == nil {
+		if err := f.Apply(fw.Build(c, time.Now())); err == nil {
+			fmt.Fprintln(stdout, "reverted to the last confirmed table")
+			return nil
 		}
 	}
 	if err := f.Remove(); err != nil {
-		return 0, fmt.Errorf("not confirmed, and removing the table failed: %w", err)
+		return fmt.Errorf("not confirmed, and removing the table failed: %w", err)
 	}
 	fmt.Fprintln(stdout, "reverted")
-	return 1, nil
+	return nil
 }
 
 // defaultIncidents is where the agent keeps its incident log.
