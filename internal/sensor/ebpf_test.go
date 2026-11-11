@@ -2,6 +2,7 @@ package sensor
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 )
 
@@ -261,3 +263,27 @@ func TestKernel_EBPF_BadCgroup(t *testing.T) {
 		t.Fatal("no exec event")
 	}
 }
+
+type failingReader struct{ fails int }
+
+func (f *failingReader) Read() (ringbuf.Record, error) {
+	if f.fails == 0 {
+		return ringbuf.Record{}, ringbuf.ErrClosed
+	}
+	f.fails--
+	return ringbuf.Record{}, errors.New("read: bad")
+}
+
+// A reader that keeps failing is retried with a growing pause, not in a
+// tight loop.
+func TestRun_BacksOffOnReadErrors(t *testing.T) {
+	var pauses []time.Duration
+	b := &bpfSource{rd: &failingReader{fails: 8}, events: make(chan Event, 1), done: make(chan struct{}),
+		pause: func(d time.Duration) { pauses = append(pauses, d) }}
+	b.run()
+	if len(pauses) != 8 || pauses[0] <= 0 || pauses[7] <= pauses[0] || pauses[7] > maxBackoff {
+		t.Fatalf("pauses %v", pauses)
+	}
+}
+
+func (f *failingReader) Close() error { return nil }

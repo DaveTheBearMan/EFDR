@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -20,9 +21,13 @@ import (
 const eventLen = 184
 
 type bpfSource struct {
-	objs   sensorObjects
-	links  []link.Link
-	rd     *ringbuf.Reader
+	objs  sensorObjects
+	links []link.Link
+	rd    interface {
+		Read() (ringbuf.Record, error)
+		Close() error
+	}
+	pause  func(time.Duration) // time.Sleep; tests replace it
 	events chan Event
 	once   sync.Once
 	done   chan struct{}
@@ -33,7 +38,7 @@ type bpfSource struct {
 // (the root of the cgroup v2 tree covers every process, containers
 // included). On any error nothing is left attached.
 func NewEBPF(cgroupPath string) (Source, error) {
-	b := &bpfSource{events: make(chan Event, 4096), done: make(chan struct{})}
+	b := &bpfSource{events: make(chan Event, 4096), done: make(chan struct{}), pause: time.Sleep}
 	if err := loadSensorObjects(&b.objs, nil); err != nil {
 		return nil, err
 	}
@@ -107,17 +112,24 @@ func (b *bpfSource) Close() error {
 	return err
 }
 
+// maxBackoff caps the pause between failed ring-buffer reads.
+const maxBackoff = time.Second
+
 func (b *bpfSource) run() {
 	defer close(b.done)
 	defer close(b.events)
+	backoff := time.Millisecond
 	for {
 		rec, err := b.rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, io.EOF) {
 				return
 			}
+			b.pause(backoff)
+			backoff = min(2*backoff, maxBackoff)
 			continue
 		}
+		backoff = time.Millisecond
 		if ev, ok := decode(rec.RawSample); ok {
 			select {
 			case b.events <- ev:
