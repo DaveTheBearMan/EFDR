@@ -332,7 +332,9 @@ func (a *agent) describe(in *incident.Incident, s *proc.Snapshot, p *proc.Proc) 
 	if u, ok := strings.CutPrefix(in.Origin, "unit:"); ok {
 		if file, sum, err := persist.UnitFile(a.root, u); err == nil {
 			in.OriginFile = file
-			if a.baseHash == nil || !a.baseHash(sum) {
+			// A scored service's unit, or a base-image one, is no
+			// indicator: a rule on it would take the service down.
+			if (a.baseHash == nil || !a.baseHash(sum)) && !a.pol.ServiceUnit(s, u) {
 				in.OriginSHA256 = sum
 			}
 		}

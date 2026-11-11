@@ -250,3 +250,28 @@ func TestDescribe_UnitOrigin(t *testing.T) {
 		t.Fatalf("baseline unit: %+v", in)
 	}
 }
+
+// A shell killed inside a scored service's unit names no unit origin: a
+// unit rule or indicator would take the service down fleet-wide.
+func TestDescribe_ScoredUnitNotOrigin(t *testing.T) {
+	r, f := fleetRig(t)
+	if err := os.MkdirAll(filepath.Join(r.root, "etc/systemd/system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.root, "etc/systemd/system/webapp.service"), []byte("[Service]\nExecStart=/usr/sbin/apache2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := mk(200, 1, 33, "/usr/sbin/apache2")
+	x := mk(300, 200, 33, "/tmp/x")
+	srv.Cgroup, x.Cgroup = "/system.slice/webapp.service", "/system.slice/webapp.service"
+	r.a.handle(tree(srv, x), []detect.Detection{egress(x)})
+	in := r.kind("egress")
+	if len(in) != 1 || in[0].OriginFile == "" || in[0].OriginSHA256 != "" {
+		t.Fatalf("%+v", in)
+	}
+	for _, p := range f.proposed {
+		if p.Kind == "unit" {
+			t.Fatalf("unit rule proposed: %+v", p)
+		}
+	}
+}

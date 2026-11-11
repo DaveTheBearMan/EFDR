@@ -154,3 +154,17 @@ func TestRules_CronHit(t *testing.T) {
 	other.Cmdline = sh.Cmdline
 	want(t, only(Sweep(snap(append(web(), other)), p), "rule-cron"))
 }
+
+// A unit rule never matches inside a scored service's unit: its helpers
+// would die with it.
+func TestRules_UnitSparesScoredService(t *testing.T) {
+	const fsum = "ab12000000000000000000000000000000000000000000000000000000000000"
+	p := withRules(pol(), rules.Rule{Kind: "unit", Unit: "apache2.service", SHA256: fsum, From: "db01"})
+	p.UnitHash = func(string) string { return fsum }
+	srv := mk(20, 1, "/usr/sbin/apache2", nil)
+	helper := mk(21, 20, "/usr/lib/apache2/helper", nil)
+	srv.Cgroup, helper.Cgroup = "0::/system.slice/apache2.service", "0::/system.slice/apache2.service"
+	want(t, only(Sweep(snap(procs{srv, helper}), p), "rule-unit"))
+	ds := Event(sensor.Event{Kind: sensor.Exec, PID: 21, Filename: helper.Exe}, snap(procs{srv, helper}), p)
+	want(t, only(ds, "rule-unit"))
+}

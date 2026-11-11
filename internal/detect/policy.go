@@ -4,6 +4,7 @@ package detect
 
 import (
 	"net/netip"
+	"path"
 	"slices"
 
 	"xdr/internal/baseline"
@@ -79,6 +80,18 @@ func (p *Policy) Guarded(s *proc.Snapshot, pr *proc.Proc) bool {
 	}
 	for _, k := range s.Sockets(pr) {
 		if k.Listen && inet(k.Sock) && p.scored(k.Proto, k.Local.Port()) {
+			return true
+		}
+	}
+	return false
+}
+
+// ServiceUnit reports whether a process of a scored service runs in the
+// systemd unit named unit: no unit rule may match there, as its helpers
+// would die with it.
+func (p *Policy) ServiceUnit(s *proc.Snapshot, unit string) bool {
+	for _, pr := range s.Procs {
+		if path.Base(pr.Cgroup) == unit && p.Guarded(s, pr) {
 			return true
 		}
 	}

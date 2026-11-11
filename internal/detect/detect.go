@@ -247,7 +247,7 @@ func (p *Policy) ruleNarrow(s *proc.Snapshot, pr *proc.Proc) []Detection {
 	if len(p.Rules.Unit) > 0 && p.UnitHash != nil {
 		if u := path.Base(pr.Cgroup); strings.HasSuffix(u, ".service") {
 			if sum := p.UnitHash(u); sum != "" {
-				if r := p.Rules.Unit[rules.UnitKey{Name: u, SHA256: sum}]; r != nil {
+				if r := p.Rules.Unit[rules.UnitKey{Name: u, SHA256: sum}]; r != nil && !p.ServiceUnit(s, u) {
 					out = append(out, ruleHit("rule-unit", pr.PID, pr.Start, r, nil))
 				}
 			}
