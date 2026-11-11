@@ -108,7 +108,10 @@ type agent struct {
 	pinned  string          // the config and DNS switch the files were last asserted for
 	foreign map[string]bool // base chains of other tables already seen (nil: not looked yet)
 
-	fleet    fleetLink              // nil: a standalone agent
+	fleet    fleetLink // nil: a standalone agent
+	mesh     meshLink  // nil: no peer links
+	hunts    *hunter   // nil: no hunts run here
+	search   func(context.Context, *hunt.Request) hunt.Result
 	baseHash func(string) bool      // a hash of the baseline; nil: none
 	selfHash string                 // this binary's hash; "": unknown
 	ruleSet  *rules.Set             // the last verified set, before the agent's own check
@@ -247,7 +250,18 @@ func (a *agent) startFleet(ctx context.Context, f fleetLink) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.Run(ctx, a.setRules, a.recordLocked, func(*hunt.Request) {})
+		f.Run(ctx, func(s *rules.Set) {
+			a.setRules(s)
+			if a.mesh != nil {
+				a.mesh.PushRules()
+			}
+		}, a.recordLocked, func(r *hunt.Request) {
+			a.offerHunt(r, "etcd")
+			// A peer cut off from etcd hears it this way.
+			if a.mesh != nil {
+				a.mesh.PushHunt(r, netip.Addr{})
+			}
+		})
 	}()
 	return func() { <-done }
 }
@@ -403,6 +417,7 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 		if a.fleet != nil {
 			in.Host, in.Time = a.cfg.Host, a.now()
 			a.fleet.Propose(rules.FromIncident(in, base))
+			a.startHunt(in, base)
 		}
 	}
 }
@@ -743,8 +758,15 @@ func Run(ctx context.Context, o Options) error {
 			a.recordLocked(incident.Incident{Kind: "fleet", Action: "alert", Severity: model.SevHigh, Detail: "not joining the fleet: " + err.Error()})
 		} else {
 			fctx, cancel := context.WithCancel(ctx)
-			wait := a.startFleet(fctx, fleet.New(cfg.Host, *cfg.Fleet, cfg.RulesCache, pub))
+			fl := fleet.New(cfg.Host, *cfg.Fleet, cfg.RulesCache, pub)
+			defer a.startHunts(fctx)()
+			runMesh := func() {}
+			if cfg.Mesh != nil {
+				runMesh = a.newMesh(fctx, cfg, fl)
+			}
+			wait := a.startFleet(fctx, fl)
 			defer wait()
+			runMesh()
 			defer cancel()
 		}
 	}

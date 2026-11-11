@@ -81,6 +81,9 @@ func (r *Rule) Bound(now time.Time) error {
 	return nil
 }
 
+// Cut is s cut to at most n bytes, on a rune boundary.
+func Cut(s string, n int) string { return cut(s, n) }
+
 func cut(s string, n int) string {
 	if len(s) <= n {
 		return s

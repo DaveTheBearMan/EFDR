@@ -36,5 +36,6 @@
   "fleet": {
     "endpoints": ["192.0.2.7:2379"],
     "dir": "/etc/xdr/fleet"
-  }
+  },
+  "mesh": {"port": 7443}
 }
