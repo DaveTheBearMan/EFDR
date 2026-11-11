@@ -53,10 +53,17 @@ type Incident struct {
 	Cgroup    string         `json:"cgroup,omitempty"`
 	Container string         `json:"container,omitempty"`
 	Origin    string         `json:"origin,omitempty"`
-	Chain     []ProcRef      `json:"chain,omitempty"`
-	Remote    *Endpoint      `json:"remote,omitempty"`
-	Detail    string         `json:"detail,omitempty"`
-	Count     int            `json:"count"` // identical incidents this line stands for
+	// OriginFile is the unit file behind a unit: origin, and OriginSHA256
+	// its hash when that is not a base-image hash.
+	OriginFile   string    `json:"origin_file,omitempty"`
+	OriginSHA256 string    `json:"origin_sha256,omitempty"`
+	Cron         string    `json:"cron,omitempty"` // the command cron ran
+	Hunt         string    `json:"hunt,omitempty"` // the hunt this answers
+	Size         int64     `json:"size,omitempty"` // of the exe
+	Chain        []ProcRef `json:"chain,omitempty"`
+	Remote       *Endpoint `json:"remote,omitempty"`
+	Detail       string    `json:"detail,omitempty"`
+	Count        int       `json:"count"` // identical incidents this line stands for
 }
 
 // foldKey is what makes two incidents the same one happening again.
