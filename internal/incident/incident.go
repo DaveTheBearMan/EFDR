@@ -62,6 +62,7 @@ type Incident struct {
 // foldKey is what makes two incidents the same one happening again.
 type foldKey struct {
 	kind, action, exe string
+	pid               int // kills only: each kill is its own line
 	uid               uint32
 	remote            Endpoint
 	hasRemote         bool
@@ -76,13 +77,48 @@ type folded struct {
 // Log appends incidents to a file, folding repeats.
 type Log struct {
 	mu     sync.Mutex
+	path   string
 	f      *os.File
+	size   int64
 	window time.Duration
 	now    func() time.Time
 	seen   map[foldKey]*folded
 
 	// OnWrite, when set, is called with every incident as it was written.
 	OnWrite func(Incident)
+	// MaxSize bounds the file: a line that would take it past MaxSize
+	// first moves it to path.1, replacing the one there.
+	MaxSize int64
+}
+
+// DefaultMaxSize is MaxSize as Open sets it.
+const DefaultMaxSize = 64 << 20
+
+func openFile(path string) (*os.File, int64, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, 0, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	return f, st.Size(), nil
+}
+
+// rotate moves the file to path.1 and starts a new one.
+func (l *Log) rotate() error {
+	if err := os.Rename(l.path, l.path+".1"); err != nil {
+		return err
+	}
+	f, size, err := openFile(l.path)
+	if err != nil {
+		return err
+	}
+	l.f.Close()
+	l.f, l.size = f, size
+	return nil
 }
 
 // Open opens the log at path for appending, creating it (0600) and its
@@ -92,11 +128,11 @@ func Open(path string, window time.Duration) (*Log, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	f, size, err := openFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Log{f: f, window: window, now: time.Now, seen: map[foldKey]*folded{}}, nil
+	return &Log{path: path, f: f, size: size, window: window, now: time.Now, seen: map[foldKey]*folded{}, MaxSize: DefaultMaxSize}, nil
 }
 
 // Close closes the file.
@@ -117,6 +153,9 @@ func (l *Log) Add(in Incident) (written bool, err error) {
 	if in.Remote != nil {
 		key.remote, key.hasRemote = *in.Remote, true
 	}
+	if in.Action == "killed" || in.Action == "kill-failed" {
+		key.pid = in.PID
+	}
 	prev := l.seen[key]
 	if prev != nil && now.Sub(prev.written) < l.window {
 		prev.held++
@@ -130,7 +169,15 @@ func (l *Log) Add(in Incident) (written bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err := l.f.Write(append(line, '\n')); err != nil {
+	line = append(line, '\n')
+	if l.MaxSize > 0 && l.size > 0 && l.size+int64(len(line)) > l.MaxSize {
+		if err := l.rotate(); err != nil {
+			return false, err
+		}
+	}
+	n, err := l.f.Write(line)
+	l.size += int64(n)
+	if err != nil {
 		return false, err
 	}
 	if len(l.seen) >= 4096 {

@@ -1,13 +1,13 @@
 package agent
 
 import (
-	"sync/atomic"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 

@@ -148,17 +148,23 @@ func incidentsCmd(args []string, stdout, stderr io.Writer) error {
 	if err := parse(fs, args); err != nil {
 		return err
 	}
-	f, err := os.Open(*path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil // nothing has happened yet
+	// The log moves to path.1 when it is full: that file is older.
+	for _, p := range []string{*path + ".1", *path} {
+		f, err := os.Open(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue // nothing has happened yet, or no rotation
+		}
+		if err != nil {
+			return err
+		}
+		incidents, err := incident.Read(f)
+		f.Close()
+		printIncidents(stdout, incidents)
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	incidents, err := incident.Read(f)
-	printIncidents(stdout, incidents)
-	return err
+	return nil
 }
 
 // printIncidents writes one line per incident:

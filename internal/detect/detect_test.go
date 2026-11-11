@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"xdr/internal/incident"
 	"xdr/internal/config"
+	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/proc"
 	"xdr/internal/sensor"

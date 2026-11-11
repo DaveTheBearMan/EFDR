@@ -174,3 +174,22 @@ func TestKernel_ListenersCmdPacket(t *testing.T) {
 		t.Fatalf("no packet holder in\n%s", out.String())
 	}
 }
+
+// After the log has rotated, the older file is printed first.
+func TestIncidents_ReadsRotatedFileFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "incidents.jsonl")
+	if err := os.WriteFile(path+".1", []byte(`{"time":"2026-11-10T12:00:00Z","kind":"egress","action":"killed","severity":"high","pid":1}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"time":"2026-11-10T12:05:00Z","kind":"egress","action":"killed","severity":"high","pid":2}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"incidents", "--file", path}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "pid=1") || !strings.Contains(lines[1], "pid=2") {
+		t.Fatalf("got:\n%s", out.String())
+	}
+}

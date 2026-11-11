@@ -2,6 +2,7 @@ package incident
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,15 +126,23 @@ func TestLog_HostileFieldsOneLine(t *testing.T) {
 	}
 }
 
+// alerting is an incident that was alerted on, not acted on: repeats of
+// it fold across pids.
+func alerting() Incident {
+	in := revshell()
+	in.Action = "alert"
+	return in
+}
+
 func TestLog_Dedupe(t *testing.T) {
 	l, c, path := open(t)
-	if !add(t, l, revshell()) {
+	if !add(t, l, alerting()) {
 		t.Fatal("first not written")
 	}
 	for i := 0; i < 2; i++ {
 		c.now = c.now.Add(10 * time.Second)
-		in := revshell()
-		in.PID += i + 1 // a respawned shell is still the same incident
+		in := alerting()
+		in.PID += i + 1 // a respawned process is still the same alert
 		if add(t, l, in) {
 			t.Fatal("repeat inside the window was written")
 		}
@@ -142,7 +151,7 @@ func TestLog_Dedupe(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	c.now = t0.Add(time.Minute + time.Second)
-	if !add(t, l, revshell()) {
+	if !add(t, l, alerting()) {
 		t.Fatal("first after the window not written")
 	}
 	got := readAll(t, path)
@@ -151,7 +160,7 @@ func TestLog_Dedupe(t *testing.T) {
 	}
 	// The count starts again.
 	c.now = c.now.Add(2 * time.Minute)
-	add(t, l, revshell())
+	add(t, l, alerting())
 	if got := readAll(t, path); len(got) != 3 || got[2].Count != 1 {
 		t.Fatalf("%+v", got)
 	}
@@ -252,5 +261,45 @@ func TestLog_OnWriteSeesEachLineAsWritten(t *testing.T) {
 	got := seen[0]
 	if got.Time.IsZero() || got.Count != 1 || got.Exe != onDisk[0].Exe || got.Detail != onDisk[0].Detail || !got.Time.Equal(onDisk[0].Time) {
 		t.Fatalf("OnWrite saw %+v, the file has %+v", got, onDisk[0])
+	}
+}
+
+// Every kill is its own line: two processes killed for the same remote
+// within the window are two acts. Alerts still fold across pids.
+func TestLog_KillsOfDifferentPidsNotFolded(t *testing.T) {
+	l, c, path := open(t)
+	a, b := revshell(), revshell()
+	a.PID, b.PID = 10, 11
+	add(t, l, a)
+	c.now = c.now.Add(time.Second)
+	add(t, l, b)
+	a.Action, b.Action = "alert", "alert"
+	add(t, l, a)
+	add(t, l, b)
+	if got := readAll(t, path); len(got) != 3 || got[0].PID != 10 || got[1].PID != 11 || got[2].Action != "alert" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// The log never grows past MaxSize: it moves to path.1 (one old file kept)
+// and starts again.
+func TestLog_RotatesAtMaxSize(t *testing.T) {
+	l, _, path := open(t)
+	l.MaxSize = 2000
+	for i := range 100 {
+		in := revshell()
+		in.Detail = fmt.Sprintf("name=n%d.example.net", i)
+		add(t, l, in)
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.Size() > 2000 {
+		t.Fatalf("log is %v bytes (%v)", st.Size(), err)
+	}
+	old, err := os.Stat(path + ".1")
+	if err != nil || old.Size() > 2000 || old.Mode().Perm() != 0o600 {
+		t.Fatalf("old log %v (%v)", old, err)
+	}
+	if got := readAll(t, path); len(got) == 0 || got[len(got)-1].Detail != "name=n99.example.net" {
+		t.Fatalf("last line %+v", got)
 	}
 }
