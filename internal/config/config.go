@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,6 +81,14 @@ type Config struct {
 	DHCPServer []Net      `json:"dhcp_server"` // where renewals and replies may go and come from
 	Kill       bool       `json:"kill"`        // false: log would-kill instead
 	DNS        DNS        `json:"dns"`
+	Fleet      *Fleet     `json:"fleet"`       // nil: a standalone agent
+	RulesCache string     `json:"rules_cache"` // the last verified rule set
+}
+
+// Fleet is how the agent reaches the controller's etcd.
+type Fleet struct {
+	Endpoints []string `json:"endpoints"` // address:port, each in jump
+	Dir       string   `json:"dir"`       // ca.pem, host.pem, host-key.pem, rules.pub
 }
 
 // Load reads and validates the config at path. A field it does not know is
@@ -89,11 +98,15 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Config{SSHPort: 22, XDRPorts: []uint16{7443}, DHCP: true, Kill: true, DNS: DNS{Listen: "127.0.0.1:53"}}
+	c := &Config{SSHPort: 22, XDRPorts: []uint16{7443}, DHCP: true, Kill: true, DNS: DNS{Listen: "127.0.0.1:53"},
+		RulesCache: "/var/lib/xdr/rules.json"}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(c); err != nil {
 		return nil, err
+	}
+	if c.Fleet != nil && c.Fleet.Dir == "" {
+		c.Fleet.Dir = "/etc/xdr/fleet"
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -187,7 +200,54 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dns.hosts: bad entry %q", n)
 		}
 	}
+	if c.Fleet != nil {
+		return c.validateFleet()
+	}
 	return nil
+}
+
+// validateFleet refuses a fleet section the firewall would not let
+// through.
+func (c *Config) validateFleet() error {
+	if c.Host == "" {
+		return fmt.Errorf("fleet: host is required; it is the name in the host's certificate")
+	}
+	if len(c.Fleet.Endpoints) == 0 {
+		return fmt.Errorf("fleet.endpoints: empty")
+	}
+	for _, e := range c.Fleet.Endpoints {
+		ap, err := netip.ParseAddrPort(e)
+		if err != nil {
+			return fmt.Errorf("fleet.endpoints: %q is not address:port", e)
+		}
+		if !slices.ContainsFunc(c.Jump, func(n Net) bool { return n.Contains(ap.Addr().Unmap()) }) {
+			return fmt.Errorf("fleet.endpoints: %s is not in jump", e)
+		}
+		if !slices.Contains(c.XDRPorts, ap.Port()) {
+			return fmt.Errorf("fleet.endpoints: port %d is not in xdr_ports", ap.Port())
+		}
+	}
+	return nil
+}
+
+// Protected is every address the box depends on: no rule may name one.
+func (c *Config) Protected() []netip.Prefix {
+	var out []netip.Prefix
+	for _, nets := range [][]Net{c.Jump, c.Peers, c.SSHFrom} {
+		for _, n := range nets {
+			out = append(out, n.Prefix)
+		}
+	}
+	for _, d := range c.AllowOut {
+		out = append(out, d.To.Prefix)
+	}
+	if a := c.DNS.Resolver; a.IsValid() {
+		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	for _, n := range c.DHCPServer {
+		out = append(out, n.Prefix)
+	}
+	return out
 }
 
 func transport(field, proto string, port uint16) error {

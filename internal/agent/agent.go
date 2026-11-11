@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -151,6 +152,9 @@ func (a *agent) reload(cfg *config.Config) error {
 	}
 	if old.DNS.Listen != cfg.DNS.Listen {
 		changed = append(changed, "dns.listen") // the stub stays bound where it is
+	}
+	if !reflect.DeepEqual(old.Fleet, cfg.Fleet) || old.RulesCache != cfg.RulesCache {
+		changed = append(changed, "fleet") // the client is started once
 	}
 	if changed != nil {
 		return fmt.Errorf("%s changed; restart the agent for that, after `xdr fw try`", strings.Join(changed, ", "))

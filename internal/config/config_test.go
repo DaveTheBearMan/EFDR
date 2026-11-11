@@ -121,3 +121,47 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Fatalf("example is thin: %+v", c)
 	}
 }
+
+func TestValidate_Fleet(t *testing.T) {
+	base := `{"host":"web01","jump":["192.0.2.7"],"xdr_ports":[7443,2379],`
+	for frag, want := range map[string]string{
+		`"fleet":{"endpoints":["192.0.2.8:2379"]}}`: "fleet.endpoints: 192.0.2.8:2379 is not in jump",
+		`"fleet":{"endpoints":["192.0.2.7:2380"]}}`: "fleet.endpoints: port 2380 is not in xdr_ports",
+		`"fleet":{"endpoints":[]}}`:                 "fleet.endpoints: empty",
+		`"fleet":{"endpoints":["jump:2379"]}}`:      "fleet.endpoints: \"jump:2379\" is not address:port",
+	} {
+		if _, err := load(t, base+frag); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want %q", frag, err, want)
+		}
+	}
+	if _, err := load(t, `{"jump":["192.0.2.7"],"xdr_ports":[2379],"fleet":{"endpoints":["192.0.2.7:2379"]}}`); err == nil || !strings.Contains(err.Error(), "host") {
+		t.Errorf("fleet without host: %v", err)
+	}
+	c, err := load(t, base+`"fleet":{"endpoints":["192.0.2.7:2379"]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Fleet.Dir != "/etc/xdr/fleet" || c.RulesCache != "/var/lib/xdr/rules.json" {
+		t.Fatalf("defaults: %+v %q", c.Fleet, c.RulesCache)
+	}
+	if c, err := load(t, `{"jump":["192.0.2.7"]}`); err != nil || c.Fleet != nil {
+		t.Fatalf("standalone: %+v %v", c, err)
+	}
+}
+
+func TestProtected(t *testing.T) {
+	c, err := load(t, `{"jump":["192.0.2.7"],"peers":["192.0.2.4"],"ssh_from":["198.51.100.0/25"],
+	 "allow_out":[{"to":"192.0.2.6","proto":"tcp","port":3306}],"dhcp_server":["192.0.2.254"],
+	 "dns":{"resolver":"192.0.2.1"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range c.Protected() {
+		got = append(got, p.String())
+	}
+	want := []string{"192.0.2.7/32", "192.0.2.4/32", "198.51.100.0/25", "192.0.2.6/32", "192.0.2.1/32", "192.0.2.254/32"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %v", got)
+	}
+}

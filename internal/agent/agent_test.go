@@ -631,6 +631,8 @@ func TestReload_RefusesAccessChange(t *testing.T) {
 		{"xdr_ports", func(c *config.Config) { c.XDRPorts = []uint16{7444} }},
 		// The stub stays where it is bound; resolv.conf would point elsewhere.
 		{"dns.listen", func(c *config.Config) { c.DNS.Listen = "127.0.0.2:53" }},
+		// The fleet client is started once, with its certs.
+		{"fleet", func(c *config.Config) { c.Fleet = &config.Fleet{Endpoints: []string{"192.0.2.7:2379"}, Dir: "/x"} }},
 	} {
 		r := newRig(t)
 		old := r.a.cfg

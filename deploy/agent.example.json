@@ -4,7 +4,7 @@
   "peers": ["192.0.2.4", "192.0.2.6"],
   "ssh_from": ["198.51.100.0/25"],
   "ssh_port": 22,
-  "xdr_ports": [7443],
+  "xdr_ports": [7443, 2379],
   "scored": [
     {"proto": "tcp", "port": 80},
     {"proto": "tcp", "port": 443}
@@ -32,5 +32,9 @@
       "mail01": "192.0.2.4"
     },
     "listen": "127.0.0.1:53"
+  },
+  "fleet": {
+    "endpoints": ["192.0.2.7:2379"],
+    "dir": "/etc/xdr/fleet"
   }
 }
