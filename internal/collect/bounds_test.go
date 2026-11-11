@@ -34,10 +34,10 @@ func TestDigest_ContentDroppedWhenFileGrew(t *testing.T) {
 }
 
 func TestPseudoFS(t *testing.T) {
-	if !pseudoFS("/proc") || !pseudoFS("/sys") {
+	if !PseudoFS("/proc") || !PseudoFS("/sys") {
 		t.Error("/proc and /sys must be recognised wherever they are mounted")
 	}
-	if pseudoFS(t.TempDir()) {
+	if PseudoFS(t.TempDir()) {
 		t.Error("an ordinary directory is not a kernel filesystem")
 	}
 }

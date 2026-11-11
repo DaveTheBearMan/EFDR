@@ -97,7 +97,7 @@ func Walk(root string) (map[string]baseline.FileEntry, []string) {
 		if mode.IsRegular() {
 			e.Caps = caps(full)
 		}
-		if mode.IsDir() && (matchAny(Sealed, rel) || pseudoFS(full)) {
+		if mode.IsDir() && (matchAny(Sealed, rel) || PseudoFS(full)) {
 			files[pathenc.Encode(rel)] = e
 			return filepath.SkipDir
 		}
@@ -164,9 +164,9 @@ func volatile(rel string) bool {
 	return false
 }
 
-// pseudoFS reports whether dir is the root of, or inside, a kernel
+// PseudoFS reports whether dir is the root of, or inside, a kernel
 // filesystem that has no files to inventory and can produce endless data.
-func pseudoFS(dir string) bool {
+func PseudoFS(dir string) bool {
 	var st unix.Statfs_t
 	if unix.Statfs(dir, &st) != nil {
 		return false
