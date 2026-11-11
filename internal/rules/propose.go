@@ -19,14 +19,7 @@ const maxDetail = 256
 // reverse shells and blocked egress the agent acted on, or would have,
 // propose anything.
 func FromIncident(in incident.Incident, baselineExe bool) []Rule {
-	switch in.Kind {
-	case "revshell-stdio", "service-shell", "egress":
-	default:
-		return nil
-	}
-	switch in.Action {
-	case "killed", "would-kill", "held":
-	default:
+	if !Proposes(in) {
 		return nil
 	}
 	detail := cut(in.Kind+": "+in.Detail, maxDetail)
@@ -54,6 +47,21 @@ func FromIncident(in incident.Incident, baselineExe bool) []Rule {
 		}
 	}
 	return out
+}
+
+// Proposes reports whether in is a reverse shell or blocked egress the
+// agent acted on, or would have: the incidents rules and hunts come from.
+func Proposes(in incident.Incident) bool {
+	switch in.Kind {
+	case "revshell-stdio", "service-shell", "egress":
+	default:
+		return false
+	}
+	switch in.Action {
+	case "killed", "would-kill", "held":
+		return true
+	}
+	return false
 }
 
 // maxExe is the most bytes of the path a hash rule names.
