@@ -35,6 +35,13 @@ func Decide(d detect.Detection, s *proc.Snapshot, p *detect.Policy) string {
 // ErrGone means there was nothing to kill.
 var ErrGone = errors.New("process gone or pid reused")
 
+// ErrSpared means the process is one KillTree never kills: init, a kernel
+// thread, this process or one protect names.
+var ErrSpared = errors.New("process is protected")
+
+// readProcs reads the process table; tests replace it.
+var readProcs = proc.Read
+
 // maxPasses bounds the search for processes forked while the tree was
 // being stopped. Each pass stops everything it sees, and a stopped
 // process cannot fork, so the search ends on its own long before this.
@@ -43,7 +50,8 @@ const maxPasses = 16
 // KillTree kills the process pid that started at start, and everything
 // it started. Init, kernel threads, this process and whatever protect
 // names are left alone, each with its own descendants; ancestors are
-// never touched. It returns the pids killed, parents first.
+// never touched. It returns the pids killed, parents first, and
+// ErrSpared when pid itself is spared.
 //
 // The tree is stopped before it is killed, so that nothing in it can fork
 // its way out, and every signal goes through a pidfd checked against the
@@ -75,10 +83,16 @@ func KillTree(procRoot string, pid int, start uint64, protect func(*proc.Proc) b
 		killed = append(killed, pr.PID)
 	}
 
+	var readErr error
 	for pass := 0; pass < maxPasses; pass++ {
-		s, err := proc.Read(procRoot)
+		s, err := readProcs(procRoot)
 		if err != nil {
-			return nil, err
+			if pass == 0 {
+				return nil, err
+			}
+			// What is stopped already still dies below.
+			readErr = err
+			break
 		}
 		root := s.Procs[pid]
 		if root == nil || root.Start != start {
@@ -86,6 +100,9 @@ func KillTree(procRoot string, pid int, start uint64, protect func(*proc.Proc) b
 				return nil, ErrGone
 			}
 			break
+		}
+		if pass == 0 && spared(root) {
+			return nil, ErrSpared
 		}
 		kids := map[int][]*proc.Proc{}
 		for _, pr := range s.Procs {
@@ -110,10 +127,11 @@ func KillTree(procRoot string, pid int, start uint64, protect func(*proc.Proc) b
 			break
 		}
 	}
+	// Every stopped process gets its SIGKILL, even after one fails.
 	for _, p := range killed {
-		if err := unix.PidfdSendSignal(fds[p], unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
-			return killed, err
+		if err := unix.PidfdSendSignal(fds[p], unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && readErr == nil {
+			readErr = err
 		}
 	}
-	return killed, nil
+	return killed, readErr
 }

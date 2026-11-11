@@ -55,6 +55,7 @@ type rig struct {
 	kills   []killCall
 	killed  []int // what the fake kill reports besides the pid itself
 	killErr error
+	partial []int // what the fake kill reports killed along with killErr
 	got     []incident.Incident
 	now     time.Time
 	root    string
@@ -104,7 +105,7 @@ func newRig(t *testing.T) *rig {
 		kill: func(pid int, start uint64, protect func(*proc.Proc) bool) ([]int, error) {
 			r.kills = append(r.kills, killCall{pid, start, protect})
 			if r.killErr != nil {
-				return nil, r.killErr
+				return r.partial, r.killErr
 			}
 			return append([]int{pid}, r.killed...), nil
 		},
@@ -644,5 +645,28 @@ func TestReload_RefusesAccessChange(t *testing.T) {
 	next.Jump = []config.Net{pfx("192.0.2.7/32")} // the same, as a new slice
 	if err := r.a.reload(&next); err != nil || r.a.cfg != &next {
 		t.Fatalf("an ordinary reload was refused: %v", err)
+	}
+}
+
+func TestHandle_SparedIsAlert(t *testing.T) {
+	r := newRig(t)
+	r.killErr = respond.ErrSpared
+	x := mk(300, 100, 1000, "/tmp/x")
+	r.a.handle(tree(x), []detect.Detection{egress(x)})
+	if len(r.got) != 1 || r.got[0].Action != "alert" || !strings.Contains(r.got[0].Detail, "protected") {
+		t.Fatalf("incidents = %+v", r.got)
+	}
+}
+
+// A kill that took the tree down but hit an error on the way is still a
+// kill: the log must not say the process lives.
+func TestHandle_KillWithErrorButDeadIsKilled(t *testing.T) {
+	r := newRig(t)
+	r.killErr = errors.New("no proc")
+	r.partial = []int{300, 301}
+	x, y := mk(300, 100, 1000, "/tmp/x"), mk(301, 300, 1000, "/tmp/y")
+	r.a.handle(tree(x, y), []detect.Detection{egress(x), egress(y)})
+	if len(r.kills) != 1 || len(r.got) != 2 || r.got[0].Action != "killed" || !strings.Contains(r.got[0].Detail, "no proc") || r.got[1].Action != "killed" {
+		t.Fatalf("kills %+v incidents %+v", r.kills, r.got)
 	}
 }

@@ -209,14 +209,18 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 			in.Action = "would-kill"
 		default:
 			pids, err := a.kill(d.PID, d.Start, protect)
+			for _, pid := range pids {
+				killed[pid] = true
+			}
 			switch {
 			case err == nil:
 				in.Action = "killed"
-				for _, pid := range pids {
-					killed[pid] = true
-				}
+			case slices.Contains(pids, d.PID):
+				in.Action, in.Detail = "killed", in.Detail+" ("+err.Error()+")"
 			case errors.Is(err, respond.ErrGone):
 				in.Action, in.Detail = "alert", in.Detail+" (exited)"
+			case errors.Is(err, respond.ErrSpared):
+				in.Action, in.Detail = "alert", in.Detail+" (protected: not killed)"
 			default:
 				in.Action, in.Detail = "kill-failed", in.Detail+": "+err.Error()
 			}

@@ -275,7 +275,7 @@ func TestKillTree_ProtectedSkipped(t *testing.T) {
 func TestKillTree_ProtectedRoot(t *testing.T) {
 	pid, desc := spawn(t, branch, 2)
 	killed, err := KillTree("/proc", pid, start(t, pid), func(pr *proc.Proc) bool { return pr.PID == pid })
-	if err != nil || len(killed) != 0 {
+	if !errors.Is(err, ErrSpared) || len(killed) != 0 {
 		t.Fatalf("killed %v, %v", killed, err)
 	}
 	for _, p := range append(desc, pid) {
@@ -338,4 +338,23 @@ func TestKillTree_ForkerCannotOutrun(t *testing.T) {
 			t.Errorf("pid %d (%s) outlived the kill", pr.PID, pr.Comm)
 		}
 	}
+}
+
+// A tree that was stopped dies even when /proc cannot be read again:
+// leaving it stopped would freeze it for good.
+func TestKillTree_ReadFailureStillKills(t *testing.T) {
+	pid, desc := spawn(t, branch, 2)
+	calls := 0
+	readProcs = func(root string) (*proc.Snapshot, error) {
+		if calls++; calls > 1 {
+			return nil, errors.New("no proc")
+		}
+		return proc.Read(root)
+	}
+	t.Cleanup(func() { readProcs = proc.Read })
+	killed, err := KillTree("/proc", pid, start(t, pid), nil)
+	if err == nil || len(killed) != 3 {
+		t.Fatalf("killed %v, err %v", killed, err)
+	}
+	waitGone(t, append(desc, pid)...)
 }
