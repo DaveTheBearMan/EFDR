@@ -672,3 +672,19 @@ func TestHandle_KillWithErrorButDeadIsKilled(t *testing.T) {
 		t.Fatalf("kills %+v incidents %+v", r.kills, r.got)
 	}
 }
+
+// Queries whose asker cannot be found (a spoofed source port) do not each
+// cost a read of /proc.
+func TestOnQuery_UnknownAskerFloodRereadsRarely(t *testing.T) {
+	r := newRig(t)
+	r.snap = tree()
+	r.a.sweep()
+	before := r.reads
+	for i := range 100 {
+		r.now = r.now.Add(time.Millisecond)
+		r.a.onQuery(query(fmt.Sprintf("n%d.example.net", i), 40001, false))
+	}
+	if n := r.reads - before; n > 5 {
+		t.Fatalf("%d reads of /proc for 100 queries in 100 ms", n)
+	}
+}

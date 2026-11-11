@@ -38,8 +38,9 @@ const (
 	sweepEvery  = time.Second
 	guardEvery  = 3 * time.Second
 	foldWindow  = 60 * time.Second
-	snapMaxAge  = 200 * time.Millisecond // how old a snapshot may be to name a DNS asker
-	eventDelay  = 50 * time.Millisecond  // events are gathered this long, then judged on one snapshot
+	snapMaxAge  = 200 * time.Millisecond
+	rereadEvery = 25 * time.Millisecond // at most this often for a query with no owner // how old a snapshot may be to name a DNS asker
+	eventDelay  = 50 * time.Millisecond // events are gathered this long, then judged on one snapshot
 	maxPending  = 4096
 	burstWindow = 10 * time.Second
 	askerTimes  = 32 // query times kept per asker; a burst is more than 20
@@ -306,8 +307,9 @@ func (a *agent) onQuery(q dnsguard.Query) {
 	if s != nil {
 		owner = s.UDPOwner(a.netns, q.Client.Port())
 	}
-	if owner == nil && a.snapAt != now {
-		// The asker's socket may be younger than the snapshot.
+	if owner == nil && now.Sub(a.snapAt) >= rereadEvery {
+		// The asker's socket may be younger than the snapshot. A flood of
+		// queries nobody owns costs one read per rereadEvery, not one each.
 		if s = a.fresh(now, true); s != nil {
 			owner = s.UDPOwner(a.netns, q.Client.Port())
 		}
