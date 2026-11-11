@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -231,9 +233,9 @@ func rulesCmd(args []string, stdout, stderr io.Writer) error {
 	s := ctl.Current()
 	fmt.Fprintf(stdout, "version %d, %d rules\n", s.Version, len(s.Rules))
 	for _, r := range s.Rules {
-		match := r.SHA256
-		if r.Kind == "remote" {
-			match = r.Key()[len("remote:"):]
+		match := printable(strings.TrimPrefix(r.Key(), r.Kind+":"), false)
+		if r.Kind == "cron" {
+			match = strconv.QuoteToASCII(r.Command) // it has spaces
 		}
 		fmt.Fprintf(stdout, "%s %s %s %s %s %s\n", r.ID, r.Kind, match, printable(r.From, false),
 			r.Seen.UTC().Format(time.RFC3339), printable(r.Exe, false))

