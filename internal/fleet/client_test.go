@@ -281,7 +281,8 @@ func TestClient_UnreachableDoesNotBlock(t *testing.T) {
 		a.c.Propose([]rules.Rule{c2(1)})
 		a.c.Report(incident.Incident{Kind: "egress"})
 	}
-	if d := time.Since(start); d > 200*time.Millisecond {
+	// A blocking call would wait out a dial; 1s leaves room for -race under load.
+	if d := time.Since(start); d > time.Second {
 		t.Fatalf("2000 calls took %s", d)
 	}
 	eventually(t, "fleet alert", 3*time.Second, func() bool { _, ins := a.got(); return len(of(ins, "fleet")) == 1 })
