@@ -59,6 +59,8 @@ func TestValidate_Table(t *testing.T) {
 		"dns hosts":    `"dns":{"hosts":{"a b":"192.0.2.9"}}`,
 		"dns listen":   `"dns":{"listen":"localhost"}`,
 		"listener exe": `"listeners":[{"proto":"udp","port":68,"exe":""}]`,
+		"packet port":  `"listeners":[{"proto":"packet","port":68,"exe":"/usr/lib/systemd/systemd-networkd"}]`,
+		"packet exe":   `"listeners":[{"proto":"packet","exe":"networkd"}]`,
 		"ssh port":     `"ssh_port":0`,
 		"xdr port":     `"xdr_ports":[0]`,
 		"gray":         `"gray_users":["a:b"]`,
@@ -71,7 +73,7 @@ func TestValidate_Table(t *testing.T) {
 	}
 	good := `{"jump":["192.0.2.7"],"scored":[{"proto":"tcp","port":80}],"guard_exes":["/usr/sbin/apache2"],
 	 "dns":{"enabled":true,"resolver":"192.0.2.1","allow":["repo.example.com"],"hosts":{"db01":"192.0.2.3"}},
-	 "listeners":[{"proto":"udp","port":68,"exe":"/usr/lib/systemd/systemd-networkd"}],"gray_users":["gray1"]}`
+	 "listeners":[{"proto":"udp","port":68,"exe":"/usr/lib/systemd/systemd-networkd"},{"proto":"packet","exe":"/usr/lib/systemd/systemd-networkd"}],"gray_users":["gray1"]}`
 	if _, err := load(t, good); err != nil {
 		t.Fatalf("good config refused: %v", err)
 	}

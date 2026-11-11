@@ -48,10 +48,8 @@ print(json.dumps({
     "host": "e2e",
     "jump": [host],
     "scored": [{"proto": "tcp", "port": 80}],
-    "listeners": [
-        {"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"},
-        {"proto": "udp", "port": 68, "exe": "/usr/lib/systemd/systemd-networkd"},
-    ],
+    # Filled in from `xdr listeners` below, as an operator does.
+    "listeners": [],
     "dhcp_server": [host],
     "kill": kill,
     "dns": {"resolver": host, "hosts": {"scoring.test": "192.0.2.10"}},
@@ -61,8 +59,18 @@ lxc file push "$OUT/agent.json" "$VM$CONF" --mode 0600 || exit 1
 x systemd-run --unit=svc /usr/bin/python3 /usr/local/sbin/svc.py >/dev/null || exit 1
 echo "== capture baseline"
 x xdr capture --root / --out "$BASE" || exit 1
-echo "== listeners before the agent"
-x xdr listeners --config "$CONF"
+echo "== listeners before the agent (they go into the config)"
+x xdr listeners --config "$CONF" > "$OUT/listeners.json" || exit 1
+cat "$OUT/listeners.json"
+python3 - "$OUT/agent.json" "$OUT/listeners.json" <<'PY' || exit 1
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["listeners"] = json.load(open(sys.argv[2]))
+# sshd itself, for when it holds :22 after socket activation hands it over
+c["listeners"].append({"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"})
+json.dump(c, open(sys.argv[1], "w"), indent=2)
+PY
+lxc file push "$OUT/agent.json" "$VM$CONF" --mode 0600 || exit 1
 
 # conf PYTHON: edit the agent's config in the VM (c is the dict).
 conf() {
@@ -330,6 +338,7 @@ if [ $rc -ne 0 ]; then fail incidents "exit $rc"
 elif [ "$(wc -l < "$OUT/incidents.txt")" -ne "$lines" ]; then fail incidents "$(wc -l < "$OUT/incidents.txt") lines printed for $lines incidents"
 elif [ -n "$missing" ]; then fail incidents "missing:$missing"
 elif LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]' "$OUT/incidents.txt"; then fail incidents "raw control bytes printed"
+elif grep -E ' (listener|rawsock) .*/usr/lib/systemd/' "$OUT/incidents.txt"; then fail incidents "stock services listed by xdr listeners still raise alerts"
 else ok incidents; fi
 
 echo "== incident log"

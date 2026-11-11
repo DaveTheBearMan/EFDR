@@ -196,6 +196,15 @@ func (p *Policy) knownListener(k proc.Sock, holder *proc.Proc) bool {
 	})
 }
 
+// knownRaw reports whether holder may hold a socket of kind raw ("packet"
+// or "raw"): a listeners entry names that kind and its path, and the
+// binary is the one the baseline has.
+func (p *Policy) knownRaw(raw string, holder *proc.Proc) bool {
+	return holder != nil && p.Baseline(holder) && slices.ContainsFunc(p.Cfg.Listeners, func(l config.Listener) bool {
+		return l.Proto == raw && l.Exe == holder.Exe
+	})
+}
+
 // Sweep judges every process in the snapshot. Detections come ordered by
 // pid.
 func Sweep(s *proc.Snapshot, p *Policy) []Detection {
@@ -236,7 +245,7 @@ func Sweep(s *proc.Snapshot, p *Policy) []Detection {
 			seen[detail] = true
 			out = append(out, Detection{Kind: kind, PID: pid, Start: pr.Start, Severity: model.SevHigh, Remote: endpoint(k.Remote, k.Proto), Detail: detail})
 		}
-		if raw != "" {
+		if raw != "" && !p.knownRaw(raw, pr) {
 			out = append(out, Detection{Kind: "rawsock", PID: pid, Start: pr.Start, Severity: model.SevHigh, Detail: "holds a " + raw + " socket"})
 		}
 		out = append(out, unknown[pid]...)
@@ -265,14 +274,19 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 		d.Kind, d.Detail, d.Remote = kind, detail+suffix, endpoint(ev.Dst, ev.Proto)
 		return []Detection{d}
 	case sensor.Socket:
+		raw := ""
 		switch {
 		case ev.Family == unix.AF_PACKET:
-			d.Detail = "opened a packet socket"
+			raw = "packet"
 		case (ev.Family == unix.AF_INET || ev.Family == unix.AF_INET6) && ev.SockType&0xf == unix.SOCK_RAW:
-			d.Detail = "opened a raw socket"
+			raw = "raw"
 		default:
 			return nil
 		}
+		if p.knownRaw(raw, pr) {
+			return nil
+		}
+		d.Detail = "opened a " + raw + " socket"
 		d.Kind, d.Detail = "rawsock", d.Detail+suffix
 		return []Detection{d}
 	case sensor.Exec:

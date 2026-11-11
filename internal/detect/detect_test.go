@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"xdr/internal/incident"
+	"xdr/internal/config"
 	"xdr/internal/model"
 	"xdr/internal/proc"
 	"xdr/internal/sensor"
@@ -309,4 +310,24 @@ func TestEvent_ExecShellOnSocket(t *testing.T) {
 	s := snap(procs{systemd, mk(10, 1, "/usr/bin/sleep", map[int]uint64{0: 500})}, conn(500, "tcp", "192.0.2.5:40000", "203.0.113.9:4444"))
 	ds := Event(sensor.Event{Kind: sensor.Exec, PID: 10, PPID: 1, Filename: "/usr/bin/bash"}, s, pol())
 	want(t, ds, "revshell-stdio:10")
+}
+
+// A packet or raw socket held by a listed, unmodified binary (networkd's
+// DHCP client) is known; the same path with other content is not.
+func TestRawSock_KnownHolder(t *testing.T) {
+	p := pol()
+	p.Cfg.Listeners = append(p.Cfg.Listeners,
+		config.Listener{Proto: "packet", Exe: "/usr/lib/systemd/systemd"},
+		config.Listener{Proto: "packet", Exe: "/usr/bin/changed"})
+	packet := proc.Sock{Inode: 500, Family: unix.AF_PACKET, Proto: "packet"}
+	raw := proc.Sock{Inode: 501, Family: unix.AF_INET, Proto: "raw", Local: ap("0.0.0.0:1"), Listen: true}
+	s := snap(procs{systemd,
+		mk(10, 1, "/usr/lib/systemd/systemd", map[int]uint64{3: 500}),
+		mk(11, 1, "/usr/bin/changed", map[int]uint64{3: 500}),
+		mk(12, 1, "/usr/lib/systemd/systemd", map[int]uint64{3: 501})}, packet, raw)
+	want(t, Sweep(s, p), "rawsock:11", "rawsock:12")
+	if ds := Event(sensor.Event{Kind: sensor.Socket, PID: 10, Family: unix.AF_PACKET, SockType: unix.SOCK_RAW}, s, p); len(ds) != 0 {
+		t.Fatalf("event: %v", kinds(ds))
+	}
+	want(t, Event(sensor.Event{Kind: sensor.Socket, PID: 11, Family: unix.AF_PACKET, SockType: unix.SOCK_RAW}, s, p), "rawsock:11")
 }

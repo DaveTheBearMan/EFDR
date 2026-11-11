@@ -22,6 +22,8 @@ import (
 	"xdr/internal/fw"
 	"xdr/internal/incident"
 	"xdr/internal/proc"
+
+	"golang.org/x/sys/unix"
 )
 
 // fwConfirm is the file `fw confirm` writes and `fw try` waits for.
@@ -245,6 +247,17 @@ func listenersCmd(args []string, stdout, stderr io.Writer) error {
 	for _, p := range s.Procs {
 		for _, sock := range s.Sockets(p) {
 			l := config.Listener{Proto: sock.Proto, Port: sock.Local.Port(), Exe: p.Exe}
+			if sock.Family == unix.AF_PACKET || sock.Proto == "raw" {
+				// A raw-socket holder: listed by kind, with no port.
+				l.Proto, l.Port = "raw", 0
+				if sock.Family == unix.AF_PACKET {
+					l.Proto = "packet"
+				}
+				if l.Exe != "" && !slices.Contains(out, l) {
+					out = append(out, l)
+				}
+				continue
+			}
 			if !sock.Listen || l.Proto != "tcp" && l.Proto != "udp" || l.Exe == "" ||
 				slices.Contains(scored, config.Port{Proto: l.Proto, Port: l.Port}) || slices.Contains(out, l) {
 				continue

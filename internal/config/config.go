@@ -48,8 +48,8 @@ type Dest struct {
 
 // Listener is a listening socket known to be legitimate.
 type Listener struct {
-	Proto string `json:"proto"`
-	Port  uint16 `json:"port"`
+	Proto string `json:"proto"` // tcp, udp, or packet/raw (holders of such sockets; no port)
+	Port  uint16 `json:"port,omitempty"`
 	Exe   string `json:"exe"`
 }
 
@@ -147,8 +147,15 @@ func (c *Config) Validate() error {
 		}
 	}
 	for _, l := range c.Listeners {
-		if err := transport("listeners", l.Proto, l.Port); err != nil {
-			return err
+		switch {
+		case l.Proto == "packet" || l.Proto == "raw":
+			if l.Port != 0 {
+				return fmt.Errorf("listeners: a %s socket has no port", l.Proto)
+			}
+		default:
+			if err := transport("listeners", l.Proto, l.Port); err != nil {
+				return err
+			}
 		}
 		if !filepath.IsAbs(l.Exe) {
 			return fmt.Errorf("listeners: exe %q is not an absolute path", l.Exe)

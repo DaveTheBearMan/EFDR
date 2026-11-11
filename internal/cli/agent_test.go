@@ -16,6 +16,8 @@ import (
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/testfs"
+
+	"golang.org/x/sys/unix"
 )
 
 const exampleConfig = "../../deploy/agent.example.json"
@@ -143,5 +145,32 @@ func TestAgentCmd_NeedsConfig(t *testing.T) {
 	}
 	if code := Run([]string{"agent", "--config", filepath.Join(t.TempDir(), "none.json")}, &out, &errb); code != 2 {
 		t.Fatalf("missing config: exit %d", code)
+	}
+}
+
+// Holders of packet and raw sockets are listed too, with no port.
+func TestKernel_ListenersCmdPacket(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"listeners"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var got []config.Listener
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, config.Listener{Proto: "packet", Exe: exe}) {
+		t.Fatalf("no packet holder in\n%s", out.String())
 	}
 }
