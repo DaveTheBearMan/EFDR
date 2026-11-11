@@ -13,12 +13,13 @@ import (
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/proc"
+	"xdr/internal/rules"
 	"xdr/internal/sensor"
 )
 
 // Detection is one thing found on one process.
 type Detection struct {
-	Kind     string // revshell-stdio | service-shell | egress | dns | rawsock | listener
+	Kind     string // revshell-stdio | service-shell | egress | dns | rawsock | listener | rule-hash | rule-remote
 	PID      int
 	Start    uint64 // 0: the process was gone when it was judged
 	Severity model.Severity
@@ -205,6 +206,31 @@ func (p *Policy) knownRaw(raw string, holder *proc.Proc) bool {
 	})
 }
 
+func ruleHit(kind string, pid int, start uint64, r *rules.Rule, remote *incident.Endpoint) Detection {
+	return Detection{Kind: kind, PID: pid, Start: start, Severity: model.SevCritical, Remote: remote,
+		Detail: "rule " + r.ID + " from " + r.From + ": " + r.Detail}
+}
+
+// ruleHash is the hash rule pr's binary hits, or nil.
+func (p *Policy) ruleHash(pr *proc.Proc) *rules.Rule {
+	if p.Rules == nil || len(p.Rules.Hash) == 0 || p.Hash == nil {
+		return nil
+	}
+	sum := p.Hash(pr)
+	if sum == "" {
+		return nil
+	}
+	return p.Rules.Hash[sum]
+}
+
+// ruleRemote is the remote rule a connection to dst hits, or nil.
+func (p *Policy) ruleRemote(dst netip.AddrPort, proto string) *rules.Rule {
+	if p.Rules == nil {
+		return nil
+	}
+	return p.Rules.Remote[rules.RemoteKey{Addr: dst.Addr().Unmap(), Port: dst.Port(), Proto: proto}]
+}
+
 // Sweep judges every process in the snapshot. Detections come ordered by
 // pid.
 func Sweep(s *proc.Snapshot, p *Policy) []Detection {
@@ -226,6 +252,9 @@ func Sweep(s *proc.Snapshot, p *Policy) []Detection {
 		if detail, ok := p.serviceShell(cls, s, s.Chain(pid)[1:]); ok {
 			out = append(out, Detection{Kind: "service-shell", PID: pid, Start: pr.Start, Severity: model.SevHigh, Detail: detail})
 		}
+		if r := p.ruleHash(pr); r != nil {
+			out = append(out, ruleHit("rule-hash", pid, pr.Start, r, nil))
+		}
 		seen := map[string]bool{}
 		raw := ""
 		for _, k := range s.Sockets(pr) {
@@ -235,7 +264,16 @@ func Sweep(s *proc.Snapshot, p *Policy) []Detection {
 			case k.Proto == "raw" && raw == "":
 				raw = "raw"
 			}
-			if !connected(k.Sock) || k.Proto == "tcp" && !k.SynSent && listens[pr.NetNS][k.Local.Port()] {
+			if !connected(k.Sock) {
+				continue
+			}
+			// A connection to a scored port is the scorer's or an
+			// attacker's alike: no rule cuts it.
+			if r := p.ruleRemote(k.Remote, k.Proto); r != nil && !p.scored(k.Proto, k.Local.Port()) && !seen["rule "+r.ID] {
+				seen["rule "+r.ID] = true
+				out = append(out, ruleHit("rule-remote", pid, pr.Start, r, endpoint(k.Remote, k.Proto)))
+			}
+			if k.Proto == "tcp" && !k.SynSent && listens[pr.NetNS][k.Local.Port()] {
 				continue
 			}
 			kind, detail := p.egress(k.Remote, k.Proto)
@@ -267,12 +305,18 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 	}
 	switch ev.Kind {
 	case sensor.Connect, sensor.Send:
+		var out []Detection
+		if r := p.ruleRemote(ev.Dst, ev.Proto); r != nil {
+			hit := ruleHit("rule-remote", ev.PID, d.Start, r, endpoint(ev.Dst, ev.Proto))
+			hit.Detail += suffix
+			out = append(out, hit)
+		}
 		kind, detail := p.egress(ev.Dst, ev.Proto)
 		if kind == "" {
-			return nil
+			return out
 		}
 		d.Kind, d.Detail, d.Remote = kind, detail+suffix, endpoint(ev.Dst, ev.Proto)
-		return []Detection{d}
+		return append(out, d)
 	case sensor.Socket:
 		raw := ""
 		switch {
@@ -297,6 +341,9 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 		var ancestors []*proc.Proc
 		if pr != nil {
 			out = revshell(cls, s, pr)
+			if r := p.ruleHash(pr); r != nil {
+				out = append(out, ruleHit("rule-hash", ev.PID, pr.Start, r, nil))
+			}
 			ancestors = s.Chain(ev.PID)[1:]
 		} else if ev.PPID != 0 {
 			ancestors = s.Chain(ev.PPID)

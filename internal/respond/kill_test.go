@@ -93,6 +93,13 @@ func TestDecide(t *testing.T) {
 		"sh under apache":             {11, "service-shell", "kill"},
 		"baseline curl, dns":          {30, "dns", "alert"},
 		"not baseline, dns":           {32, "dns", "kill"},
+		"rule hash, scored port":      {12, "rule-hash", "held"},
+		"rule hash, guarded":          {10, "rule-hash", "held"},
+		"rule hash, gray":             {20, "rule-hash", "alert"},
+		"rule remote, child of gray":  {21, "rule-remote", "alert"},
+		"rule hash":                   {32, "rule-hash", "kill"},
+		"rule remote, baseline curl":  {30, "rule-remote", "alert"},
+		"rule remote":                 {32, "rule-remote", "kill"},
 	} {
 		d := detect.Detection{Kind: c.kind, PID: c.pid, Start: uint64(1000 + c.pid)}
 		if got := Decide(d, s, p); got != c.want {

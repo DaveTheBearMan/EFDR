@@ -12,6 +12,7 @@ import (
 	"xdr/internal/config"
 	"xdr/internal/pathenc"
 	"xdr/internal/proc"
+	"xdr/internal/rules"
 )
 
 // Policy is what the detectors judge against.
@@ -22,6 +23,7 @@ type Policy struct {
 	Self  int                     // the agent's pid
 	Local func(netip.Addr) bool   // an address of this host
 	Hash  func(*proc.Proc) string // "" on error
+	Rules *rules.Index            // the fleet's signed rules; nil: none
 }
 
 var broadcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})
