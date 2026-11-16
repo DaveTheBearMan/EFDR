@@ -46,7 +46,7 @@ commands:
   gate      PAM session hook:       gate (run by pam_exec; refuses when the agent says no or is down)
   uninstall remove the install:    uninstall --token T [--dir FLEETDIR] (a signed break-glass token; for a dead agent)
   breakglass use a token:          breakglass TOKEN|- [--session ID]
-  version   print the xdr version
+  version   print the xdr version:  version [--baseline] (--baseline: the files in the embedded baseline, a number)
 `
 
 // errUsage marks errors whose message is already a usage complaint.
@@ -63,7 +63,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	var err error
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "version":
-		fmt.Fprintf(stdout, "xdr %s\n", Version)
+		err = versionCmd(rest, stdout, stderr)
 	case "capture":
 		err = captureCmd(rest, stderr)
 	case "scan":
@@ -323,4 +323,24 @@ func pkghash(args []string, stderr io.Writer) error {
 		debs = append(debs, d)
 	}
 	return writeBaseline(*out, debhash.Layer(debs))
+}
+
+// versionCmd is `xdr version [--baseline]`; with --baseline it prints how
+// many files the embedded baseline has (0: none was built in).
+func versionCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("version", stderr)
+	files := fs.Bool("baseline", false, "print the number of files in the embedded baseline")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if !*files {
+		fmt.Fprintf(stdout, "xdr %s\n", Version)
+		return nil
+	}
+	b, err := baseline.Embedded()
+	if err != nil {
+		return fmt.Errorf("embedded baseline: %w", err)
+	}
+	fmt.Fprintln(stdout, len(b.Files))
+	return nil
 }

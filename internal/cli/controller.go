@@ -17,6 +17,8 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	"xdr/deploy"
+	"xdr/internal/baseline"
 	"xdr/internal/config"
 	"xdr/internal/console"
 	"xdr/internal/controller"
@@ -28,10 +30,14 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|console-password|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds|reinstall\n")
+		fmt.Fprint(stderr, "xdr controller: install|add-target|init|enroll|run|disable-host|sign-config|console-password|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds|reinstall\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
+	case "install":
+		return controllerInstallCmd(rest, stdout, stderr)
+	case "add-target":
+		return addTargetCmd(rest, stdout, stderr)
 	case "init":
 		fs := flags("controller init", stderr)
 		dir := fs.String("dir", "", "controller directory to create")
@@ -379,4 +385,187 @@ func startConsole(ctx context.Context, dir string, cfg *controller.Config, c *cl
 			fmt.Fprintf(stdout, "console: stopped: %v\n", err)
 		}
 	}()
+}
+
+// controllerLayout is where `xdr controller install` writes; tests replace
+// it.
+var controllerLayout = controller.DefaultControllerLayout()
+
+// commas is a comma-separated flag value as a list ("" is none).
+func commas(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// readPassword is the console password from stdin, its line end dropped.
+func readPassword() (string, error) {
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 1025))
+	if err != nil {
+		return "", err
+	}
+	pw := strings.TrimRight(string(b), "\r\n")
+	if len(pw) > 1024 {
+		return "", fmt.Errorf("the password is over 1024 characters")
+	}
+	return pw, nil
+}
+
+// controllerInstallCmd is `xdr controller install`: the jump box's
+// controller, from nothing to a running unit, in one idempotent step.
+func controllerInstallCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("controller install", stderr)
+	dir := fs.String("dir", "", "controller directory (made, with its CA, if it has none)")
+	name := fs.String("name", "", "the controller's IP address, as the agents reach it")
+	consoleListen := fs.String("console-listen", "", "the console's ADDR:PORT (default: the config's, or NAME:8443)")
+	protect := fs.String("protect", "", "further addresses no rule may name, comma-separated")
+	recovery := fs.String("recovery", "", "the recovery account")
+	auto := fs.String("auto", "", "platform accounts, comma-separated")
+	gray := fs.String("gray", "", "gray-team accounts, comma-separated")
+	fs.Bool("password-stdin", true, "the console password is read from stdin (always)")
+	reset := fs.Bool("reset-password", false, "set the console password although one is set")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if *dir == "" || *name == "" {
+		fmt.Fprint(stderr, "xdr controller install: --dir and --name are required (the console password is read from stdin)\n")
+		return errUsage
+	}
+	abs, err := filepath.Abs(*dir)
+	if err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	rep, err := controller.InstallController(controllerLayout, runner, controller.InstallOptions{
+		Dir: abs, Name: *name, ConsoleListen: *consoleListen, Protect: commas(*protect), Recovery: *recovery,
+		Auto: commas(*auto), Gray: commas(*gray), ResetPassword: *reset, Binary: exe,
+		Password: readPassword, SetPassword: console.SetPassword,
+	})
+	if rep.Initialised {
+		fmt.Fprintf(stdout, "initialised %s (CA, server certificate for %s, rule key)\n", abs, *name)
+	}
+	for _, p := range rep.Wrote {
+		fmt.Fprintln(stdout, "wrote", p)
+	}
+	if rep.PasswordSet {
+		fmt.Fprintf(stdout, "console password set in %s/console.json\n", abs)
+	}
+	if err != nil {
+		return err
+	}
+	if rep.Restarted {
+		fmt.Fprintln(stdout, "restarted", controller.ControllerUnitName)
+	}
+	if !rep.Initialised && !rep.PasswordSet && len(rep.Wrote) == 0 {
+		fmt.Fprintln(stdout, "already installed; nothing changed")
+	}
+	cfg, err := controller.LoadConfig(filepath.Join(abs, "controller.json"))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "controller: %s is enabled; etcd on %s", controller.ControllerUnitName, cfg.Listen)
+	if cfg.Console != nil {
+		fmt.Fprintf(stdout, ", console https://%s", cfg.Console.Listen)
+	}
+	fmt.Fprintf(stdout, "\nnext: for each target, xdr controller add-target --dir %s --host NAME --out NAME.tgz --scored tcp/80 ...\n", abs)
+	return nil
+}
+
+// addTargetCmd is `xdr controller add-target`: one host's bundle, enrolled,
+// configured and signed, as one tarball for install-target.sh.
+func addTargetCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("controller add-target", stderr)
+	dir := fs.String("dir", "", "controller directory")
+	host := fs.String("host", "", "the host's name (lower case; its certificate's)")
+	out := fs.String("out", "", "the bundle to write (FILE.tgz)")
+	listeners := fs.String("listeners", "", "known listeners: xdr listeners or prep-target.sh output")
+	scored := fs.String("scored", "", "scored ports, as tcp/80,udp/53")
+	blue := fs.String("blue", "", "blue-team accounts, comma-separated")
+	gray := fs.String("gray", "", "gray-team accounts, comma-separated")
+	recovery := fs.String("recovery", "", "the recovery account")
+	recoveryKey := fs.String("recovery-key", "", "the recovery account's public key file")
+	auto := fs.String("auto", "", "platform accounts, comma-separated")
+	kill := fs.String("kill", "off", "on or off (turned on later from the console)")
+	base := fs.String("baseline", "", "a baseline (xdr capture) to install with")
+	force := fs.Bool("force", false, "overwrite --out")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if *dir == "" || *out == "" {
+		fmt.Fprint(stderr, "xdr controller add-target: --dir, --host, --out and --scored are required\n")
+		return errUsage
+	}
+	if _, err := os.Lstat(*out); err == nil && !*force {
+		return fmt.Errorf("%s exists; --force to overwrite it", *out)
+	}
+	o := controller.TargetOptions{Host: *host, Blue: commas(*blue), Gray: commas(*gray), Auto: commas(*auto),
+		Recovery: *recovery, Script: deploy.InstallTarget}
+	switch *kill {
+	case "on":
+		o.Kill = true
+	case "off":
+	default:
+		return fmt.Errorf("--kill %q: on or off", *kill)
+	}
+	var err error
+	if o.Scored, err = controller.ParseScored(*scored); err != nil {
+		return err
+	}
+	if *listeners != "" {
+		b, err := os.ReadFile(*listeners)
+		if err != nil {
+			return err
+		}
+		if o.Listeners, err = controller.ParseListeners(b); err != nil {
+			return fmt.Errorf("--listeners %s: %w", *listeners, err)
+		}
+	}
+	if *recoveryKey != "" {
+		b, err := os.ReadFile(*recoveryKey)
+		if err != nil {
+			return err
+		}
+		if o.RecoveryKey = strings.TrimSpace(string(b)); o.RecoveryKey == "" {
+			return fmt.Errorf("--recovery-key %s: empty", *recoveryKey)
+		}
+	}
+	if *base != "" {
+		if _, err := baseline.LoadLayers([]string{*base}); err != nil {
+			return fmt.Errorf("--baseline: %w", err)
+		}
+		if o.Baseline, err = os.ReadFile(*base); err != nil {
+			return err
+		}
+	}
+	tgz, err := controller.BuildTarget(*dir, o)
+	if err != nil {
+		return err
+	}
+	tmp := *out + ".new"
+	if err := os.WriteFile(tmp, tgz, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, *out); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	k := "off"
+	if o.Kill {
+		k = "on"
+	}
+	fmt.Fprintf(stdout, "enrolled %s; bundle %s (kill %s)\n", *host, *out, k)
+	fmt.Fprintf(stdout, "next: copy %s and the xdr binary to %s, then there, as root:\n", *out, *host)
+	fmt.Fprintf(stdout, "  mkdir -p /root/xdr-day1 && tar -C /root/xdr-day1 -xzf %s && cp xdr /root/xdr-day1/ && /root/xdr-day1/install-target.sh\n", filepath.Base(*out))
+	return nil
 }
