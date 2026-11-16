@@ -324,7 +324,9 @@ func TestLog_FoldKeyHasHostAndPath(t *testing.T) {
 		other(func(i *Incident) { i.Host = "db01" }),
 		other(func(i *Incident) { i.Path = "/etc/cron.d/b" }),
 		other(func(i *Incident) { i.Kind, i.Detail = "session-pending", "session 5 from 192.0.2.7 (ends in 1m30s)" }),
-		other(func(i *Incident) { i.Kind, i.Detail, i.Host = "session-pending", "session 5 from 192.0.2.7 (ends in 1m30s)", "db01" }),
+		other(func(i *Incident) {
+			i.Kind, i.Detail, i.Host = "session-pending", "session 5 from 192.0.2.7 (ends in 1m30s)", "db01"
+		}),
 	} {
 		if _, err := l.Add(in); err != nil {
 			t.Fatal(err)

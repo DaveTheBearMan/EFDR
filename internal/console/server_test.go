@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,5 +252,45 @@ func TestServe_TLS13Only(t *testing.T) {
 	}
 	if err := dial(tls.VersionTLS12); err == nil {
 		t.Fatal("TLS 1.2 was accepted")
+	}
+}
+
+// The limit is on attempts, counted before the (slow) password check: a
+// burst of parallel guesses must not all get checked.
+func TestAuth_ParallelGuessesAreCounted(t *testing.T) {
+	r := newServerRig(t)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := map[int]int{}
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, _ := r.login("guess number " + strings.Repeat("x", i+1))
+			mu.Lock()
+			codes[resp.StatusCode]++
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+	if codes[401] > failPerSource {
+		t.Fatalf("%d wrong passwords were checked in one burst, limit %d: %v", codes[401], failPerSource, codes)
+	}
+	if codes[429] < 40-failPerSource {
+		t.Fatalf("the rest should be refused unchecked: %v", codes)
+	}
+}
+
+// A right password does not use up an attempt.
+func TestAuth_SuccessReleasesItsAttempt(t *testing.T) {
+	r := newServerRig(t)
+	for i := 0; i < failPerSource-1; i++ {
+		r.login("wrong password " + strings.Repeat("y", i+1))
+	}
+	if resp, tok := r.login(goodPassword); resp.StatusCode != 204 || tok == "" {
+		t.Fatalf("login: %d", resp.StatusCode)
+	}
+	if resp, _ := r.login("one more wrong password"); resp.StatusCode != 401 {
+		t.Fatalf("the successful login used an attempt: %d", resp.StatusCode)
 	}
 }

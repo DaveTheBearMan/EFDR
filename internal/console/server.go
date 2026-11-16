@@ -44,6 +44,7 @@ type Server struct {
 	now  func() time.Time
 	log  *log.Logger
 
+	checks   chan struct{} // two password checks at a time: each costs 100000 rounds of sha512
 	mu       sync.Mutex
 	sessions map[[32]byte]time.Time // sha256 of the cookie → expiry
 	fails    map[string][]time.Time
@@ -54,7 +55,7 @@ type Server struct {
 // log (no passwords, no cookies) goes to logw.
 func NewServer(dir string, view func() View, act *Actions, now func() time.Time, logw io.Writer) *Server {
 	return &Server{dir: dir, view: view, act: act, now: now, log: log.New(logw, "console: ", log.LstdFlags),
-		sessions: map[[32]byte]time.Time{}, fails: map[string][]time.Time{}}
+		sessions: map[[32]byte]time.Time{}, fails: map[string][]time.Time{}, checks: make(chan struct{}, 2)}
 }
 
 // Serve serves srv over TLS 1.3 on l with dir's server certificate, until
@@ -141,12 +142,39 @@ func (s *Server) prune(now time.Time) {
 	}
 }
 
-// blocked: this source, or all sources together, failed too often in the last minute.
-func (s *Server) blocked(ip string) bool {
+// reserve counts a login attempt from ip before it is checked, and says
+// no when this source, or all sources together, have used up the minute's
+// attempts. Counting first is what holds against a burst of parallel
+// guesses; a right password gives its attempt back (release).
+func (s *Server) reserve(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune(s.now())
-	return len(s.fails[ip]) >= failPerSource || len(s.allFails) >= failTotal
+	now := s.now()
+	s.prune(now)
+	if len(s.fails[ip]) >= failPerSource || len(s.allFails) >= failTotal {
+		return false
+	}
+	if len(s.fails) >= maxFailKeys {
+		s.fails = map[string][]time.Time{}
+	}
+	s.fails[ip] = append(s.fails[ip], now)
+	s.allFails = append(s.allFails, now)
+	return true
+}
+
+// release takes back the most recent attempt from ip (it was right).
+func (s *Server) release(ip string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ts := s.fails[ip]; len(ts) > 0 {
+		s.fails[ip] = ts[:len(ts)-1]
+		if len(s.fails[ip]) == 0 {
+			delete(s.fails, ip)
+		}
+	}
+	if n := len(s.allFails); n > 0 {
+		s.allFails = s.allFails[:n-1]
+	}
 }
 
 func (s *Server) fail(ip string) {
@@ -163,18 +191,24 @@ func (s *Server) fail(ip string) {
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	ip := source(r)
-	if s.blocked(ip) {
+	if !s.reserve(ip) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
 	var in struct{ Password string }
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	if json.NewDecoder(r.Body).Decode(&in) != nil || len(in.Password) > 1024 || !CheckPassword(s.dir, in.Password) {
-		s.fail(ip)
+	ok := json.NewDecoder(r.Body).Decode(&in) == nil && len(in.Password) <= 1024
+	if ok {
+		s.checks <- struct{}{}
+		ok = CheckPassword(s.dir, in.Password)
+		<-s.checks
+	}
+	if !ok {
 		s.log.Printf("login refused from %s", ip)
 		http.Error(w, "no", http.StatusUnauthorized)
 		return
 	}
+	s.release(ip)
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		http.Error(w, "no", http.StatusInternalServerError)
