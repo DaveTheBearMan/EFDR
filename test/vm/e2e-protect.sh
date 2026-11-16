@@ -87,7 +87,7 @@ host, ip2, jroot = sys.argv[1:]
 print(json.dumps({
     "listen": host + ":2379", "protect": [host], "gray_users": ["gray1"], "recovery": "xdrrecover", "auto": ["root"],
     "console": {"listen": host + ":8443"},
-    # Only the manual reinstall is tested; the automatic one waits an hour.
+    # An hour, while the manual reinstall is tested; 20 s for the automatic one.
     "reinstall": {"key": jroot + "/reinstall.key", "user": "root", "after": "1h",
                   "hosts": {"e2e2": {"addr": ip2, "config": jroot + "/ctl/e2e2.json"}}},
 }))
@@ -154,7 +154,8 @@ grep -q '^console: https://' <<<"$(ctl_log)" || { echo "the console did not star
 
 BASEURL=https://$HOST:8443
 CJ=$JROOT/cookies
-jb curl -sk -m 15 -o /dev/null -c "$CJ" -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" "$BASEURL/login" || exit 1
+login() { jb curl -sk -m 15 -o /dev/null -c "$CJ" -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" "$BASEURL/login"; }
+login || exit 1
 state_has() {
   jb curl -sk -m 15 -b "$CJ" -H 'X-XDR: 1' "$BASEURL/api/state" |
     python3 -c 'import json, sys; v = json.load(sys.stdin); sys.exit(0 if eval(sys.argv[1]) else 1)' "$1" 2>/dev/null
@@ -285,6 +286,38 @@ if [ -z "$bad" ]; then
 fi
 if [ -n "$bad" ]; then fail reinstall "$bad"; else ok reinstall; fi
 
+echo "== reinstall-auto"
+# The controller again, its reinstall after 20 s of silence; then the
+# second box's agent silenced: its units stopped, the box marked
+# uninstalled so ensure and the guards stand down (as an uninstall by
+# hand would leave it). The controller puts it back on its own.
+bad=""
+jb python3 -c "import json; p = '$JCTL/controller.json'; c = json.load(open(p)); c['reinstall']['after'] = '20s'; json.dump(c, open(p, 'w'))" || exit 1
+ctl_kill
+ctl_run 2
+for _ in $(seq 40); do grep -q '^console: https://' <<<"$(ctl_log)" && break; sleep 0.25; done
+login || bad="$bad console-login"
+within 60 host_up e2e2 >/dev/null || bad="$bad e2e2-not-up-after-the-restart"
+pid2=$(on "$VM2" agent_pid)
+on "$VM2" x sh -c "touch /var/lib/xdr/uninstalled && systemctl stop $UNITS"
+on "$VM2" active xdr-agent.service && bad="$bad the-agent-did-not-stop"
+t0=$SECONDS
+reinstalled() { ctl_has '^e2e2 .* reinstall repaired '; }
+if [ -n "$bad" ]; then fail reinstall-auto "$bad"
+elif ! within 180 reinstalled >/dev/null; then
+  fail reinstall-auto "no reinstall within 180 s: $(ctl_log | grep -E '^e2e2 .*(silent|reinstall|back)' | tail -5 | tr '\n' ' ')"
+else
+  t=$((SECONDS - t0))
+  ctl_has '^e2e2 .* agent-silent alert ' || bad="$bad no-agent-silent"
+  ctl_has '^e2e2 .* reinstall alert ' || bad="$bad no-reinstall-alert"
+  within 30 on "$VM2" active $UNITS >/dev/null || bad="$bad units:$(on "$VM2" x systemctl is-active $UNITS | tr '\n' ' ')"
+  p=$(on "$VM2" agent_pid)
+  { [ "$p" != 0 ] && [ "$p" != "$pid2" ]; } || bad="$bad agent-pid=$p(was-$pid2)"
+  on "$VM2" x test -e /var/lib/xdr/uninstalled && bad="$bad still-marked-uninstalled"
+  within 40 host_up e2e2 >/dev/null || bad="$bad not-up-in-the-console"
+  if [ -n "$bad" ]; then fail reinstall-auto "$bad"; else ok reinstall-auto; echo "   reinstalled ${t} s after the silence began"; fi
+fi
+
 echo "== isolation-ladder"
 mark
 ctl_before=$(ctl_log | grep -c '^e2e .*isolation-over')
@@ -330,7 +363,7 @@ bin/xdr controller mint-breakglass --dir "$CTL" --hosts e2e --action uninstall -
 tok=$(cat "$OUT"/tok/*.tok)
 uout=$(x /usr/local/sbin/xdr breakglass "$tok" 2>&1)
 gone_all() {
-  x sh -c "for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF; do [ -e \$f ] && exit 1; done; [ ! -e /var/lib/xdr/backup ]" &&
+  x sh -c "for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF $IBASE; do [ -e \$f ] && exit 1; done; [ ! -e /var/lib/xdr/backup ]" &&
     ! x nft list table inet xdr >/dev/null 2>&1 &&
     ! x pgrep -f '[x]dr (agent|guard|ensure)' >/dev/null
 }
@@ -346,8 +379,12 @@ else
   imm=$(x sh -c "lsattr -R /etc/xdr /var/lib/xdr /usr/lib/xdr /etc/systemd/system /etc/cron.d 2>/dev/null | awk 'NF >= 2 && \$1 ~ /^[-a-zA-Z]+\$/ && \$1 ~ /i/'")
   [ -n "$imm" ] && bad="$bad immutable-left:$(tr '\n' ' ' <<<"$imm")"
   inc uninstall uninstalled || bad="$bad no-uninstall-incident"
-  # The box can still be logged in to: no gate is left in PAM.
+  # The box can still be logged in to: no gate is left in PAM, and
+  # sshd_config is the baseline's again (sshd reloaded, never restarted).
   x grep -q 'pam_exec.so.*gate' /etc/pam.d/sshd && bad="$bad the-gate-is-left-in-pam"
+  x grep -q '^# Written by xdr' /etc/ssh/sshd_config && bad="$bad the-rendered-sshd_config-is-left"
+  x sshd -t || bad="$bad sshd-t-refuses-the-restored-config"
+  grep -q 'uninstall sent; the agent is removing the install' <<<"$uout" || bad="$bad breakglass-said:$uout"
   ssh -F "$SSHCFG" -n -o ControlMaster=no -o ControlPath=none "$VM" true || bad="$bad a-fresh-root-login-is-refused"
   if [ -n "$bad" ]; then fail uninstall-token "$bad"; else ok uninstall-token; fi
 fi
