@@ -32,7 +32,7 @@ const gateBody = `{"jump":["192.0.2.7"],"gray_users":["gray1"],"ssh":{"blue_user
 func TestRenderSSHD_Order(t *testing.T) {
 	out := string(RenderSSHD([]byte(baseSSHD), gateConfig(t, gateBody), T0{Password: "no", KbdInteractive: "no", Pubkey: "yes", Methods: "any"}))
 	ib, im := strings.Index(out, "Include /etc/ssh"), strings.Index(out, "Match all")
-	for _, l := range []string{"PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin prohibit-password", "PubkeyAuthentication yes", "UsePAM yes", "AllowUsers "} {
+	for _, l := range []string{"PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin prohibit-password", "PubkeyAuthentication yes", "UsePAM yes", "UseDNS no", "AllowUsers "} {
 		if i := strings.Index(out, l); i < 0 || i > ib {
 			t.Errorf("%q not in the header:\n%s", l, out)
 		}

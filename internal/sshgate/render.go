@@ -43,6 +43,9 @@ func RenderSSHD(base []byte, cfg *config.Config, t0 T0) []byte {
 	var b bytes.Buffer
 	b.WriteString(sshdHeader)
 	b.WriteString("PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nPubkeyAuthentication yes\nUsePAM yes\n")
+	// AllowUsers USER@HOST names the jump box by address: never a name
+	// from reverse DNS, which the network controls.
+	b.WriteString("UseDNS no\n")
 	pinned := append(append([]string{"root"}, s.Blue...), s.Auto...)
 	if s.Recovery != "" {
 		pinned = append(pinned, s.Recovery)
