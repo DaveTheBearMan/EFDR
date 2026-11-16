@@ -58,8 +58,13 @@ inc() {
 import json, sys
 kind, action = sys.argv[1], sys.argv[2]
 cond = sys.argv[3] if len(sys.argv) > 3 else "True"
-for line in sys.stdin:
-    i = json.loads(line)
+# Read it all before answering: exiting early would SIGPIPE the writers,
+# which pipefail turns into a failure.
+for line in sys.stdin.read().splitlines():
+    try:
+        i = json.loads(line)
+    except ValueError:
+        continue  # a line being written as we read
     if i["kind"] == kind and action in ("", i["action"]) and eval(cond, {"i": i}):
         sys.exit(0)
 sys.exit(1)' "$@"

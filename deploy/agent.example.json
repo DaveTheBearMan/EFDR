@@ -37,5 +37,12 @@
     "endpoints": ["192.0.2.7:2379"],
     "dir": "/etc/xdr/fleet"
   },
-  "mesh": {"port": 7443}
+  "mesh": {"port": 7443},
+  "ssh": {
+    "blue_users": ["alice", "bob"],
+    "recovery": "xdrrecover",
+    "recovery_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExample recovery",
+    "auto": ["xdrops"],
+    "grace": "90s"
+  }
 }

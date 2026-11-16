@@ -117,5 +117,13 @@ func makeSpool(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// Its parent, the state directory, must be passable by everyone (not
+	// readable: the files in it are root's alone).
+	parent := filepath.Dir(dir)
+	if st, err := os.Stat(parent); err == nil && st.Mode().Perm()&0o011 != 0o011 {
+		if err := os.Chmod(parent, st.Mode().Perm()|0o711); err != nil {
+			return err
+		}
+	}
 	return os.Chmod(dir, os.ModeSticky|0o733)
 }

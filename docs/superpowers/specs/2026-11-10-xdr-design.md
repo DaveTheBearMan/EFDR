@@ -291,6 +291,16 @@ An escape command to declare a session safe or pause enforcement. Must work if e
 
 *(Builder's call, given no console access:)* tokens are **minted in advance** on the jump box, each scoped to one host and one action (approve-session or pause), short-lived (e.g. 2h), and kept on the operator's laptop as well. They're delivered by SSHing in as the recovery account, which skips the gate, and running the escape command. The red team can't forge them because the signing key never leaves the jump box. Test cases: jump box down, etcd down, agent dead, and the gate closed on the operator's own session.
 
+*(Builder's calls, plan 4:)*
+- The whole agent config is signed (`agent.json.sig`, the jump box's rule key, purpose `config`), not just the protected-account list; a box enrolled at the default place needs the signature even if its config drops the fleet section. `xdr controller sign-config` signs it.
+- Platform sessions are the `ssh.auto` accounts connecting from a jump address: they pass the gate and are approved at once. Gray and recovery skip the gate at PAM, so they log in with the agent dead; everyone else is refused at PAM while the agent is down (fail closed) unless a pause token for the host is in the spool.
+- A pause token turns gate ends and automatic kills into alerts until it expires. An approve token approves one session, once; tokens dropped in the spool (`/var/lib/xdr/breakglass`) while the agent is down take effect when it is back. With the agent dead the gate finds the host's name in the fleet bundle's certificate.
+- The agent refuses at login a session it would end at once (an account not in the baseline), and one logind does not know.
+- Samba rotation sends the NT hash (`pdbedit --set-nt-hash`), so no cleartext leaves the jump box; MySQL credentials wait for the service inspectors (plan 6).
+- Orders (session verdicts, user approvals, credential sets) ride etcd under `/xdr/to/<host>/`, readable by that host only, even when it is disabled. No new controller listener.
+- New login accounts (uid >= 1000, a real shell, no scored service running as them) are locked with `usermod --lock --expiredate 1`; other new accounts are alerted on. An approval unlocks only what the agent locked.
+- nftables already limits SSH to jump and `ssh_from`; per-account pinning is sshd's `AllowUsers`.
+
 ## 11. Control-plane console
 
 Web UI served by the controller on the jump box. Primary use on desktop; must also work on phone. Mockup: https://claude.ai/artifact/EYEaRd2sYnpqMRyRJSoywX (design to be iterated later).

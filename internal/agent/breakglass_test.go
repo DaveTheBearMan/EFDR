@@ -98,3 +98,21 @@ func TestBreakglass_SpooledWhileDown(t *testing.T) {
 		t.Fatal("spool re-applied")
 	}
 }
+
+// A non-root operator (the recovery account) must reach the spool: its
+// parent, the state directory, can be passed through though not listed.
+func TestMakeSpool_ReachableByOthers(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "xdr")
+	os.MkdirAll(state, 0o700)
+	if err := makeSpool(filepath.Join(state, "breakglass")); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(state)
+	if st.Mode().Perm() != 0o711 {
+		t.Fatalf("state dir %v", st.Mode())
+	}
+	sp, _ := os.Stat(filepath.Join(state, "breakglass"))
+	if sp.Mode()&os.ModeSticky == 0 || sp.Mode().Perm() != 0o733 {
+		t.Fatalf("spool %v", sp.Mode())
+	}
+}

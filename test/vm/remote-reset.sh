@@ -32,6 +32,10 @@ for f in $FILES; do
 done
 rm -rf "$NEW"
 sshd -t && systemctl try-reload-or-restart ssh.service
+# Accounts a test added are gone from passwd now; so go their homes.
+for d in /home/*; do
+  [ -d "$d" ] && [ "$(stat -c %U "$d")" = UNKNOWN ] && rm -rf "$d"
+done
 
 rm -rf /etc/xdr /var/lib/xdr /run/xdr /var/cache/xdr-e2e /opt/beacon /usr/local/bin/helperd /var/tmp/.cache-helper \
   /etc/systemd/system/xdr-e2e-*.service /usr/local/sbin/xdr /var/log/xdr-agent.*
