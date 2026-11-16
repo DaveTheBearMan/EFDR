@@ -35,10 +35,14 @@ const (
 	maxBeat     = 4 << 10
 	perSecond   = 20 // requests from one address before 429
 	seenHunts   = 1024
-	huntQueue   = 64 // hunts waiting to go to one peer
-	peerHunts   = 30 // new hunts taken from one address per peerWindow
-	peerWindow  = 10 * time.Minute
-	maxSenders  = 256 // addresses tracked for peerHunts
+	// reHunt is how long a seen hunt stays seen. It is shorter than the
+	// agent's wait before it starts the same hunt again (10 min), so that
+	// hunt finds every box ready to search it again.
+	reHunt     = 9 * time.Minute
+	huntQueue  = 64 // hunts waiting to go to one peer
+	peerHunts  = 30 // new hunts taken from one address per peerWindow
+	peerWindow = 10 * time.Minute
+	maxSenders = 256 // addresses tracked for peerHunts
 )
 
 // Rules is the agent's verified rule set: Offer takes a newer signed set
@@ -79,9 +83,9 @@ type Mesh struct {
 	peers                  map[netip.Addr]*peer
 	client                 *http.Client
 
+	now     func() time.Time
 	mu      sync.Mutex
-	seen    map[string]bool
-	order   []string // seen, oldest first
+	seen    map[string]time.Time // hunt id: when it was last taken
 	window  time.Time
 	counts  map[rateKey]int
 	senders map[netip.Addr]*sender // new hunts per address
@@ -105,7 +109,7 @@ type sender struct {
 // New is a mesh for cfg; Run starts it.
 func New(cfg Config) *Mesh {
 	m := &Mesh{cfg: cfg, beatEvery: beatEvery, silentAfter: silentAfter,
-		peers: map[netip.Addr]*peer{}, seen: map[string]bool{}, counts: map[rateKey]int{}, senders: map[netip.Addr]*sender{}}
+		now: time.Now, peers: map[netip.Addr]*peer{}, seen: map[string]time.Time{}, counts: map[rateKey]int{}, senders: map[netip.Addr]*sender{}}
 	for _, p := range cfg.Peers {
 		m.peers[p.Addr().Unmap()] = &peer{addr: p, kick: make(chan struct{}, 1), hunts: make(chan *hunt.Request, huntQueue)}
 	}
@@ -127,27 +131,34 @@ func (m *Mesh) alert(kind string, sev model.Severity, detail string) {
 	}
 }
 
-// remember adds id to the hunts seen and reports whether it is new.
+// remember adds id to the hunts seen and reports whether it is new: not
+// seen, or seen longer than reHunt ago.
 func (m *Mesh) remember(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seen[id] {
+	now := m.now()
+	if t, ok := m.seen[id]; ok && now.Sub(t) < reHunt {
 		return false
 	}
-	m.seen[id] = true
-	m.order = append(m.order, id)
-	if len(m.order) > seenHunts {
-		delete(m.seen, m.order[0])
-		m.order = m.order[1:]
+	m.seen[id] = now
+	if len(m.seen) > seenHunts {
+		oldest, at := "", now
+		for k, t := range m.seen {
+			if !t.After(at) {
+				oldest, at = k, t
+			}
+		}
+		delete(m.seen, oldest)
 	}
 	return true
 }
 
-// known reports whether id is a hunt already seen.
+// known reports whether id is a hunt seen within reHunt.
 func (m *Mesh) known(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.seen[id]
+	t, ok := m.seen[id]
+	return ok && m.now().Sub(t) < reHunt
 }
 
 // allow counts one request from a and reports whether it is within the

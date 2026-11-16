@@ -27,6 +27,11 @@ const (
 	senderWindow = 10 * time.Minute
 	maxHuntText  = 1 << 10
 	firstUserUID = 1000 // below it, system and package accounts
+	// A box starts the same hunt again (the implant dropped again) only
+	// after reStart; other boxes and the mesh forget a hunt they saw after
+	// reHunt, shorter, so they all search the new one.
+	reStart = 10 * time.Minute
+	reHunt  = 9 * time.Minute
 )
 
 // meshLink is the agent's view of the peer mesh.
@@ -40,8 +45,7 @@ type meshLink interface {
 type hunter struct {
 	mu      sync.Mutex
 	queue   chan *hunt.Request
-	seen    map[string]bool
-	order   []string
+	seen    map[string]time.Time   // hunt id: when it was last taken
 	senders map[string][]time.Time // searches per sender in the window
 	dropped map[string]bool        // senders already told about this window
 	fullAt  time.Time              // when a full queue was last reported
@@ -60,22 +64,27 @@ func (h *hunter) full(now time.Time) bool {
 }
 
 func newHunter() *hunter {
-	return &hunter{queue: make(chan *hunt.Request, huntQueue), seen: map[string]bool{},
+	return &hunter{queue: make(chan *hunt.Request, huntQueue), seen: map[string]time.Time{},
 		senders: map[string][]time.Time{}, dropped: map[string]bool{}}
 }
 
-// remember marks id seen and reports whether it was new.
-func (h *hunter) remember(id string) bool {
+// remember marks id seen at now and reports whether it was new: not seen
+// within ttl.
+func (h *hunter) remember(id string, now time.Time, ttl time.Duration) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.seen[id] {
+	if t, ok := h.seen[id]; ok && now.Sub(t) < ttl {
 		return false
 	}
-	h.seen[id] = true
-	h.order = append(h.order, id)
-	if len(h.order) > huntsSeen {
-		delete(h.seen, h.order[0])
-		h.order = h.order[1:]
+	h.seen[id] = now
+	if len(h.seen) > huntsSeen {
+		oldest, at := "", now
+		for k, t := range h.seen {
+			if !t.After(at) {
+				oldest, at = k, t
+			}
+		}
+		delete(h.seen, oldest)
 	}
 	return true
 }
@@ -127,7 +136,9 @@ func (a *agent) startHunt(in incident.Incident, baseExe bool) {
 	if r == nil {
 		return
 	}
-	a.hunts.remember(r.ID)
+	if !a.hunts.remember(r.ID, a.now(), reStart) {
+		return // the fleet is hunting it already
+	}
 	a.fleet.PutHunt(r)
 	if a.mesh != nil {
 		a.mesh.PushHunt(r, netip.Addr{})
@@ -138,7 +149,7 @@ func (a *agent) startHunt(in incident.Incident, baseExe bool) {
 // a peer). It never blocks.
 func (a *agent) offerHunt(r *hunt.Request, via string) {
 	h := a.hunts
-	if h == nil || r.From == a.cfg.Host || !h.remember(r.ID) {
+	if h == nil || r.From == a.cfg.Host || !h.remember(r.ID, a.now(), reHunt) {
 		return
 	}
 	drop := func(why string) {

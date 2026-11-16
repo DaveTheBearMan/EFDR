@@ -112,7 +112,7 @@ func TestHunt_GrayAndSystemUsersNotHunted(t *testing.T) {
 	r, f, _ := huntRig(t)
 	r.a.users[110] = "mysql"
 	for i, uid := range []uint32{2001, 110} {
-		x := mk(300+i, 100, uid, "/tmp/.x")
+		x := mk(300+i, 100, uid, fmt.Sprintf("/tmp/.x%d", i)) // one hunt each
 		d := egress(x)
 		d.Kind = "revshell-stdio" // killed even for a gray account
 		r.a.handle(tree(x), []detect.Detection{d})
@@ -290,4 +290,35 @@ func TestMeshAddrs(t *testing.T) {
 	if listen.String() != "[::]:7443" || len(out) != 3 {
 		t.Fatalf("%v %v", listen, out)
 	}
+}
+
+// The same implant dropped again after the re-hunt window starts a new
+// hunt, and other boxes search it again; within the window it starts none,
+// so the controller is not left waiting on boxes that skip a hunt they saw.
+func TestHunt_RedropRehuntedAfterWindow(t *testing.T) {
+	r, f, m := huntRig(t)
+	x := mk(300, 100, 1000, "/tmp/.x")
+	r.a.handle(tree(x), []detect.Detection{egress(x)})
+	r.now = r.now.Add(time.Minute)
+	x = mk(301, 100, 1000, "/tmp/.x")
+	r.a.handle(tree(x), []detect.Detection{egress(x)})
+	if len(f.hunts) != 1 || len(m.hunts) != 1 {
+		t.Fatalf("within the window: put %d, pushed %d", len(f.hunts), len(m.hunts))
+	}
+	r.now = r.now.Add(10 * time.Minute)
+	x = mk(302, 100, 1000, "/tmp/.x")
+	r.a.handle(tree(x), []detect.Detection{egress(x)})
+	if len(f.hunts) != 2 || len(m.hunts) != 2 {
+		t.Fatalf("after the window: put %d, pushed %d", len(f.hunts), len(m.hunts))
+	}
+
+	searched := atomic.Int32{}
+	r.a.search = func(context.Context, *hunt.Request) hunt.Result { searched.Add(1); return hunt.Result{} }
+	h := fileHunt("db01", hunt.File{SHA256: sumOf("x"), Path: "/tmp/.y"})
+	r.a.offerHunt(h, "etcd")
+	r.a.offerHunt(h, "etcd")
+	waitFor(t, "first search", func() bool { return searched.Load() == 1 })
+	r.now = r.now.Add(9 * time.Minute)
+	r.a.offerHunt(h, "etcd")
+	waitFor(t, "search after the window", func() bool { return searched.Load() == 2 })
 }

