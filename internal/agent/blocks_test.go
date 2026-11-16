@@ -157,3 +157,36 @@ func TestDNS_PinnedWithoutBackupAlertsOnce(t *testing.T) {
 		t.Fatalf("dns-files: %+v", got)
 	}
 }
+
+// A block is told repaired only once the table holding it is applied.
+func TestBlocks_ToldRepairedOnlyWhenApplied(t *testing.T) {
+	r := newRig(t)
+	r.fw.err = fmt.Errorf("nft: busy")
+	r.a.setRules(&rules.Set{Version: 1, Rules: []rules.Rule{remoteRule("203.0.113.9", 4444, "tcp")}})
+	got := r.kind("fw-block")
+	if len(got) != 1 || got[0].Action == "repaired" {
+		t.Fatalf("fw-block with the apply failing: %+v", got)
+	}
+}
+
+// A restarted agent does not announce again the blocks it already had:
+// what it announced is kept in its state, which the CLI reads too.
+func TestBlocks_NotAnnouncedAgainAfterRestart(t *testing.T) {
+	r := newRig(t)
+	set := &rules.Set{Version: 1, Rules: []rules.Rule{remoteRule("203.0.113.9", 4444, "tcp")}}
+	r.a.setRules(set)
+	b, err := os.ReadFile(filepath.Join(r.a.state, "blocks.json"))
+	if err != nil || !strings.Contains(string(b), "203.0.113.9") {
+		t.Fatalf("blocks.json %q %v", b, err)
+	}
+	r.a.blocks, r.a.blockSet, r.a.applied = nil, nil, "" // a new process
+	r.a.setRules(set)
+	if n := len(r.kind("fw-block")); n != 1 {
+		t.Fatalf("told %d times", n)
+	}
+	r.a.blocks, r.a.blockSet, r.a.applied = nil, nil, ""
+	r.a.setRules(&rules.Set{Version: 2})
+	if n := len(r.kind("fw-unblock")); n != 1 {
+		t.Fatalf("unblock after a restart told %d times", n)
+	}
+}
