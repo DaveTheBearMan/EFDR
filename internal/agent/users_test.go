@@ -21,6 +21,7 @@ func usersRig(t *testing.T) (*rig, *[][]string) {
 	testfs.File(t, r.root, "etc/passwd", passwd, 0o644)
 	testfs.File(t, r.root, "home/xdrrecover/.ssh/authorized_keys", "ssh-ed25519 AAAA k\n", 0o600)
 	r.snap = tree(mk(700, 1, 1600, "/usr/sbin/apache2"))
+	r.a.snap = r.snap
 	return r, ran
 }
 

@@ -22,6 +22,12 @@ type orders struct {
 func (a *agent) onOrder(o fleet.Order) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if o.Kind == "creds" {
+		if !o.Deleted {
+			a.onCreds(o.Value)
+		}
+		return
+	}
 	var v struct {
 		Verdict string `json:"verdict"`
 	}
