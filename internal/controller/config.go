@@ -20,6 +20,8 @@ type Config struct {
 	GuardExes []string     `json:"guard_exes"` // scored-service binaries on any host
 	Baselines []string     `json:"baselines"`  // layers over the embedded baseline
 	GrayUsers []string     `json:"gray_users"` // accounts no order or rotation may touch
+	Recovery  string       `json:"recovery"`   // the recovery account: its key is held off-box, never rotated
+	Auto      []string     `json:"auto"`       // platform accounts: never rotated
 }
 
 // LoadConfig reads and checks a controller config.

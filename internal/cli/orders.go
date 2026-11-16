@@ -69,14 +69,17 @@ func orderCmd(sub string, rest []string, stdout, stderr io.Writer) error {
 }
 
 // refuseProtected refuses a gray account, as the controller config lists
-// them.
-func refuseProtected(dir, user string) error {
+// them; with rotation also true, the recovery and platform accounts too.
+func refuseProtected(dir, user string, rotation ...bool) error {
 	cfg, err := controller.LoadConfig(filepath.Join(dir, "controller.json"))
 	if err != nil {
 		return err
 	}
 	if slices.Contains(cfg.GrayUsers, user) {
 		return fmt.Errorf("refused: %s is a protected account", user)
+	}
+	if len(rotation) > 0 && rotation[0] && (user == cfg.Recovery || slices.Contains(cfg.Auto, user)) {
+		return fmt.Errorf("refused: %s is the recovery or a platform account; it is not rotated", user)
 	}
 	return nil
 }
