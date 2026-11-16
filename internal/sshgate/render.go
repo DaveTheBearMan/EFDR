@@ -2,7 +2,11 @@ package sshgate
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"xdr/internal/config"
@@ -99,4 +103,50 @@ func RenderPAM(base []byte, cfg *config.Config, gateExe string) ([]byte, error) 
 	fmt.Fprintf(&gate, "session required pam_exec.so quiet %s gate\n", gateExe)
 	out := strings.Join(lines[:at+1], "") + gate.String() + strings.Join(lines[at+1:], "")
 	return []byte(out), nil
+}
+
+// ReleasePAM takes the gate RenderPAM added out of root's pam.d/sshd: the
+// pam_exec line and the exemption line just before it. The off switch
+// does this before the binary goes, since a gate that cannot run refuses
+// every session but the gray and recovery accounts'. changed is false
+// when there was no gate (or no file).
+func ReleasePAM(root string) (changed bool, err error) {
+	path := filepath.Join(root, pamSSHD)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	lines := strings.SplitAfter(string(b), "\n")
+	isGate := func(l string) bool {
+		f := strings.Fields(l)
+		return len(f) == 6 && f[0] == "session" && f[1] == "required" && f[2] == "pam_exec.so" && f[3] == "quiet" && f[5] == "gate"
+	}
+	isExempt := func(l string) bool {
+		return strings.HasPrefix(strings.TrimSpace(l), "session [success=1 default=ignore] pam_succeed_if.so quiet user in ")
+	}
+	var keep []string
+	for i, l := range lines {
+		if isGate(l) {
+			changed = true
+			continue
+		}
+		if isExempt(l) && i+1 < len(lines) && isGate(lines[i+1]) {
+			continue
+		}
+		keep = append(keep, l)
+	}
+	if !changed {
+		return false, nil
+	}
+	mode := fs.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	if err := writeFile(path, []byte(strings.Join(keep, "")), mode); err != nil {
+		return false, err
+	}
+	return true, nil
 }

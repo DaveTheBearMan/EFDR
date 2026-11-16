@@ -13,6 +13,7 @@ import (
 	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/sshgate"
+	"xdr/internal/testfs"
 )
 
 func tokenRig(t *testing.T) (*rig, ed25519.PrivateKey) {
@@ -296,5 +297,33 @@ func TestBreakglass_ExpiredUninstallInSpoolIsDropped(t *testing.T) {
 	}
 	if _, err := os.Stat(f); err == nil {
 		t.Fatal("expired token left in the spool")
+	}
+}
+
+// The off switch takes the SSH gate out of PAM (its binary is about to go,
+// and a gate that cannot run refuses every session), and after it the
+// agent asserts nothing: no table, no gate, until it is gone.
+func TestBreakglass_UninstallReleasesTheGate(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	testfs.File(t, r.root, "etc/ssh/sshd_config", "UsePAM yes\n", 0o644)
+	testfs.File(t, r.root, "etc/pam.d/sshd", pamBase, 0o644)
+	r.a.assert(false)
+	pam := filepath.Join(r.root, "etc/pam.d/sshd")
+	if b, _ := os.ReadFile(pam); !strings.Contains(string(b), "pam_exec.so") {
+		t.Fatalf("the rig has no gate: %s", b)
+	}
+	if rep := r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000d9", "uninstall")}); !rep.OK {
+		t.Fatalf("%+v", rep)
+	}
+	if b, _ := os.ReadFile(pam); string(b) != pamBase {
+		t.Fatalf("the gate is still in pam.d/sshd:\n%s", b)
+	}
+	n := len(r.fw.applied)
+	r.fw.drift = true
+	r.a.guard()
+	if b, _ := os.ReadFile(pam); string(b) != pamBase || len(r.fw.applied) != n {
+		t.Fatalf("asserted after the uninstall: pam %q, %d applies", b, len(r.fw.applied)-n)
 	}
 }

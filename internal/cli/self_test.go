@@ -138,3 +138,20 @@ func TestUninstallCLI(t *testing.T) {
 		t.Fatalf("cmds %v", f.cmds)
 	}
 }
+
+// With the agent dead, the CLI's uninstall also takes the gate out of PAM.
+func TestUninstallCLI_ReleasesTheGate(t *testing.T) {
+	root, _, mint := uninstallRig(t)
+	pam := filepath.Join(root, "etc/pam.d/sshd")
+	os.MkdirAll(filepath.Dir(pam), 0o755)
+	base := "@include common-auth\n@include common-session\n"
+	os.WriteFile(pam, []byte(base+"session required pam_exec.so quiet /usr/local/sbin/xdr gate\n"), 0o644)
+	now := time.Now()
+	var so, se bytes.Buffer
+	if code := Run([]string{"uninstall", "--token", mint("web01", "uninstall", now.Add(-time.Minute), now.Add(time.Hour))}, &so, &se); code != 0 {
+		t.Fatalf("%d %s", code, se.String())
+	}
+	if b, _ := os.ReadFile(pam); string(b) != base {
+		t.Fatalf("pam.d/sshd:\n%s", b)
+	}
+}

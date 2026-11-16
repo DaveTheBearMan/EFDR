@@ -115,3 +115,29 @@ func TestRenderPAM_ExemptSkipsGate(t *testing.T) {
 		t.Fatalf("no exempt accounts:\n%s", out)
 	}
 }
+
+// The off switch takes the gate out of pam.d/sshd: with the agent and its
+// binary gone, the pam_exec line would refuse every session.
+func TestReleasePAM_TakesTheGateOut(t *testing.T) {
+	root := t.TempDir()
+	out, err := RenderPAM([]byte(basePAM), gateConfig(t, gateBody), "/usr/local/sbin/xdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(root, "etc/pam.d"), 0o755)
+	p := filepath.Join(root, "etc/pam.d/sshd")
+	os.WriteFile(p, out, 0o644)
+	if changed, err := ReleasePAM(root); err != nil || !changed {
+		t.Fatalf("changed %v, %v", changed, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != basePAM {
+		t.Fatalf("got:\n%s\nwant:\n%s", b, basePAM)
+	}
+	if changed, err := ReleasePAM(root); err != nil || changed {
+		t.Fatalf("a second release: %v, %v", changed, err)
+	}
+	os.Remove(p)
+	if changed, err := ReleasePAM(root); err != nil || changed {
+		t.Fatalf("no file: %v, %v", changed, err)
+	}
+}

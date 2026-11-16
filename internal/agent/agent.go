@@ -161,6 +161,7 @@ type agent struct {
 	runner       install.Runner                                        // runs systemctl and chattr for it
 	exit         func()                                                // stops the agent for good
 	settle       func()                                                // lets the last report leave; nil: no wait
+	uninstalled  bool                                                  // a signed uninstall removed the install: assert nothing more
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
@@ -485,6 +486,9 @@ func (a *agent) guard() { a.assert(true) }
 func (a *agent) assert(report bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.uninstalled {
+		return
+	}
 	now := a.now()
 	a.syncTable(now)
 	// A reload or the switch going on or off changes the files the

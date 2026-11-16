@@ -95,7 +95,15 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 	if a.runner == nil {
 		return sshgate.Reply{Why: "no install to remove"}
 	}
+	// The gate's binary is about to go: a gate that cannot run would refuse
+	// every session, so it leaves PAM first.
+	if _, err := sshgate.ReleasePAM(a.root); err != nil {
+		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: the ssh gate stays in PAM: " + err.Error()})
+		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
+	}
+	a.uninstalled = true // no table, no gate from here on
 	if err := install.Uninstall(a.layout, a.runner); err != nil {
+		a.uninstalled = false
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: " + err.Error()})
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}

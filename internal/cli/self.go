@@ -17,6 +17,7 @@ import (
 	"xdr/internal/install"
 	"xdr/internal/pki"
 	"xdr/internal/rules"
+	"xdr/internal/sshgate"
 )
 
 // layout and runner are what install and ensure act on; tests replace them.
@@ -127,6 +128,15 @@ func uninstallCmd(args []string, stdout, stderr io.Writer) error {
 	}
 	if err != nil {
 		return err
+	}
+	// The gate's binary is about to go; a gate that cannot run refuses
+	// every session.
+	root := layout.Root
+	if root == "" {
+		root = "/"
+	}
+	if _, err := sshgate.ReleasePAM(root); err != nil {
+		return fmt.Errorf("the ssh gate stays in PAM: %w", err)
 	}
 	if err := install.Uninstall(layout, runner); err != nil {
 		return err

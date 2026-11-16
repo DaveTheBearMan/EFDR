@@ -127,6 +127,9 @@ func (a *agent) agentPorts() []uint16 {
 func (a *agent) ladder(run sshgate.Runner) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.uninstalled {
+		return
+	}
 	h := &a.heal
 	if !a.isolated() {
 		if h.active {
