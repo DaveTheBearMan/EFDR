@@ -90,14 +90,8 @@ func portsIn(text string) []uint16 {
 	return out
 }
 
-// namesAgentPort: some port in the text is one of the agent's and none of
-// the scored services'. A range is judged by its ends, so a rule naming a
-// scored port beside an agent port still qualifies only for the agent one.
-func namesAgentPort(text string, ports []uint16, scored []config.Port) bool {
+func namesAgentPort(text string, ports []uint16) bool {
 	for _, p := range portsIn(text) {
-		if isScored(p, scored) {
-			continue
-		}
 		for _, a := range ports {
 			if a == p {
 				return true
@@ -116,8 +110,32 @@ func isScored(p uint16, scored []config.Port) bool {
 	return false
 }
 
+// blocks: the match text names a fleet address or an agent port, and no
+// scored port. A rule that names a scored port is never a blocker, even
+// beside a fleet address: it may be the very rule that guards the service.
 func blocks(text string, fleet []netip.Prefix, ports []uint16, scored []config.Port) bool {
-	return namesFleet(text, fleet) || namesAgentPort(text, ports, scored)
+	for _, p := range portsIn(text) {
+		if isScored(p, scored) {
+			return false
+		}
+	}
+	return namesFleet(text, fleet) || namesAgentPort(text, ports)
+}
+
+var nftComment = regexp.MustCompile(`comment\s+"[^"]*"`)
+
+// cutHandle splits a trailing "# handle N" off a line of nft output; the
+// handle is 0 when there is none.
+func cutHandle(line string) (string, uint64) {
+	i := strings.LastIndex(line, "# handle ")
+	if i < 0 {
+		return line, 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(line[i+len("# handle "):]), 10, 64)
+	if err != nil {
+		return line, 0
+	}
+	return strings.TrimSpace(line[:i]), n
 }
 
 // NftBlockers reads `nft -a list ruleset` and returns, for each table
@@ -137,6 +155,12 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 	}
 	for _, line := range strings.Split(ruleset, "\n") {
 		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue // nft's warnings, as "# Warning: table ip filter is managed by iptables-nft"
+		}
+		// Every line of `nft -a list ruleset` may end in "# handle N":
+		// tables and chains as well as rules.
+		line, handle := cutHandle(line)
 		f := strings.Fields(line)
 		switch {
 		case len(f) == 0 || line == "}":
@@ -157,14 +181,11 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 			if cur == nil || chain == "" || skipT || skipC {
 				continue
 			}
-			rule, handle, ok := strings.Cut(line, "# handle ")
-			if !ok {
+			if handle == 0 {
 				continue
 			}
-			h, err := strconv.ParseUint(strings.TrimSpace(handle), 10, 64)
-			if err != nil {
-				continue
-			}
+			h := handle
+			rule := nftComment.ReplaceAllString(line, "")
 			rf := strings.Fields(rule)
 			if len(rf) == 0 || (rf[len(rf)-1] != "drop" && rf[len(rf)-1] != "reject" && !strings.Contains(rule, " reject ")) {
 				continue

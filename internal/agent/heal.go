@@ -194,11 +194,20 @@ func (a *agent) removeBlockers(run sshgate.Runner) {
 			}
 		}
 	}
-	rules, _ := a.output("ip", "rule")
-	routes, _ := a.output("ip", "route")
-	for _, line := range heal.RouteBlockers(string(rules), string(routes), fleet) {
-		f := strings.Fields(line)
-		a.removed(line, run(f[0], f[1:]...))
+	for _, v6 := range []bool{false, true} {
+		pre := []string{}
+		if v6 {
+			pre = []string{"-6"}
+		}
+		rules, _ := a.output("ip", append(pre, "rule")...)
+		routes, _ := a.output("ip", append(pre, "route")...)
+		for _, line := range heal.RouteBlockers(string(rules), string(routes), fleet) {
+			f := strings.Fields(line)
+			if v6 { // "ip rule del ..." becomes "ip -6 rule del ..."
+				f = append([]string{f[0], "-6"}, f[1:]...)
+			}
+			a.removed(strings.Join(f, " "), run(f[0], f[1:]...))
+		}
 	}
 	deny := filepath.Join(a.root, "etc/hosts.deny")
 	if b, err := a.readF(deny); err == nil {
@@ -268,13 +277,15 @@ func (a *agent) restoreLink(run sshgate.Runner) {
 	if b, err := a.output("ip", "-o", "link", "show", s.Link); err == nil && !strings.Contains(string(b), "state UP") && !strings.Contains(string(b), ",UP") && !strings.Contains(string(b), "<UP") {
 		did("link "+s.Link+" brought up", run("ip", "link", "set", s.Link, "up"))
 	}
+	// An address or gateway that is there but different is DHCP's or the
+	// admin's doing: only a box with none at all gets the old one back.
 	if s.Addr != "" {
-		if b, err := a.output("ip", "-o", "-4", "addr", "show", "dev", s.Link); err == nil && !strings.Contains(string(b), s.Addr) {
+		if b, err := a.output("ip", "-o", "-4", "addr", "show", "dev", s.Link, "scope", "global"); err == nil && len(strings.Fields(string(b))) == 0 {
 			did("address "+s.Addr+" restored on "+s.Link, run("ip", "addr", "add", s.Addr, "dev", s.Link))
 		}
 	}
 	if s.Via != "" {
-		if b, err := a.output("ip", "route", "show", "default"); err == nil && !strings.Contains(string(b), "via "+s.Via) {
+		if b, err := a.output("ip", "route", "show", "default"); err == nil && len(strings.Fields(string(b))) == 0 {
 			did("default route via "+s.Via+" restored", run("ip", "route", "add", "default", "via", s.Via, "dev", s.Link))
 		}
 	}

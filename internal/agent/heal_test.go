@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	healNft = "table inet bad {\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n" +
+	healNft = "# Warning: table inet bad is managed by iptables-nft, do not touch!\ntable inet bad { # handle 3\n\tchain input { # handle 1\n\t\ttype filter hook input priority 0; policy accept;\n" +
 		"\t\tip saddr 192.0.2.7 drop # handle 4\n\t\ttcp dport 80 drop # handle 5\n\t}\n}\n"
 	healRoutes = "default via 10.0.0.1 dev eth0\nblackhole 192.0.2.7\n"
 )
@@ -35,6 +35,7 @@ func newHealRig(t *testing.T) *healRig {
 	f.down = true
 	h := &healRig{rig: r, f: f, m: m, outs: map[string]string{
 		"nft -a list ruleset": healNft, "ip route": healRoutes,
+		"ip rule": "0:\tfrom all lookup local\n", "ip -6 rule": "0:\tfrom all lookup local\n", "ip -6 route": "",
 		"ss -H -ltn":                  "LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n",
 		"ip -o link show eth0":        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
 		"ip -o -4 addr show dev eth0": "2: eth0 inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\n",
@@ -211,7 +212,10 @@ func TestLadder_StepsInOrderAndBacksOff(t *testing.T) {
 
 func TestLadder_ScoredPortAndSshdListening(t *testing.T) {
 	h := newHealRig(t)
-	h.outs["nft -a list ruleset"] = "table inet only {\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n\t\ttcp dport 80 drop # handle 5\n\t}\n}\n"
+	h.a.cfg.Scored = append(h.a.cfg.Scored, config.Port{Proto: "tcp", Port: 22}, config.Port{Proto: "tcp", Port: 7443})
+	h.outs["nft -a list ruleset"] = "table inet only { # handle 3\n\tchain input { # handle 1\n\t\ttype filter hook input priority 0; policy accept;\n" +
+		"\t\ttcp dport 80 drop # handle 5\n\t\ttcp dport 22 drop # handle 6\n\t\tip saddr 192.0.2.7 tcp dport 7443 drop # handle 7\n\t}\n}\n"
+	h.outs["iptables-legacy-save"] = "*filter\n-A INPUT -p tcp -m tcp --dport 22 -j DROP\nCOMMIT\n"
 	h.outs["ip route"] = "default via 10.0.0.1 dev eth0\n"
 	h.outs["ss -H -ltn"] = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
 	h.cutOff()
@@ -222,13 +226,49 @@ func TestLadder_ScoredPortAndSshdListening(t *testing.T) {
 	if len(h.ran) != 0 {
 		t.Fatalf("ran %q: a scored rule was removed, or ssh restarted while it listened", h.ran)
 	}
+	// Not scored, the same rules are blockers.
+	h = newHealRig(t)
+	h.outs["nft -a list ruleset"] = "table inet only { # handle 3\n\tchain input { # handle 1\n\t\ttype filter hook input priority 0; policy accept;\n" +
+		"\t\ttcp dport 22 drop # handle 6\n\t}\n}\n"
+	h.outs["ip route"] = ""
+	h.cutOff()
+	h.step()
+	h.now = h.now.Add(3 * time.Second)
+	h.step()
+	if strings.Join(h.ran, "|") != "nft delete rule inet only input handle 6" {
+		t.Fatalf("ran %q", h.ran)
+	}
+}
+
+func TestLadder_IptablesAndIPv6(t *testing.T) {
+	h := newHealRig(t)
+	h.a.cfg.Peers = []config.Net{pfx("2001:db8::/32")}
+	h.outs["nft -a list ruleset"] = ""
+	h.outs["ip route"] = ""
+	h.outs["iptables-legacy-save"] = "*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -s 192.0.2.7/32 -j DROP\n-A INPUT -s 203.0.113.5/32 -j DROP\nCOMMIT\n"
+	h.outs["ip6tables-legacy-save"] = "*filter\n-A INPUT -s 2001:db8::7/128 -j REJECT --reject-with icmp6-port-unreachable\nCOMMIT\n"
+	h.outs["ip -6 rule"] = "0:\tfrom all lookup local\n100:\tfrom all to 2001:db8::7 prohibit\n"
+	h.outs["ip -6 route"] = "blackhole 2001:db8::9 dev lo metric 1024\n"
+	h.cutOff()
+	h.step()
+	h.now = h.now.Add(3 * time.Second)
+	h.step()
+	want := []string{
+		"iptables-legacy -t filter -D INPUT -s 192.0.2.7/32 -j DROP",
+		"ip6tables-legacy -t filter -D INPUT -s 2001:db8::7/128 -j REJECT --reject-with icmp6-port-unreachable",
+		"ip -6 rule del pref 100 from all to 2001:db8::7 prohibit",
+		"ip -6 route del blackhole 2001:db8::9 dev lo metric 1024",
+	}
+	if strings.Join(h.ran, "|") != strings.Join(want, "|") {
+		t.Fatalf("ran %q, want %q", h.ran, want)
+	}
 }
 
 func TestLadder_RestoresLinkAndRoute(t *testing.T) {
 	h := newHealRig(t)
 	h.a.linkSnap = linkSnap{Link: "eth0", Addr: "10.0.0.5/24", Via: "10.0.0.1"}
 	h.outs["ip -o link show eth0"] = "2: eth0: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n"
-	h.outs["ip -o -4 addr show dev eth0"] = ""
+	h.outs["ip -o -4 addr show dev eth0 scope global"] = ""
 	h.outs["ip route show default"] = ""
 	h.outs["nft -a list ruleset"] = ""
 	h.outs["ip route"] = ""
@@ -244,5 +284,29 @@ func TestLadder_RestoresLinkAndRoute(t *testing.T) {
 	}
 	if strings.Join(h.ran, "|") != strings.Join(want, "|") {
 		t.Fatalf("ran %q, want %q", h.ran, want)
+	}
+}
+
+func TestLadder_LeavesChangedGatewayAndAddress(t *testing.T) {
+	for name, set := range map[string]map[string]string{
+		"gateway whole-field (10.0.0.10 is not 10.0.0.1)": {"ip route show default": "default via 10.0.0.10 dev eth0\n"},
+		"gateway changed":     {"ip route show default": "default via 192.0.2.1 dev eth0\n"},
+		"address changed":     {"ip -o -4 addr show dev eth0 scope global": "2: eth0 inet 10.0.0.77/24 scope global eth0\n"},
+		"address whole-field": {"ip -o -4 addr show dev eth0 scope global": "2: eth0 inet 10.0.0.55/24 scope global eth0\n"},
+	} {
+		h := newHealRig(t)
+		h.a.linkSnap = linkSnap{Link: "eth0", Addr: "10.0.0.5/24", Via: "10.0.0.1"}
+		h.outs["nft -a list ruleset"], h.outs["ip route"] = "", ""
+		for k, v := range set {
+			h.outs[k] = v
+		}
+		h.cutOff()
+		for i := 0; i < 3; i++ {
+			h.step()
+			h.now = h.now.Add(31 * time.Second)
+		}
+		if len(h.ran) != 0 {
+			t.Fatalf("%s: ran %q", name, h.ran)
+		}
 	}
 }
