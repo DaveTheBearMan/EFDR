@@ -120,7 +120,10 @@ on "$VM2" setup_box e2e2 "$OUT/bundle2" || exit 1
 start_ctl || exit 1
 start_agent || { x cat "$ERR"; exit 1; }
 on "$VM2" start_agent || { on "$VM2" x cat "$ERR"; exit 1; }
-sleep 8 # both agents have applied their table and joined
+# joined VM: its table is applied and its agent holds a session with etcd.
+joined() { on "$1" x sh -c 'nft list table inet xdr >/dev/null 2>&1 && [ -n "$(ss -Htn state established "( dport = :2379 )")" ]'; }
+for _ in $(seq 80); do joined "$VM1" && joined "$VM2" && break; sleep 0.25; done
+joined "$VM1" && joined "$VM2" || { echo "the agents did not apply their table and join within 20 s"; exit 1; }
 
 # fetch VM PORT: the http status of the third host's listener, 000 when
 # nothing came back within 3 s.
@@ -156,9 +159,9 @@ echo "== baseline-alerts"
 mark
 rules_before=$(jx rules list --dir "$JCTL" | wc -l)
 bg "python3 -c \"import socket, time; s = socket.create_connection(('$IP3', 4445), 5); time.sleep(40)\""
-sleep 4
-if ! x pgrep -f 'create_connection' >/dev/null; then fail baseline-alerts "python3 was killed: $(x tail -3 $LOG)"
-elif ! wait_inc 5 egress alert "i.get('remote', {}).get('port') == 4445 and i['severity'] == 'medium'"; then fail baseline-alerts "no Medium egress alert: $(x tail -3 $LOG)"
+# The alert says the agent judged the connection; the process must still run.
+if ! wait_inc 10 egress alert "i.get('remote', {}).get('port') == 4445 and i['severity'] == 'medium'"; then fail baseline-alerts "no Medium egress alert: $(x tail -3 $LOG)"
+elif ! x pgrep -f 'create_connection' >/dev/null; then fail baseline-alerts "python3 was killed: $(x tail -3 $LOG)"
 elif [ "$(jx rules list --dir "$JCTL" | wc -l)" != "$rules_before" ]; then fail baseline-alerts "an alert proposed a rule: $(jx rules list --dir "$JCTL")"
 else ok baseline-alerts; fi
 x pkill -f create_connection
