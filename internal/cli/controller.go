@@ -28,7 +28,7 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|console-password|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds\n")
+		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|console-password|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds|reinstall\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
@@ -121,6 +121,37 @@ func controllerCmd(args []string, stdout, stderr io.Writer) error {
 		return orderCmd(sub, rest, stdout, stderr)
 	case "rotate":
 		return rotateCmd(rest, stdout, stderr)
+	case "reinstall":
+		fs := flags("controller reinstall", stderr)
+		dir := fs.String("dir", "", "controller directory")
+		host := fs.String("host", "", "enrolled host listed under reinstall.hosts in controller.json")
+		binary := fs.String("binary", "", "binary to put on the box (default: this one)")
+		if err := parse(fs, rest); err != nil {
+			return err
+		}
+		if *dir == "" || *host == "" {
+			fmt.Fprint(stderr, "xdr controller reinstall: --dir and --host are required\n")
+			return errUsage
+		}
+		cfg, err := controller.LoadConfig(filepath.Join(*dir, "controller.json"))
+		if err != nil {
+			return err
+		}
+		if cfg.Reinstall == nil {
+			return fmt.Errorf("controller.json has no reinstall section")
+		}
+		if *binary == "" {
+			if *binary, err = os.Executable(); err != nil {
+				return err
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		ssh := controller.ExecSSH{Key: cfg.Reinstall.Key, User: cfg.Reinstall.User}
+		if err := controller.Reinstall(ctx, *dir, cfg, *host, ssh, *binary); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "reinstalled %s\n", *host)
 	case "creds":
 		return credsCmd(rest, stdout, stderr)
 	case "console-password":
@@ -240,6 +271,11 @@ func controllerRun(dir, cfgPath string, stdout io.Writer) error {
 	ctl, err := controller.New(dir, c, guard, key, log)
 	if err != nil {
 		return err
+	}
+	if cfg.Reinstall != nil {
+		if self, err := os.Executable(); err == nil {
+			ctl.EnableReinstall(cfg, controller.ExecSSH{Key: cfg.Reinstall.Key, User: cfg.Reinstall.User}, self)
+		}
 	}
 	fmt.Fprintf(stdout, "controller: listening on %s, %d hosts enrolled, rules version %d\n", cfg.Listen, len(hosts), ctl.Current().Version)
 	if view != nil {

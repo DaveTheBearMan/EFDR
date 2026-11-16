@@ -15,14 +15,15 @@ import (
 // Config is the controller's deployment config, controller.json in its
 // directory.
 type Config struct {
-	Listen    string       `json:"listen"`     // host:port agents reach etcd at
-	Protect   []config.Net `json:"protect"`    // addresses no rule may name
-	GuardExes []string     `json:"guard_exes"` // scored-service binaries on any host
-	Baselines []string     `json:"baselines"`  // layers over the embedded baseline
-	GrayUsers []string     `json:"gray_users"` // accounts no order or rotation may touch
-	Recovery  string       `json:"recovery"`   // the recovery account: its key is held off-box, never rotated
-	Auto      []string     `json:"auto"`       // platform accounts: never rotated
-	Console   *Console     `json:"console"`    // nil: no web console
+	Listen    string           `json:"listen"`     // host:port agents reach etcd at
+	Protect   []config.Net     `json:"protect"`    // addresses no rule may name
+	GuardExes []string         `json:"guard_exes"` // scored-service binaries on any host
+	Baselines []string         `json:"baselines"`  // layers over the embedded baseline
+	GrayUsers []string         `json:"gray_users"` // accounts no order or rotation may touch
+	Recovery  string           `json:"recovery"`   // the recovery account: its key is held off-box, never rotated
+	Auto      []string         `json:"auto"`       // platform accounts: never rotated
+	Console   *Console         `json:"console"`    // nil: no web console
+	Reinstall *ReinstallConfig `json:"reinstall"`  // nil: no reinstall over SSH
 }
 
 // Console is where the operator's web console listens.
@@ -46,6 +47,11 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Console != nil {
 		if _, _, err := net.SplitHostPort(c.Console.Listen); err != nil {
 			return nil, fmt.Errorf("%s: console.listen %q: %w", path, c.Console.Listen, err)
+		}
+	}
+	if c.Reinstall != nil {
+		if err := c.Reinstall.check(); err != nil {
+			return nil, fmt.Errorf("%s: reinstall: %w", path, err)
 		}
 	}
 	return &c, nil

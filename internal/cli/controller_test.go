@@ -190,3 +190,24 @@ func TestExampleControllerConfigLoads(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
+
+func TestReinstallCLI_Refusals(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ctl")
+	var so, se bytes.Buffer
+	if code := Run([]string{"controller", "init", "--dir", dir, "--name", "127.0.0.1"}, &so, &se); code != 0 {
+		t.Fatalf("init: %d %s", code, se.String())
+	}
+	if code := Run([]string{"controller", "reinstall", "--dir", dir}, &so, &se); code != 2 {
+		t.Fatalf("without --host: %d", code)
+	}
+	se.Reset()
+	os.WriteFile(filepath.Join(dir, "controller.json"), []byte(`{"listen":"127.0.0.1:2379"}`), 0o600)
+	if code := Run([]string{"controller", "reinstall", "--dir", dir, "--host", "web01"}, &so, &se); code == 0 || !strings.Contains(se.String(), "reinstall") {
+		t.Fatalf("no reinstall section: %d %q", code, se.String())
+	}
+	se.Reset()
+	os.WriteFile(filepath.Join(dir, "controller.json"), []byte(`{"listen":"127.0.0.1:2379","reinstall":{"key":"/nonexistent/k","hosts":{"web02":{"addr":"10.0.0.5","config":"/nonexistent/a.json"}}}}`), 0o600)
+	if code := Run([]string{"controller", "reinstall", "--dir", dir, "--host", "web01"}, &so, &se); code == 0 || !strings.Contains(se.String(), "not enrolled") {
+		t.Fatalf("unenrolled host: %d %q", code, se.String())
+	}
+}

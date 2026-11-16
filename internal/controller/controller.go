@@ -48,6 +48,9 @@ type beat struct {
 	seen   bool      // a heartbeat was put since the controller started
 	silent bool      // agent-silent was reported and agent-back not yet
 	last   time.Time // the last heartbeat put
+
+	silentAt    time.Time // when this silence began
+	reinstalled bool      // a reinstall was tried in this silence
 }
 
 // HostStatus is what the controller knows of one enrolled host's agent.
@@ -85,6 +88,13 @@ type Controller struct {
 	users             map[string]bool // hosts with an etcd user, as far as Run knows
 	huntWindow        time.Duration
 	hunts             map[string]*openHunt // by id
+
+	rcfg    *ReinstallConfig // nil: no reinstall on silence
+	rssh    SSH
+	rbinary string
+	rlast   map[string]time.Time // per host: when a reinstall last started (under bmu)
+	rwg     sync.WaitGroup       // reinstalls in flight
+	rctx    context.Context      // the Run context, for reinstalls
 }
 
 // openHunt is a hunt waiting for answers.
@@ -492,11 +502,11 @@ func (ctl *Controller) heartbeat(host string, put bool) {
 	case put:
 		b.seen, b.last = true, ctl.now()
 		if b.silent {
-			b.silent = false
+			b.silent, b.reinstalled = false, false
 			ctl.record(incident.Incident{Kind: "agent-back", Action: "alert", Severity: model.SevMedium, Host: host, Detail: "heartbeat again"})
 		}
 	case !b.silent:
-		b.silent = true
+		b.silent, b.silentAt, b.reinstalled = true, ctl.now(), false
 		ctl.record(incident.Incident{Kind: "agent-silent", Action: "alert", Severity: model.SevHigh, Host: host, Detail: "heartbeat lease expired"})
 	}
 }
@@ -546,7 +556,7 @@ func (ctl *Controller) checkSilent() {
 			ctl.beats[h] = b
 		}
 		if !b.seen && !b.silent {
-			b.silent = true
+			b.silent, b.silentAt, b.reinstalled = true, ctl.now(), false
 			ctl.record(incident.Incident{Kind: "agent-silent", Action: "alert", Severity: model.SevHigh, Host: h,
 				Detail: fmt.Sprintf("no heartbeat in %s since the controller started", ctl.silentAfter)})
 		}
@@ -672,6 +682,8 @@ func (ctl *Controller) Run(ctx context.Context) error {
 		}()
 	}
 	defer wg.Wait()
+	defer ctl.rwg.Wait()
+	ctl.rctx = ctx
 	tick := time.NewTicker(ctl.tick)
 	defer tick.Stop()
 	for {
@@ -683,6 +695,7 @@ func (ctl *Controller) Run(ctx context.Context) error {
 		case <-tick.C:
 			ctl.addUsers(ctx)
 			ctl.checkSilent()
+			ctl.checkReinstall()
 			ctl.checkHunts(true)
 		}
 	}
