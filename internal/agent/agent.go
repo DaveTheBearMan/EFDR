@@ -139,6 +139,8 @@ type agent struct {
 	gateOffSaid    bool                                                  // the gate-off alert was recorded
 	sshErrSaid     string                                                // the ssh-config error last told; "" when the render took
 	noRecoverySaid bool                                                  // the missing ssh.recovery was told
+	refusedAt      time.Time                                             // a refused break-glass token was last told
+	refusedHeld    int                                                   // refused tokens since, not yet told
 	run            sshgate.Runner                                        // loginctl, usermod, systemctl
 	sess           map[string]*session                                   // live sessions by id
 	approved       map[string]bool                                       // session ids approved (orders, break-glass)

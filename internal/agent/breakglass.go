@@ -23,13 +23,29 @@ func (a *agent) onToken(m sshgate.Msg) sshgate.Reply {
 	return a.useToken(m.Token, m.Session, true)
 }
 
+// tellRefused records a refused token, once a minute: the gate socket is
+// open to every local user. The next one told counts those held back.
+func (a *agent) tellRefused(why string) {
+	now := a.now()
+	if !a.refusedAt.IsZero() && now.Sub(a.refusedAt) < time.Minute {
+		a.refusedHeld++
+		return
+	}
+	detail := "refused: " + why
+	if a.refusedHeld > 0 {
+		detail += fmt.Sprintf(" (%d more refused since %s)", a.refusedHeld, a.refusedAt.UTC().Format(time.RFC3339))
+	}
+	a.record(incident.Incident{Kind: "breakglass", Action: "alert", Severity: model.SevHigh, Detail: detail})
+	a.refusedAt, a.refusedHeld = now, 0
+}
+
 // useToken applies a token: an approve-session token approves session,
 // once; a pause token holds kills and gate ends until it expires. Refusals
 // are recorded when loud (a socket use, not a spool rescan).
 func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 	refuse := func(why string) sshgate.Reply {
 		if loud {
-			a.record(incident.Incident{Kind: "breakglass", Action: "alert", Severity: model.SevHigh, Detail: "refused: " + why})
+			a.tellRefused(why)
 		}
 		return sshgate.Reply{Why: why}
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -464,5 +465,23 @@ func TestBreakglass_UninstallRestoresSSHDConfig(t *testing.T) {
 		if strings.Contains(c, "restart") && strings.Contains(c, "ssh") {
 			t.Fatalf("sshd restarted: %q", order)
 		}
+	}
+}
+
+// The gate socket is open to every local user: a flood of bad tokens is
+// told once a minute, with a count, not once per message.
+func TestBreakglass_RefusalsRateLimited(t *testing.T) {
+	r, _ := tokenRig(t)
+	for i := 0; i < 50; i++ {
+		r.a.onGate(sshgate.Msg{Token: fmt.Sprintf("junk.%d", i), Session: "9"})
+	}
+	if got := r.kind("breakglass"); len(got) != 1 {
+		t.Fatalf("told %d times", len(got))
+	}
+	r.now = r.now.Add(61 * time.Second)
+	r.a.onGate(sshgate.Msg{Token: "junk.last", Session: "9"})
+	got := r.kind("breakglass")
+	if len(got) != 2 || !strings.Contains(got[1].Detail, "49 more") {
+		t.Fatalf("%+v", got)
 	}
 }
