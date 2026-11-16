@@ -185,3 +185,38 @@ func TestBuild_DNSPin(t *testing.T) {
 		{"pin, switch on: anyone else's is dropped", q, Drop},
 	})
 }
+
+// The forward hook sees an inbound published-port connection after DNAT, so
+// its destination is the container: a block that names the container (a
+// scored service's own backend) must not cut what the scorer sends it.
+func TestBuild_ForwardBlockSparesPublishedPorts(t *testing.T) {
+	ctr := netip.MustParseAddr("172.17.0.2")
+	rs := Build(fixture(), []Block{blk(ctr, "tcp", 80)}, now)
+	published := tcp(HookForward, stranger, ctr, 40000, 80)
+	published.DNAT, published.OrigDPort = true, 8080
+	direct := tcp(HookForward, db, ctr, 40000, 80)
+	check(t, rs, []vcase{
+		{"inbound to the published port", published, Accept},
+		{"a container's own traffic to the block", direct, Drop},
+	})
+}
+
+// A reply to a connection a blocked host opened to us leaves from our
+// scored port and must not be dropped.
+func TestBuild_BlockSparesRepliesFromScoredPorts(t *testing.T) {
+	rs := Build(fixture(), []Block{blk(stranger, "tcp", 4444)}, now)
+	reply := tcp(HookOutput, box, stranger, 80, 4444) // from the scored port 80
+	own := tcp(HookOutput, box, stranger, 40000, 4444)
+	check(t, rs, []vcase{
+		{"a reply from a scored port to the blocked endpoint", reply, Accept},
+		{"our own connection to it", own, Drop},
+	})
+}
+
+// Nothing can make a box drop by default: a zero Ruleset is not applied.
+func TestApply_RefusesPolicyDrop(t *testing.T) {
+	f := &Firewall{}
+	if err := f.Apply(Ruleset{}); err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Fatalf("err = %v", err)
+	}
+}

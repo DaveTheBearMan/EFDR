@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"xdr/internal/incident"
 )
 
@@ -44,11 +46,17 @@ func TestFromIncident(t *testing.T) {
 			t.Errorf("%s gave no rules", kind)
 		}
 	}
-	for _, action := range []string{"would-kill", "held"} {
+	wk := egressKill()
+	wk.Action = "would-kill"
+	if len(FromIncident(wk, false)) != 2 {
+		t.Errorf("would-kill gave no rules")
+	}
+	// held: a scored service's own connection (TestProposes_HeldEgressProposesNothing)
+	for _, kind := range []string{"revshell-stdio", "service-shell"} {
 		in := egressKill()
-		in.Action = action
+		in.Kind, in.Action = kind, "held"
 		if len(FromIncident(in, false)) != 2 {
-			t.Errorf("%s gave no rules", action)
+			t.Errorf("held %s gave no rules", kind)
 		}
 	}
 	for name, edit := range map[string]func(*incident.Incident){
@@ -126,5 +134,25 @@ func TestFromIncident_UnitAndCron(t *testing.T) {
 		if r.Kind == "unit" || r.Kind == "cron" {
 			t.Errorf("proposed %+v", r)
 		}
+	}
+}
+
+// A scored service connecting somewhere is not evidence against the place:
+// holding it must not propose a fleet-wide block of its own destination
+// (a docker-proxy to its container, a team-built app to its backend).
+func TestProposes_HeldEgressProposesNothing(t *testing.T) {
+	in := incident.Incident{Kind: "egress", Action: "held", Host: "web01", Time: time.Now(),
+		Remote: &incident.Endpoint{Addr: "172.17.0.2", Port: 80, Proto: "tcp"}}
+	if Proposes(in) || len(FromIncident(in, false)) != 0 {
+		t.Fatal("a held egress proposed a rule")
+	}
+	// A reverse shell inside a scored service is still evidence.
+	in.Kind = "revshell-stdio"
+	if !Proposes(in) {
+		t.Fatal("a held reverse shell no longer proposes")
+	}
+	in.Kind, in.Action = "egress", "killed"
+	if !Proposes(in) {
+		t.Fatal("a killed egress no longer proposes")
 	}
 }

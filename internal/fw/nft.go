@@ -56,6 +56,11 @@ func table() *nftables.Table {
 // Apply replaces the table with rs in one transaction: there is no moment
 // at which the old rules are gone and the new ones are not yet in force.
 func (f *Firewall) Apply(rs Ruleset) error {
+	if rs.Policy != Accept {
+		// Nothing makes a box drop by default; a zero Ruleset must not
+		// lock it out.
+		return errors.New("nftables: refusing a ruleset whose policy is not accept")
+	}
 	c, t := f.conn, table()
 	c.AddTable(t) // so that the delete below cannot fail
 	c.DelTable(t)
@@ -319,6 +324,11 @@ func exprs(r Rule, hook int) []expr.Any {
 	if r.OrigDPort != 0 {
 		e = append(e, &expr.Ct{Register: 1, Key: expr.CtKeySTATUS})
 		bits(0x20) // IPS_DST_NAT
+	}
+	if r.NotDNAT {
+		e = append(e, &expr.Ct{Register: 1, Key: expr.CtKeySTATUS},
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(0x20), Xor: make([]byte, 4)},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: make([]byte, 4)}) // IPS_DST_NAT clear
 	}
 	if r.Proto != 0 {
 		meta(expr.MetaKeyL4PROTO, []byte{r.Proto})

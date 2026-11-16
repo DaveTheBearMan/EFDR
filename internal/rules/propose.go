@@ -58,8 +58,12 @@ func Proposes(in incident.Incident) bool {
 		return false
 	}
 	switch in.Action {
-	case "killed", "would-kill", "held":
+	case "killed", "would-kill":
 		return true
+	case "held":
+		// A scored service's connection is not evidence against where it
+		// goes; its reverse shell or service shell is.
+		return in.Kind != "egress"
 	}
 	return false
 }

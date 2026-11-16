@@ -150,7 +150,8 @@ cat > "$tmp/agent.json" <<JSON
  "scored": [{"proto": "tcp", "port": 80}, {"proto": "tcp", "port": 8080}]}
 JSON
 fw() { in_ns xa "$XDR" fw "$@" --config "$tmp/agent.json"; }
-# What the fleet found malicious: the stranger's port 9999.
+# What the fleet found malicious: the stranger's port 9999, and (a mistake a
+# scored service must survive) the container behind the published port.
 BLOCK="$STRANGER:9999/tcp"
 
 serve xa 80; serve xa 4444; serve xa 22; serve xa 7443
@@ -180,7 +181,7 @@ sleep 1
 	{ echo "fw.sh: setup is broken: the long-lived connections are silent" >&2; exit 2; }
 
 shell_in=$(lines "$tmp/shell.log") shell_out=$(lines "$tmp/xb-9999.log")
-fw apply --block "$BLOCK" || { echo "fw.sh: fw apply failed" >&2; exit 1; }
+fw apply --block "$BLOCK" --block "$CTR:80/tcp" || { echo "fw.sh: fw apply failed" >&2; exit 1; }
 # The first seconds are when a half-cut connection still delivers: a sender
 # whose data is never acknowledged soon stops sending. One byte may have
 # been in flight when the table loaded.
@@ -206,6 +207,8 @@ expect pre-existing-scored "in yes, out yes" "in $(grows "$tmp/xa-80.log"), out 
 expect pre-existing-quiet-ssh yes "$(grows "$tmp/operator.log")"
 [ -n "$NO_NAT" ] || expect forward-published ok "$(probe xb $STRANGER $BOX 8080)"
 expect forward-open ok "$(probe xc - $STRANGER 9998)"
+# The published port reaches the container after DNAT: blocked by name, yet not cut.
+expect block-on-container-host-cut timeout "$(probe xa - $CTR 80)"
 expect forward-blocked timeout "$(probe xc - $STRANGER 9999)"
 table() { in_ns xa nft list table inet xdr >/dev/null 2>&1 && echo present || echo gone; }
 fw remove

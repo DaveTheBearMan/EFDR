@@ -55,6 +55,7 @@ type Rule struct {
 	SPort, DPort uint16        //
 	ICMPType     int           //
 	OrigDPort    uint16        // ct status dnat and this original destination port
+	NotDNAT      bool          // the connection was not destination-NATed
 	Mark         uint32        // meta mark
 	Action       Action
 }
@@ -169,11 +170,22 @@ func Build(c *config.Config, blocks []Block, now time.Time) Ruleset {
 	}
 
 	kept, _ := Select(c, blocks)
+	if len(kept) > 0 {
+		// What leaves from a scored port answers someone who connected to
+		// it, whatever that host's own source port was: never a block's
+		// target.
+		for _, p := range c.Scored {
+			add(out, func(r *Rule) { r.Proto, r.SPort = protoNum(p.Proto), p.Port })
+		}
+	}
 	for _, b := range kept {
 		dst := netip.PrefixFrom(b.Addr, b.Addr.BitLen())
-		for _, chain := range []*[]Rule{out, fwd} {
-			add(chain, func(r *Rule) { r.Dst, r.Proto, r.DPort, r.Action = &dst, protoNum(b.Proto), b.Port, Drop })
-		}
+		add(out, func(r *Rule) { r.Dst, r.Proto, r.DPort, r.Action = &dst, protoNum(b.Proto), b.Port, Drop })
+		// Forwarded: a published port is seen after DNAT, its destination
+		// the container, which may be what a rule names: not cut.
+		add(fwd, func(r *Rule) {
+			r.Dst, r.Proto, r.DPort, r.Action, r.NotDNAT = &dst, protoNum(b.Proto), b.Port, Drop, true
+		})
 	}
 
 	if c.DNS.Pin {
@@ -275,6 +287,9 @@ func (r Rule) matches(p Packet) bool {
 	if r.OrigDPort != 0 && !(p.DNAT && p.OrigDPort == r.OrigDPort) {
 		return false
 	}
+	if r.NotDNAT && p.DNAT {
+		return false
+	}
 	if r.Mark != 0 && r.Mark != p.Mark {
 		return false
 	}
@@ -316,6 +331,9 @@ func (r Rule) text(hook int) string {
 	}
 	if r.Dst != nil {
 		addr("daddr", r.Dst)
+	}
+	if r.NotDNAT {
+		w = append(w, "ct status != dnat")
 	}
 	name := protoNames[r.Proto]
 	switch {
