@@ -168,6 +168,9 @@ func Uninstall(l Layout, run Runner) error {
 		}
 	}
 	_, gerr := run("systemctl", append([]string{"disable", "--now"}, others...)...)
+	// Without --now: the wants link goes while the agent keeps running; once
+	// the unit file is gone systemd could no longer disable it.
+	_, aerr := run("systemctl", "disable", agentUnit)
 	m, err := ReadManifest(l)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -192,18 +195,21 @@ func Uninstall(l Layout, run Runner) error {
 	}
 	run("nft", "delete", "table", "inet", "xdr")
 	run("systemctl", "daemon-reload")
-	_, aerr := run("systemctl", "disable", "--now", agentUnit)
 	// A unit that was never there is not a failure: only report when there was an install.
 	if len(m.Entries) > 0 {
 		for _, e := range []error{gerr, aerr} {
 			if e != nil {
-				errs = append(errs, "systemctl disable --now: "+e.Error())
+				errs = append(errs, "systemctl disable: "+e.Error())
 			}
 		}
 	}
 	if errs != nil {
 		return errors.New(strings.Join(errs, "; "))
 	}
+	// Last, and only when all else worked: a loaded unit can be stopped after
+	// its file is gone, and stopping it ends the agent if it is the caller. A
+	// failed removal leaves the agent running so the token can be used again.
+	run("systemctl", "stop", agentUnit)
 	return nil
 }
 

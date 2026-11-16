@@ -314,7 +314,7 @@ func TestUninstall_RemovesAllAndClearsImmutable(t *testing.T) {
 			first = i
 		}
 	}
-	if first < 0 || f.count("systemctl disable --now xdr-agent.service") != 1 || f.count("nft delete table inet xdr") != 1 {
+	if first < 0 || f.count("systemctl stop xdr-agent.service") != 1 || f.count("nft delete table inet xdr") != 1 {
 		t.Fatalf("commands: %v", f.cmds)
 	}
 	if err := Uninstall(l, f.run); err != nil {
@@ -331,40 +331,54 @@ func contains(s []string, v string) bool {
 	return false
 }
 
-// The agent may be the caller: its own unit goes last, after the guards and
-// the timer, the files and the daemon-reload, and a failed step skips nothing.
-func TestUninstall_AgentUnitLast(t *testing.T) {
+// The agent may be the caller: its wants link goes before any unit file is
+// removed, and its stop is the last call.
+func TestUninstall_AgentStopLast(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{}
+	removed := map[string]bool{} // command -> a file was already gone
+	run := func(name string, args ...string) ([]byte, error) {
+		_, err := os.Lstat(l.p(l.Manifest))
+		removed[name+" "+strings.Join(args, " ")] = err != nil
+		return f.run(name, args...)
+	}
+	if err := Uninstall(l, run); err != nil {
+		t.Fatal(err)
+	}
+	guards := "systemctl disable --now xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer"
+	if f.cmds[0] != guards || f.cmds[1] != "systemctl disable xdr-agent.service" || removed[guards] || removed[f.cmds[1]] {
+		t.Fatalf("guards, then the agent's disable (no --now), before any removal: %v", f.cmds)
+	}
+	n := len(f.cmds)
+	if f.cmds[n-1] != "systemctl stop xdr-agent.service" || f.cmds[n-2] != "systemctl daemon-reload" || f.count("nft delete table inet xdr") != 1 {
+		t.Fatalf("stop is not last: %v", f.cmds)
+	}
+	if f.count("systemctl disable --now xdr-agent") != 0 || f.count("systemctl stop") != 1 {
+		t.Fatalf("%v", f.cmds)
+	}
+	if !removed[f.cmds[n-1]] {
+		t.Fatal("files still there at the stop")
+	}
+}
+
+// A failed step skips nothing but the agent's stop, and is reported.
+func TestUninstall_FailureKeepsTheAgentRunning(t *testing.T) {
 	l := testLayout(t)
 	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
 		t.Fatal(err)
 	}
 	f := &fake{fail: map[string]error{"systemctl disable --now xdr-guard": errors.New("boom")}}
-	manifestAt := map[string]bool{} // command -> the manifest was still there
-	run := func(name string, args ...string) ([]byte, error) {
-		_, err := os.Lstat(l.p(l.Manifest))
-		out, rerr := f.run(name, args...)
-		manifestAt[name+" "+strings.Join(args, " ")] = err == nil
-		return out, rerr
+	err := Uninstall(l, f.run)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("the failed step is not reported: %v", err)
 	}
-	err := Uninstall(l, run)
-	guards := "systemctl disable --now xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer"
-	if f.cmds[0] != guards || !manifestAt[guards] {
-		t.Fatalf("guards and timer first, before any removal: %v", f.cmds)
-	}
-	last := f.cmds[len(f.cmds)-1]
-	if last != "systemctl disable --now xdr-agent.service" || f.count("systemctl disable --now xdr-agent.service") != 1 {
-		t.Fatalf("the agent unit is not last: %v", f.cmds)
-	}
-	if f.cmds[len(f.cmds)-2] != "systemctl daemon-reload" || f.count("nft delete table inet xdr") != 1 {
-		t.Fatalf("reload and nft before the agent stop: %v", f.cmds)
-	}
-	if manifestAt[last] {
-		t.Fatal("files still there when the agent stopped")
+	if f.count("systemctl stop") != 0 {
+		t.Fatalf("the agent was stopped after a failure: %v", f.cmds)
 	}
 	if _, serr := os.Lstat(l.p(l.Manifest)); serr == nil {
 		t.Fatal("a failed guard stop skipped the file removal")
-	}
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("the failed step is not reported: %v", err)
 	}
 }
