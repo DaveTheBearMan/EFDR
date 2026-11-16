@@ -216,6 +216,54 @@ else
   fi
 fi
 
+echo "== kill-toggle"
+# The operator's kill switch: off, a beacon is only reported; on, it is
+# killed; off again, and a restart of the agent keeps it off although
+# agent.json says kill.
+# mode HOST KILL: the switch through the API; the HTTP code.
+mode() { jb curl -sk -m 15 -o /dev/null -w '%{http_code}' -b "$CJ" -X POST -H 'X-XDR: 1' -H 'Content-Type: application/json' -d "{\"host\":\"$1\",\"kill\":$2}" "$BASEURL/api/mode"; }
+kill_is() { wait_state 20 'any(h["Name"] == "e2e" and h["Kill"] == "'"$1"'" for h in v["Hosts"])'; }
+# beacon_is PORT ACTION: a beacon to 203.0.113.9:PORT gets that action.
+beacon_is() {
+  mark
+  bg "/opt/beacon/beacon 203.0.113.9:$1"
+  wait_inc 20 egress "$2" "(i.get('remote') or {}).get('port') == $1"
+}
+kt=""
+if [ "$(mode e2e false)" != 204 ]; then kt="the off order was refused"
+elif ! kill_is off; then kt="the console never showed kill off: $(capi GET /api/state | head -c 400)"
+elif ! beacon_is 4461 would-kill; then kt="with kill off the beacon was not would-kill: $(x tail -3 $LOG)"
+elif ! x pgrep -f 'beacon 203.0.113.9:4461' >/dev/null; then kt="with kill off the beacon was killed"
+fi
+x pkill -f '^/opt/beacon/beacon 203.0.113.9:446'
+if [ -z "$kt" ]; then
+  if [ "$(mode e2e true)" != 204 ]; then kt="the on order was refused"
+  elif ! kill_is on; then kt="the console never showed kill on"
+  elif ! beacon_is 4462 killed; then kt="with kill on the beacon was not killed: $(x tail -3 $LOG)"
+  elif ! gone 8 'beacon 203.0.113.9:4462'; then kt="the beacon still runs after killed"
+  fi
+fi
+if [ -z "$kt" ]; then
+  if [ "$(mode '*' false)" != 204 ]; then kt="the all-hosts off order was refused"
+  elif ! kill_is off; then kt="the console never showed kill off after all-hosts"
+  elif [ "$(x stat -c %a /var/lib/xdr/mode.json)" != 600 ]; then kt="mode.json is not 0600"
+  else
+    stop_agent
+    if ! start_agent; then kt="the agent did not start again: $(x tail -5 "$ERR")"
+    else
+      sleep 5 # joined again; the order replayed on connect is the one it holds
+      if ! beacon_is 4463 would-kill; then kt="after a restart kill was on again: $(x tail -3 $LOG)"
+      elif ! x pgrep -f 'beacon 203.0.113.9:4463' >/dev/null; then kt="after a restart the beacon was killed"
+      fi
+    fi
+  fi
+fi
+x pkill -f '^/opt/beacon/beacon 203.0.113.9:446'
+if [ "$(mode Web01 true)" != 400 ] || [ "$(mode nope true)" != 400 ]; then kt="${kt:+$kt; }a bad or unknown host was not refused with 400"; fi
+if ! jb grep -q '"kind":"console-action".*kill off for every host' "$JCTL/incidents.jsonl" 2>/dev/null; then kt="${kt:+$kt; }no audit of the all-hosts order in the controller's log"; fi
+if [ -n "$kt" ]; then fail kill-toggle "$kt"; else ok kill-toggle; fi
+mode e2e true >/dev/null
+
 echo "== creds"
 before=$(x getent shadow alice | cut -d: -f2)
 rot=$(capi POST /api/rotate '{"host": "e2e", "users": ["alice"], "samba": []}')
