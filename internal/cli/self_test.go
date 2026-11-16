@@ -175,3 +175,16 @@ func TestUninstallCLI_AgentAliveRefuses(t *testing.T) {
 		t.Fatalf("ran %v", f.cmds)
 	}
 }
+
+// The install's help says an upgrade over a live agent is tamper unless a
+// pause token is active.
+func TestInstallHelp_UpgradeNeedsAPause(t *testing.T) {
+	var so, se bytes.Buffer
+	Run([]string{"install", "--help"}, &so, &se)
+	if h := se.String(); !strings.Contains(h, "pause token") || !strings.Contains(h, "tamper") {
+		t.Fatalf("install --help:\n%s", h)
+	}
+	if !strings.Contains(usage, "pause token") {
+		t.Fatal("the usage text does not say it")
+	}
+}

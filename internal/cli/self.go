@@ -32,6 +32,14 @@ var (
 // installed one (three copies, pinned hash, launch points).
 func installCmd(args []string, stdout, stderr io.Writer) error {
 	fs := flags("install", stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "usage: xdr install [--config FILE]\n\n"+
+			"Upgrading with xdr install while the agent runs (or a controller reinstall to a box\n"+
+			"whose agent is alive) rewrites files under the agent's tamper watch: it is reported\n"+
+			"as tamper and the installing process tree is killed, unless a pause token is active\n"+
+			"(xdr breakglass <pause token>): pause it first.\n\n")
+		fs.PrintDefaults()
+	}
 	cfg := fs.String("config", layout.Config, "the agent's config (agent.json, with its .sig and the fleet bundle beside it)")
 	if err := parse(fs, args); err != nil {
 		return err
