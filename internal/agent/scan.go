@@ -17,8 +17,19 @@ import (
 	"xdr/internal/pathenc"
 )
 
-// maxDrift is how many findings the agent remembers having reported.
-const maxDrift = 4096
+const (
+	// maxDrift is how many findings the agent remembers having reported.
+	maxDrift = 4096
+	// maxNoise is how many of those may be files nothing classifies
+	// (altered or removed): the rest is kept for what matters.
+	maxNoise = 1024
+	// scanCap is the most findings one scan reports: the controller disables
+	// a host that writes over 600 incidents a minute, and the rest follow on
+	// the next scans.
+	scanCap = 25
+	// fastHash is how much of a file the fast scan hashes.
+	fastHash = 8 << 20
+)
 
 // scanRoots are the directories the fast scan walks: where persistence and
 // drop sites live. The whole disk is walked by the full scan.
@@ -94,7 +105,7 @@ func (a *agent) scan(full bool) {
 		}
 		ref = base
 	} else {
-		files, _ := collect.WalkDirs(root, scanRoots)
+		files, _ := collect.WalkDirs(root, scanRoots, fastHash)
 		live = &baseline.Baseline{Files: files, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
 		ref = &baseline.Baseline{Files: map[string]baseline.FileEntry{}, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
 		for key, e := range base.Files {
@@ -108,9 +119,15 @@ func (a *agent) scan(full bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.drift == nil {
-		a.drift, a.driftNew = map[string]string{}, map[string]driftEntry{}
+		a.drift, a.driftNew, a.driftNoise = map[string]string{}, map[string]driftEntry{}, map[string]bool{}
 	}
 	seen := map[string]bool{}
+	reported, waiting, noise := 0, 0, 0
+	for p := range a.drift {
+		if a.driftNoise[p] {
+			noise++
+		}
+	}
 	for _, f := range findings {
 		path, err := pathenc.Decode(f.Subject)
 		if err != nil || !strings.HasPrefix(path, "/") {
@@ -119,16 +136,32 @@ func (a *agent) scan(full bool) {
 		if a.manages(path) {
 			continue
 		}
+		// A new file nothing classifies is the box's everyday traffic (/tmp,
+		// /home): the exec and connection detections are for what runs.
+		unclassified := f.Category == classify.Fallback
+		if f.Kind == model.KindAdded && unclassified {
+			continue
+		}
 		seen[path] = true
 		e := live.Files[f.Subject]
 		fp := string(f.Kind) + "|" + f.Before + "|" + f.After + "|" + f.Detail + "|" + e.SHA256 + "|" + e.Link
 		if a.drift[path] == fp {
 			continue
 		}
-		if _, known := a.drift[path]; !known && len(a.drift) >= maxDrift {
+		_, known := a.drift[path]
+		if !known && (len(a.drift) >= maxDrift || unclassified && noise >= maxNoise) {
 			continue
 		}
+		if reported >= scanCap {
+			waiting++
+			continue // reported by a later scan
+		}
+		reported++
+		if !known && unclassified {
+			noise++
+		}
 		a.drift[path] = fp
+		a.driftNoise[path] = unclassified
 		detail := fmt.Sprintf("%s %s: %s", f.Category, f.Kind, f.Detail)
 		if len(e.SHA256) >= 12 {
 			detail += " (sha256 " + e.SHA256[:12] + ")" // the log folds identical lines: a changed file is a new one
@@ -145,8 +178,13 @@ func (a *agent) scan(full bool) {
 	for path := range a.drift {
 		if !seen[path] && (full || underRoots(path)) {
 			delete(a.drift, path)
+			delete(a.driftNoise, path)
 			delete(a.driftNew, FileID(path))
 		}
+	}
+	if waiting > 0 {
+		a.record(incident.Incident{Kind: "file-drift", Action: "alert", Severity: model.SevMedium,
+			Detail: fmt.Sprintf("%d more findings not reported yet; the next scans report them", waiting)})
 	}
 }
 

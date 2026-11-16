@@ -44,19 +44,21 @@ func matchAny(patterns []string, p string) bool {
 // Ignored for what is left out). It never follows symlinks and opens only
 // regular files. An object it could not read is still recorded, with Err
 // set; the same errors are returned as text.
-func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil) }
+func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil, maxHash) }
 
 // WalkDirs is Walk limited to the directories dirs (paths from root, such
 // as "/etc"); one that does not exist is skipped. Parents of those
-// directories are not recorded.
-func WalkDirs(root string, dirs []string) (map[string]baseline.FileEntry, []string) {
+// directories are not recorded. A file is hashed over at most limit bytes
+// (the "partial:" prefix says it was cut), so a frequent walk of busy
+// directories stays cheap.
+func WalkDirs(root string, dirs []string, limit int64) (map[string]baseline.FileEntry, []string) {
 	if len(dirs) == 0 {
 		return map[string]baseline.FileEntry{}, nil
 	}
-	return walk(root, dirs)
+	return walk(root, dirs, limit)
 }
 
-func walk(root string, starts []string) (map[string]baseline.FileEntry, []string) {
+func walk(root string, starts []string, limit int64) (map[string]baseline.FileEntry, []string) {
 	root = filepath.Clean(root)
 	files := map[string]baseline.FileEntry{}
 	var errs []string
@@ -119,7 +121,7 @@ func walk(root string, starts []string) (map[string]baseline.FileEntry, []string
 		switch {
 		case mode.IsRegular():
 			content := e.Size <= maxContent && classify.Path(rel).KeepContent
-			e.SHA256, e.Content, err = hashFile(full, content)
+			e.SHA256, e.Content, err = hashFile(full, content, limit)
 		case mode&os.ModeSymlink != 0:
 			var target string
 			target, err = os.Readlink(full)
@@ -215,7 +217,7 @@ func meta(info fs.FileInfo) baseline.FileEntry {
 	return e
 }
 
-func hashFile(full string, content bool) (string, []byte, error) {
+func hashFile(full string, content bool, limit int64) (string, []byte, error) {
 	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", nil, err
@@ -225,7 +227,7 @@ func hashFile(full string, content bool) (string, []byte, error) {
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return "", nil, errors.New("not a regular file after open")
 	}
-	return digest(f, content)
+	return digest(f, content, limit)
 }
 
 // capped keeps what is written to it until that exceeds maxContent, then
@@ -248,19 +250,19 @@ func (c *capped) Write(p []byte) (int, error) {
 
 // digest hashes up to maxHash bytes of r, also returning them when content
 // is wanted and they fit in maxContent.
-func digest(r io.Reader, content bool) (string, []byte, error) {
+func digest(r io.Reader, content bool, limit int64) (string, []byte, error) {
 	h := sha256.New()
 	var c capped
 	var w io.Writer = h
 	if content {
 		w = io.MultiWriter(h, &c)
 	}
-	n, err := io.Copy(w, io.LimitReader(r, maxHash))
+	n, err := io.Copy(w, io.LimitReader(r, limit))
 	if err != nil {
 		return "", nil, err
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	if n == maxHash {
+	if n == limit {
 		var one [1]byte
 		if m, _ := io.ReadFull(r, one[:]); m > 0 {
 			sum = "partial:" + sum

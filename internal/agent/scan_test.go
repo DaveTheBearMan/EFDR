@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"xdr/internal/baseline"
@@ -140,5 +141,86 @@ func TestScan_FilesTheAgentManagesAreNotDrift(t *testing.T) {
 	}
 	if !got["/etc/pam.d/login"] {
 		t.Fatalf("another pam file must still be reported: %v", got)
+	}
+}
+
+// Files in /tmp and /home that nothing classifies are the box's everyday
+// traffic, and an incident each would get the host disabled for flooding.
+func TestScan_UnclassifiedNewFilesAreNotReported(t *testing.T) {
+	r := scanRig(t)
+	for i := 0; i < 700; i++ {
+		testfs.File(t, r.root, fmt.Sprintf("tmp/x%03d", i), "x", 0o644)
+	}
+	testfs.File(t, r.root, "etc/cron.d/evil", "* * * * * root /tmp/x\n", 0o644)
+	r.a.scan(false)
+	n := 0
+	var cron bool
+	for _, in := range r.kind("file-drift") {
+		if strings.HasPrefix(in.Path, "/tmp/") {
+			n++
+		}
+		cron = cron || in.Path == "/etc/cron.d/evil"
+	}
+	if n != 0 || !cron {
+		t.Fatalf("%d /tmp files reported, cron file reported: %v", n, cron)
+	}
+}
+
+// One scan reports a bounded number; the rest follow on the next scans, and
+// one line says that more are waiting.
+func TestScan_CapPerScan(t *testing.T) {
+	r := scanRig(t)
+	for i := 0; i < 100; i++ {
+		testfs.File(t, r.root, fmt.Sprintf("etc/cron.d/f%03d", i), fmt.Sprintf("job %d\n", i), 0o644)
+	}
+	count := func() int {
+		n := 0
+		for _, in := range r.kind("file-drift") {
+			if strings.HasPrefix(in.Path, "/etc/cron.d/") {
+				n++
+			}
+		}
+		return n
+	}
+	r.a.scan(false)
+	if n := count(); n > scanCap {
+		t.Fatalf("one scan reported %d, cap %d", n, scanCap)
+	}
+	var summary bool
+	for _, in := range r.kind("file-drift") {
+		summary = summary || (in.Path == "" && strings.Contains(in.Detail, "more findings"))
+	}
+	if !summary {
+		t.Fatalf("no summary line: %+v", r.kind("file-drift"))
+	}
+	for i := 0; i < 6; i++ {
+		r.a.scan(false)
+	}
+	if n := count(); n != 100 {
+		t.Fatalf("after seven scans %d of 100 reported", n)
+	}
+}
+
+// Unclassified altered or removed files cannot use up the memory that a
+// real finding needs.
+func TestScan_NoiseCannotBlindTheReport(t *testing.T) {
+	r := scanRig(t)
+	for i := 0; i < maxDrift+500; i++ {
+		r.a.pol.Base.Files[pathenc.Encode(fmt.Sprintf("/srv/a%05d", i))] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("x")}
+	}
+	for i := 0; i < 60; i++ {
+		r.a.scan(false)
+	}
+	if len(r.a.drift) > maxDrift {
+		t.Fatalf("%d remembered", len(r.a.drift))
+	}
+	testfs.File(t, r.root, "etc/cron.d/late", "* * * * * root /tmp/y\n", 0o644)
+	r.a.scan(false)
+	found := false
+	for _, in := range r.kind("file-drift") {
+		found = found || in.Path == "/etc/cron.d/late"
+	}
+	if !found {
+		t.Fatal("a real finding was not reported after the noise filled the memory")
 	}
 }

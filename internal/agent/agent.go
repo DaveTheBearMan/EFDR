@@ -149,6 +149,7 @@ type agent struct {
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
+	driftNoise   map[string]bool                                       // the remembered paths nothing classifies
 	runIn        func(stdin []byte, name string, args ...string) error // chpasswd
 
 	unitMu sync.Mutex

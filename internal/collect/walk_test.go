@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,7 @@ func TestWalkDirs_OnlyThoseDirs(t *testing.T) {
 	testfs.File(t, root, "etc/cron.d/job", "* * * * * root x\n", 0o644)
 	testfs.File(t, root, "home/bob/.ssh/authorized_keys", "ssh-ed25519 AAAA bob\n", 0o600)
 	testfs.File(t, root, "usr/bin/tool", "bin", 0o755)
-	files, errs := WalkDirs(root, []string{"/etc", "/home", "/srv/not-there"})
+	files, errs := WalkDirs(root, []string{"/etc", "/home", "/srv/not-there"}, 1<<20)
 	if len(errs) != 0 {
 		t.Fatalf("errs: %v", errs)
 	}
@@ -140,4 +141,24 @@ func keys(m map[string]baseline.FileEntry) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// A scan of a busy directory every few seconds hashes only the start of a
+// large file; the whole-disk walk still reads all of it.
+func TestWalkDirs_LimitsHashing(t *testing.T) {
+	root := testfs.Root(t)
+	big := strings.Repeat("x", 4096)
+	testfs.File(t, root, "tmp/big", big, 0o644)
+	testfs.File(t, root, "tmp/small", "tiny", 0o644)
+	files, _ := WalkDirs(root, []string{"/tmp"}, 1024)
+	if got := files["/tmp/big"].SHA256; !strings.HasPrefix(got, "partial:") {
+		t.Fatalf("big: %q", got)
+	}
+	if got := files["/tmp/small"].SHA256; got != sum("tiny") {
+		t.Fatalf("small: %q", got)
+	}
+	all, _ := Walk(root)
+	if got := all["/tmp/big"].SHA256; got != sum(big) {
+		t.Fatalf("a full walk hashed %q", got)
+	}
 }

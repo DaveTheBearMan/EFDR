@@ -27,7 +27,7 @@ func TestWalk_HashIsBounded(t *testing.T) {
 
 func TestDigest_ContentDroppedWhenFileGrew(t *testing.T) {
 	in := strings.Repeat("a", maxContent+10)
-	sha, content, err := digest(strings.NewReader(in), true)
+	sha, content, err := digest(strings.NewReader(in), true, maxHash)
 	if err != nil || sha != sum(in) || content != nil {
 		t.Fatalf("sha=%s content=%d bytes err=%v", sha, len(content), err)
 	}
@@ -49,7 +49,7 @@ func TestHashFile_RefusesFifoWithoutBlocking(t *testing.T) {
 	testfs.Fifo(t, root, "srv/pipe")
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := hashFile(filepath.Join(root, "srv/pipe"), true)
+		_, _, err := hashFile(filepath.Join(root, "srv/pipe"), true, maxHash)
 		done <- err
 	}()
 	select {
