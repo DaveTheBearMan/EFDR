@@ -39,7 +39,7 @@ commands:
   listeners listeners, for config:  listeners [--config FILE]
   controller jump box:              controller init --dir D --name ADDR... | enroll --dir D --host H --out DIR | run --dir D [--config FILE] | disable-host --dir D --host H
   rules     the signed rule set:    rules list|revoke --dir D [--endpoint ADDR] [ID]
-  install   install this binary:    install [--config FILE] (three copies, pinned hash, launch points;
+  install   install this binary:    install [--config FILE] [--baseline FILE] (three copies, pinned hash, launch points;
                                     over a running agent it is tamper, its tree killed, unless a pause token is active)
   guard     watcher process:        guard --watch UNIT [--every 1s] (the install's guard units run it)
   ensure    restore what differs:   ensure (run by every launch point; exit 3: it put something back)

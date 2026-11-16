@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"xdr/internal/baseline"
 	"xdr/internal/breakglass"
 	"xdr/internal/dnsguard"
 	"xdr/internal/install"
@@ -234,5 +235,38 @@ func TestUninstallCLI_RestoresSSHDConfig(t *testing.T) {
 	disable := slices.IndexFunc(f.cmds, func(c string) bool { return strings.HasPrefix(c, "systemctl disable") })
 	if check < 0 || reload < check || disable < reload {
 		t.Fatalf("cmds %q", f.cmds)
+	}
+}
+
+// `xdr install --baseline FILE` puts the baseline down with the install and
+// the agent's unit runs with it; a file that is not a baseline is refused
+// before anything is written.
+func TestInstallCLI_Baseline(t *testing.T) {
+	l, _ := selfRig(t)
+	junk := filepath.Join(t.TempDir(), "junk.json.gz")
+	os.WriteFile(junk, []byte("not a baseline"), 0o600)
+	var so, se bytes.Buffer
+	if code := Run([]string{"install", "--baseline", junk}, &so, &se); code == 0 {
+		t.Fatalf("junk accepted: %q", so.String())
+	}
+	if _, err := os.Stat(filepath.Join(l.Root, l.Manifest)); err == nil {
+		t.Fatal("installed with a junk baseline")
+	}
+	good := filepath.Join(t.TempDir(), "base.json.gz")
+	var buf bytes.Buffer
+	if err := baseline.Save(&buf, &baseline.Baseline{Files: map[string]baseline.FileEntry{}}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(good, buf.Bytes(), 0o600)
+	so.Reset()
+	if code := Run([]string{"install", "--baseline", good}, &so, &se); code != 0 {
+		t.Fatalf("install: %d %s", code, se.String())
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.Root, l.Baseline)); !bytes.Equal(b, buf.Bytes()) {
+		t.Fatal("the baseline was not put down")
+	}
+	unit, _ := os.ReadFile(filepath.Join(l.Root, "/etc/systemd/system/xdr-agent.service"))
+	if !strings.Contains(string(unit), "--baseline "+filepath.Join(l.Root, l.Baseline)) {
+		t.Fatalf("unit:\n%s", unit)
 	}
 }

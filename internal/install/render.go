@@ -3,6 +3,7 @@ package install
 import (
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 )
 
@@ -35,18 +36,43 @@ func unitLaunch(l Layout, args string) string {
 	return strings.ReplaceAll(shLaunch(l, args), "$", "$$")
 }
 
-func agentArgs(l Layout) string { return "agent --config " + l.p(l.Config) }
+func agentArgs(l Layout, withBase bool) string {
+	if withBase {
+		return "agent --config " + l.p(l.Config) + " --baseline " + l.p(l.Baseline)
+	}
+	return "agent --config " + l.p(l.Config)
+}
+
+// baseBackup is where the backup of the install's baseline goes.
+func (l Layout) baseBackup() string { return l.Backup + "/baseline.json.gz" }
+
+// hasBaseline reports whether the install has a baseline: it, or its
+// backup, is on the box.
+func (l Layout) hasBaseline() bool {
+	if l.Baseline == "" {
+		return false
+	}
+	for _, p := range []string{l.Baseline, l.baseBackup()} {
+		if _, err := os.Lstat(l.p(p)); err == nil {
+			return true
+		}
+	}
+	return false
+}
 
 // Render is every file install writes besides the binary copies, the
 // backup and the manifest: the units, the timer, the cron entry, the
-// generator, the apt hook and the launcher script.
-func Render(l Layout) []File {
+// generator, the apt hook and the launcher script. The agent's unit passes
+// the install's baseline when it has one.
+func Render(l Layout) []File { return render(l, l.hasBaseline()) }
+
+func render(l Layout, withBase bool) []File {
 	unit := func(desc, exec, extra, wantedBy string) []byte {
 		return []byte(fmt.Sprintf("[Unit]\nDescription=%s\nAfter=local-fs.target\n\n[Service]\n%sExecStart=%s\n\n[Install]\nWantedBy=%s\n", desc, extra, exec, wantedBy))
 	}
 	restart := "Restart=always\nRestartSec=1\n"
 	return []File{
-		{"/etc/systemd/system/xdr-agent.service", unit("XDR agent", unitLaunch(l, agentArgs(l)), restart, "multi-user.target"), 0o644},
+		{"/etc/systemd/system/xdr-agent.service", unit("XDR agent", unitLaunch(l, agentArgs(l, withBase)), restart, "multi-user.target"), 0o644},
 		{"/etc/systemd/system/xdr-guard-a.service", unit("XDR guard A", unitLaunch(l, "guard --watch xdr-guard-b.service --every 5s"), restart, "multi-user.target"), 0o644},
 		{"/etc/systemd/system/xdr-guard-b.service", unit("XDR guard B", unitLaunch(l, "guard --watch xdr-guard-a.service --every 5s"), restart, "multi-user.target"), 0o644},
 		{"/etc/systemd/system/xdr-ensure.service", unit("XDR ensure", unitLaunch(l, "ensure"), "Type=oneshot\n", "multi-user.target"), 0o644},

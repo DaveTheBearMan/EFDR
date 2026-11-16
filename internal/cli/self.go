@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"xdr/internal/baseline"
 	"xdr/internal/breakglass"
 	"xdr/internal/dnsguard"
 	"xdr/internal/guard"
@@ -33,12 +34,13 @@ var (
 	runner = install.Runner(install.ExecRunner)
 )
 
-// installCmd is `xdr install [--config FILE]`: this binary becomes the
-// installed one (three copies, pinned hash, launch points).
+// installCmd is `xdr install [--config FILE] [--baseline FILE]`: this
+// binary becomes the installed one (three copies, pinned hash, launch
+// points), with the baseline, when given, as the agent's.
 func installCmd(args []string, stdout, stderr io.Writer) error {
 	fs := flags("install", stderr)
 	fs.Usage = func() {
-		fmt.Fprint(stderr, "usage: xdr install [--config FILE]\n\n"+
+		fmt.Fprint(stderr, "usage: xdr install [--config FILE] [--baseline FILE]\n\n"+
 			"Upgrading with xdr install while the agent runs (or a controller reinstall to a box\n"+
 			"whose agent is alive) rewrites files under the agent's tamper watch: it is reported\n"+
 			"as tamper and the installing process tree is killed, unless a pause token is active\n"+
@@ -46,8 +48,15 @@ func installCmd(args []string, stdout, stderr io.Writer) error {
 		fs.PrintDefaults()
 	}
 	cfg := fs.String("config", layout.Config, "the agent's config (agent.json, with its .sig and the fleet bundle beside it)")
+	base := fs.String("baseline", "", "a baseline (xdr capture) installed as "+layout.Baseline+" and passed to the agent; an earlier install's is kept without it")
 	if err := parse(fs, args); err != nil {
 		return err
+	}
+	if *base != "" {
+		// An agent that cannot read its baseline does not start: checked first.
+		if _, err := baseline.LoadLayers([]string{*base}); err != nil {
+			return fmt.Errorf("--baseline: %w", err)
+		}
 	}
 	l := layout
 	l.Config = *cfg
@@ -55,7 +64,7 @@ func installCmd(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	rep, err := install.Install(l, runner, exe)
+	rep, err := install.InstallBaseline(l, runner, exe, *base)
 	for _, p := range rep.Wrote {
 		fmt.Fprintln(stdout, "wrote", p)
 	}

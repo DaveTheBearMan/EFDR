@@ -487,3 +487,80 @@ func TestEnsure_NotInstalledIsItsOwnError(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// `xdr install --baseline FILE`: the file is put down as the install's
+// baseline (immutable, in the manifest, with a backup), the agent's unit
+// runs with it, and ensure restores it.
+func TestInstall_Baseline(t *testing.T) {
+	l := testLayout(t)
+	src := filepath.Join(t.TempDir(), "base.json.gz")
+	write(t, src, "BASELINE-BYTES", 0o600)
+	f := &fake{}
+	bin := binary(t, "#!/bin/sh\necho agent\n")
+	if _, err := InstallBaseline(l, f.run, bin, src); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(l.p(l.Baseline)); string(b) != "BASELINE-BYTES" {
+		t.Fatalf("baseline: %q", b)
+	}
+	if b, _ := os.ReadFile(l.p(l.Backup + "/baseline.json.gz")); string(b) != "BASELINE-BYTES" {
+		t.Fatalf("backup: %q", b)
+	}
+	m, err := ReadManifest(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inManifest bool
+	for _, e := range m.Entries {
+		inManifest = inManifest || e.Path == l.Baseline && e.Source == l.Backup+"/baseline.json.gz"
+	}
+	if !inManifest {
+		t.Fatalf("not in the manifest: %+v", m.Entries)
+	}
+	if f.count("chattr +i "+l.p(l.Baseline)) != 1 {
+		t.Fatalf("not made immutable: %v", f.cmds)
+	}
+	unit, _ := os.ReadFile(l.p("/etc/systemd/system/xdr-agent.service"))
+	if !strings.Contains(string(unit), "agent --config "+l.p(l.Config)+" --baseline "+l.p(l.Baseline)) {
+		t.Fatalf("the unit does not pass the baseline:\n%s", unit)
+	}
+	// A later install without --baseline keeps it, and changes nothing.
+	g := &fake{}
+	if rep, err := Install(l, g.run, bin); err != nil || len(rep.Wrote) != 0 {
+		t.Fatalf("again: %+v %v", rep, err)
+	}
+	// Removed: ensure puts it back, the unit unchanged.
+	os.Remove(l.p(l.Baseline))
+	rep, err := Ensure(l, (&fake{}).run)
+	if err != nil || !contains(rep.Restored, l.Baseline) {
+		t.Fatalf("ensure: %+v %v", rep, err)
+	}
+	if b, _ := os.ReadFile(l.p(l.Baseline)); string(b) != "BASELINE-BYTES" {
+		t.Fatalf("restored: %q", b)
+	}
+	if contains(rep.Restored, "/etc/systemd/system/xdr-agent.service") {
+		t.Fatal("the unit was rewritten")
+	}
+	// Uninstall takes it with the rest.
+	if err := Uninstall(l, (&fake{}).run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(l.p(l.Baseline)); !os.IsNotExist(err) {
+		t.Fatal("the baseline outlived the uninstall")
+	}
+}
+
+// Without a baseline the unit runs the agent on the embedded one, as before.
+func TestInstall_NoBaselineNoFlag(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
+		t.Fatal(err)
+	}
+	unit, _ := os.ReadFile(l.p("/etc/systemd/system/xdr-agent.service"))
+	if strings.Contains(string(unit), "--baseline") {
+		t.Fatalf("unit:\n%s", unit)
+	}
+	if _, err := InstallBaseline(l, (&fake{}).run, binary(t, "x"), filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("a missing baseline file was accepted")
+	}
+}

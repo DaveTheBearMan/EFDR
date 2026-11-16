@@ -29,6 +29,7 @@ type Layout struct {
 	Config   string // the agent's config (and Config+".sig")
 	FleetDir string // ca.pem, host.pem, host-key.pem, rules.pub
 	Notes    string // what ensure had to do, for the agent to report
+	Baseline string // the agent's baseline layer, when install was given one
 	// Uninstalled is the marker Uninstall writes first and Install removes:
 	// what says the box is uninstalled, whatever else is or is not there.
 	Uninstalled string
@@ -44,6 +45,7 @@ func DefaultLayout() Layout {
 		Config:   "/etc/xdr/agent.json",
 		FleetDir: "/etc/xdr/fleet",
 		Notes:    "/var/lib/xdr/ensure-notes.jsonl",
+		Baseline: "/var/lib/xdr/baseline.json.gz",
 
 		Uninstalled: "/var/lib/xdr/uninstalled",
 	}

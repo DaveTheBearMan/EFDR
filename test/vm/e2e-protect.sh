@@ -22,6 +22,7 @@ PW='e2e protect passphrase'
 COPIES="/usr/local/sbin/xdr /usr/lib/xdr/xdr /var/lib/xdr/bin/xdr"
 PINNED=/etc/xdr/pinned.sha256
 MANIFEST=/var/lib/xdr/manifest.json
+IBASE=/var/lib/xdr/baseline.json.gz
 UNITS="xdr-agent.service xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer"
 # Everything install puts down besides the config, the bundle and the backup.
 LAUNCH="/etc/systemd/system/xdr-agent.service /etc/systemd/system/xdr-guard-a.service /etc/systemd/system/xdr-guard-b.service"
@@ -143,12 +144,9 @@ c["listeners"] = json.load(open(sys.argv[2])) + [{"proto": "tcp", "port": 22, "e
 json.dump(c, open(sys.argv[1], "w"), indent=2)
 PY
 push_conf "$OUT/agent.json" || exit 1
-# The installed unit runs the agent on the embedded baseline only, which a
-# test build has empty: a drop-in (no file of the manifest) gives it this
-# box's capture, through the installed launcher, so the chooser still picks
-# the copy. Everything else is the install as it is.
-x mkdir -p /etc/systemd/system/xdr-agent.service.d
-x sh -c "printf '[Service]\nExecStart=\nExecStart=/usr/lib/xdr/launch agent --config $CONF --baseline $BASE --log $LOG\n' > /etc/systemd/system/xdr-agent.service.d/e2e.conf"
+# The installed unit runs the agent on the embedded baseline (empty in a
+# test build) and the one `xdr install --baseline` puts down: this box's
+# capture.
 
 ctl_run 1
 for _ in $(seq 40); do grep -q '^console: https://' <<<"$(ctl_log)" && break; sleep 0.25; done
@@ -166,16 +164,18 @@ ctl_has() { grep -q -- "$1" <<<"$(ctl_log)"; }
 
 echo "== install"
 mark
-out=$(x xdr install --config "$CONF" 2>&1)
+out=$(x xdr install --config "$CONF" --baseline "$BASE" 2>&1)
 bad=""
 for _ in $(seq 60); do active $UNITS && break; sleep 0.5; done
 active $UNITS || bad="$bad units-not-active($(x systemctl is-active $UNITS | tr '\n' ' '))"
 pinned_ok || bad="$bad copies-differ-from-pinned"
 [ "$(x cat $PINNED)" = "$(sha256sum bin/xdr | cut -d' ' -f1)" ] || bad="$bad pinned-is-not-this-build"
 x test -s $MANIFEST || bad="$bad no-manifest"
-for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF /var/lib/xdr/backup/manifest.json; do
+for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF $IBASE /var/lib/xdr/backup/manifest.json; do
   x lsattr "$f" 2>/dev/null | cut -d' ' -f1 | grep -q i || bad="$bad not-immutable:$f"
 done
+# The unit passes the installed baseline.
+x grep -q -- "--baseline $IBASE" /etc/systemd/system/xdr-agent.service || bad="$bad unit-without-baseline"
 # The agent runs under its unit, from an installed copy.
 exe=$(x readlink "/proc/$(agent_pid)/exe")
 grep -qx "/usr/local/sbin/xdr" <<<"$exe" || bad="$bad agent-exe=$exe"
@@ -337,10 +337,7 @@ gone_all() {
 if ! within 30 gone_all >/dev/null; then
   fail uninstall-token "not all gone within 30 s (breakglass said: $uout): $(x sh -c "for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF /var/lib/xdr/backup; do [ -e \$f ] && echo \$f; done; nft list tables | grep xdr; pgrep -af '[x]dr (agent|guard|ensure)'; systemctl is-active $UNITS; tail -n +$((MARK + 1)) $LOG | grep uninstall" | tr '\n' ' ')"
 else
-  # The test's own drop-in goes too, then a minute and more: cron, the timer
-  # and the guards would have had their turn.
-  x rm -rf /etc/systemd/system/xdr-agent.service.d
-  x systemctl daemon-reload
+  # A minute and more: cron, the timer and the guards would have had their turn.
   sleep 65
   bad=""
   gone_all || bad="$bad something-came-back"

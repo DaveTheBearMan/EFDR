@@ -28,6 +28,14 @@ type item struct {
 // name first and only renamed once all of them were, so a failure leaves
 // the previous install as it was.
 func Install(l Layout, run Runner, binary string) (Report, error) {
+	return InstallBaseline(l, run, binary, "")
+}
+
+// InstallBaseline is Install with baseline (a file, "" for none) put down
+// as the install's baseline: at l.Baseline, immutable, in the manifest and
+// backed up, and passed to the agent by its unit. An install without one
+// keeps the baseline an earlier install put down.
+func InstallBaseline(l Layout, run Runner, binary, baseline string) (Report, error) {
 	var rep Report
 	bin, err := os.ReadFile(binary)
 	if err != nil {
@@ -36,7 +44,16 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 	if _, err := os.Stat(l.p(l.Config)); err != nil {
 		return rep, fmt.Errorf("no config to install: %w", err)
 	}
-	items, err := collect(l, bin)
+	var base []byte
+	if baseline != "" {
+		if l.Baseline == "" {
+			return rep, errors.New("this layout has no place for a baseline")
+		}
+		if base, err = os.ReadFile(baseline); err != nil {
+			return rep, fmt.Errorf("baseline: %w", err)
+		}
+	}
+	items, err := collectBase(l, bin, base)
 	if err != nil {
 		return rep, err
 	}
@@ -121,13 +138,32 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 
 // collect is every file an install puts down besides the pinned hash and
 // the manifest. bin is the binary; nil leaves the copies' content empty.
-func collect(l Layout, bin []byte) ([]item, error) {
+// The baseline is the one on the box, if there is one.
+func collect(l Layout, bin []byte) ([]item, error) { return collectBase(l, bin, nil) }
+
+// collectBase is collect with base as the install's baseline; nil keeps
+// the one on the box (or its backup), if there is one.
+func collectBase(l Layout, bin, base []byte) ([]item, error) {
+	if base == nil && l.Baseline != "" {
+		for _, p := range []string{l.Baseline, l.baseBackup()} {
+			if b, err := os.ReadFile(l.p(p)); err == nil {
+				base = b
+				break
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
+			}
+		}
+	}
 	var items []item
 	for _, c := range l.Copies {
 		items = append(items, item{path: c, content: bin, mode: 0o755, kind: "copy"})
 	}
-	for _, f := range Render(l) {
+	for _, f := range render(l, base != nil) {
 		items = append(items, item{path: f.Path, content: f.Content, mode: f.Mode, kind: "file"})
+	}
+	if base != nil {
+		items = append(items, item{path: l.Baseline, content: base, mode: 0o600, kind: "config", source: l.baseBackup()},
+			item{path: l.baseBackup(), content: base, mode: 0o600, kind: "backup", source: l.Baseline})
 	}
 	// The config, its signature and the bundle, each with a backup beside
 	// the manifest: ensure restores either from the other.
