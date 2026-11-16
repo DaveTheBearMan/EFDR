@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -207,6 +208,71 @@ func TestActions_Breakglass(t *testing.T) {
 	} {
 		if _, err := a.Breakglass(args[0].(string), args[1].(string), args[2].(int)); err == nil {
 			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// Two rotations while the agent is away must both reach it: the standing
+// order is one key, so the second carries the first's accounts too.
+func TestActions_RotateMergesTheStandingSet(t *testing.T) {
+	a, _, f := actionsRig(t)
+	ctx := context.Background()
+	if _, err := a.Rotate(ctx, "web01", []string{"alice"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := get(t, f, fleet.To("web01")+"creds")
+	if _, err := a.Rotate(ctx, "web01", []string{"bob"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := get(t, f, fleet.To("web01")+"creds")
+	var s1, s2 creds.Set
+	json.Unmarshal([]byte(first), &s1)
+	json.Unmarshal([]byte(second), &s2)
+	if s2.ID == s1.ID || len(s2.Users) != 2 || s2.Users["alice"].Hash != s1.Users["alice"].Hash || s2.Users["bob"].Hash == "" {
+		t.Fatalf("first %+v second %+v", s1, s2)
+	}
+	// Rotating alice again replaces her entry, not bob's.
+	if _, err := a.Rotate(ctx, "web01", []string{"alice"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	third, _ := get(t, f, fleet.To("web01")+"creds")
+	var s3 creds.Set
+	json.Unmarshal([]byte(third), &s3)
+	if s3.Users["alice"].Hash == s1.Users["alice"].Hash || s3.Users["bob"].Hash != s2.Users["bob"].Hash {
+		t.Fatalf("third %+v", s3)
+	}
+}
+
+// Rotations from two tabs, or a tab and the command line, race on the store
+// and the order: afterwards every account's stored password must be the one
+// its hash in the order was made from.
+func TestActions_ConcurrentRotationsAgree(t *testing.T) {
+	a, _, f := actionsRig(t)
+	var wg sync.WaitGroup
+	users := []string{"u1", "u2", "u3", "u4", "u5", "u6"}
+	for _, u := range users {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			if _, err := a.Rotate(context.Background(), "web01", []string{u}, nil); err != nil {
+				t.Errorf("%s: %v", u, err)
+			}
+		}(u)
+	}
+	wg.Wait()
+	v, _ := get(t, f, fleet.To("web01")+"creds")
+	var set creds.Set
+	json.Unmarshal([]byte(v), &set)
+	store, err := creds.Load(f.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range users {
+		hash := set.Users[u].Hash
+		pw := store.Hosts["web01"][u].Password
+		parts := strings.Split(hash, "$") // "", "6", salt, sum
+		if len(parts) != 4 || pw == "" || creds.SHA512Crypt(pw, parts[2], 5000) != hash {
+			t.Errorf("%s: the stored password is not the one the order was made from (hash %q, stored %q)", u, hash, pw)
 		}
 	}
 }

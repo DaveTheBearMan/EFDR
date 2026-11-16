@@ -2,14 +2,20 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
+	"sync"
+	"syscall"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"xdr/internal/creds"
+	"xdr/internal/fleet"
 	"xdr/internal/pki"
 )
 
@@ -78,6 +84,19 @@ func Rotate(ctx context.Context, dir string, cfg *Config, spec RotateSpec, clien
 	if err := Enrolled(dir, spec.Host); err != nil {
 		return nil, err
 	}
+	// One rotation at a time on this box (two tabs) and across processes (a
+	// tab and the command line): the store and the standing order change
+	// together, or a stored password is not the one in force.
+	rotateMu.Lock()
+	defer rotateMu.Unlock()
+	lock, err := os.OpenFile(filepath.Join(dir, "creds.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
 	store, err := creds.Load(dir)
 	if err != nil {
 		return nil, err
@@ -100,6 +119,16 @@ func Rotate(ctx context.Context, dir string, cfg *Config, spec RotateSpec, clien
 	if err != nil {
 		return nil, fmt.Errorf("passwords stored, not sent: %w", err)
 	}
+	// The order is one key, replaced each time: an agent that was away for
+	// two rotations would apply only the last. So a new set carries the
+	// accounts of the standing one too (this rotation's win).
+	if cur, err := standingSet(ctx, c, spec.Host); err == nil {
+		for u, e := range cur.Users {
+			if _, ok := set.Users[u]; !ok && len(set.Users) < maxSetUsers {
+				set.Users[u] = e
+			}
+		}
+	}
 	if err := PutOrder(ctx, c, spec.Host, "creds", "", set); err != nil {
 		return nil, fmt.Errorf("passwords stored, not sent (run rotate again): %w", err)
 	}
@@ -119,4 +148,20 @@ func OrderValue(verdict string, at time.Time, sha256 string) map[string]any {
 		v["sha256"] = sha256
 	}
 	return v
+}
+
+// maxSetUsers bounds the accounts one credential order carries.
+const maxSetUsers = 256
+
+var rotateMu sync.Mutex
+
+// standingSet is the credential order standing for host, or an empty set.
+func standingSet(ctx context.Context, c *clientv3.Client, host string) (creds.Set, error) {
+	var set creds.Set
+	r, err := c.Get(ctx, fleet.To(host)+"creds")
+	if err != nil || len(r.Kvs) == 0 {
+		return set, err
+	}
+	err = json.Unmarshal(r.Kvs[0].Value, &set)
+	return set, err
 }
