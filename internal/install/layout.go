@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Layout is where everything goes. Root is "" on a box and a temporary
@@ -47,9 +48,67 @@ func (l Layout) p(path string) string { return filepath.Join(l.Root, path) }
 // Runner runs a command and returns what it printed.
 type Runner func(name string, args ...string) ([]byte, error)
 
-// ExecRunner runs the command for real.
+// SafePath is where the tools XDR runs are looked up: the system's own
+// directories, never the inherited $PATH. It is also the children's PATH.
+const SafePath = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+// safeEnv is the whole environment a child gets: nothing inherited, so no
+// LD_PRELOAD and no $PATH of the caller's.
+var safeEnv = []string{"PATH=" + SafePath, "LANG=C", "LC_ALL=C"}
+
+var (
+	toolMu sync.Mutex
+	tools  = map[string]string{} // "dirs|name" → absolute path, resolved once
+)
+
+// lookTool finds name in dirs (an absolute name is taken as it is).
+func lookTool(dirs []string, name string) (string, error) {
+	if strings.Contains(name, "/") {
+		if !filepath.IsAbs(name) {
+			return "", fmt.Errorf("%s: not an absolute path", name)
+		}
+		return name, nil
+	}
+	key := strings.Join(dirs, ":") + "|" + name
+	toolMu.Lock()
+	defer toolMu.Unlock()
+	if p, ok := tools[key]; ok {
+		return p, nil
+	}
+	for _, d := range dirs {
+		p := filepath.Join(d, name)
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+			tools[key] = p
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s: not found in %s", name, strings.Join(dirs, ":"))
+}
+
+func commandIn(dirs []string, name string, args ...string) *exec.Cmd {
+	c := &exec.Cmd{Args: append([]string{name}, args...), Env: safeEnv}
+	c.Path, c.Err = lookTool(dirs, name)
+	if c.Err != nil {
+		c.Path = name
+	}
+	return c
+}
+
+// Command is exec.Command with the tool looked up in SafePath only and a
+// fixed minimal environment.
+func Command(name string, args ...string) *exec.Cmd {
+	return commandIn(filepath.SplitList(SafePath), name, args...)
+}
+
+func runnerIn(dirs []string) Runner {
+	return func(name string, args ...string) ([]byte, error) {
+		return commandIn(dirs, name, args...).CombinedOutput()
+	}
+}
+
+// ExecRunner runs the command for real, by its path in SafePath.
 func ExecRunner(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	return Command(name, args...).CombinedOutput()
 }
 
 // Units are the units install enables and ensure keeps running.

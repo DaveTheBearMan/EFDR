@@ -303,3 +303,11 @@ func TestConfig_Reinstall(t *testing.T) {
 		}
 	}
 }
+
+// The script runs every tool from the system directories, with no
+// inherited loader variables.
+func TestReinstall_ScriptFixedPath(t *testing.T) {
+	if !strings.HasPrefix(script, "set -e\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\nunset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT\n") {
+		t.Fatalf("the script does not fix PATH first:\n%s", script)
+	}
+}

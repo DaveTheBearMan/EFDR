@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,13 +15,14 @@ import (
 	"xdr/internal/collect"
 	"xdr/internal/creds"
 	"xdr/internal/incident"
+	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/proc"
 )
 
 // runStdin runs a command with stdin; its error carries what it printed.
 func runStdin(stdin []byte, name string, args ...string) error {
-	c := exec.Command(name, args...)
+	c := install.Command(name, args...)
 	c.Stdin = bytes.NewReader(stdin)
 	if out, err := c.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %v: %s", name, err, strings.TrimSpace(string(out)))

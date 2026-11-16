@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"xdr/internal/proc"
 
 	"xdr/internal/incident"
+	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/sshgate"
 )
@@ -47,14 +47,14 @@ func (a *agent) assertSSH(report bool) {
 
 // runCmd runs a command; its error carries what it printed.
 func runCmd(name string, args ...string) error {
-	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+	if out, err := install.Command(name, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func outputCmd(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	return install.Command(name, args...).CombinedOutput()
 }
 
 // session is what the agent keeps of a live session.

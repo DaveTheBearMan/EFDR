@@ -111,6 +111,9 @@ func (e ExecSSH) Run(ctx context.Context, addr, command string, stdin io.Reader)
 // controller's side, and no single quote (sudo's sh -c wraps it in two):
 // the host's files arrive as a tar on stdin.
 const script = `set -e
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
 d=$(mktemp -d)
 trap "rm -rf \"\$d\"" EXIT
 tar -x -f - -C "$d"
