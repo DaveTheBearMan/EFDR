@@ -153,6 +153,7 @@ type agent struct {
 	spool         string                                                // the break-glass spool
 	disabled      map[string]bool                                       // accounts the agent locked
 	userSaid      map[string]bool                                       // new accounts already alerted on
+	userPaused    map[string]bool                                       // new accounts told during a pause, not locked
 	recoverySaid  bool                                                  // recovery-missing was recorded
 	ordersDone    map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
 	execs         map[int]execInfo                                      // recent process starts, by pid

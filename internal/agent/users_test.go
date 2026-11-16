@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"xdr/internal/model"
 	"xdr/internal/testfs"
@@ -177,5 +179,31 @@ func TestWriteKeys_PlantedTempNameCannotBlock(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(home); len(ents) != 2 { // authorized_keys and the planted directory
 		t.Fatalf("temp file left behind: %v", ents)
+	}
+}
+
+// A pause turns automatic actions into alerts: a new login account made
+// during one is told, not locked; it is judged as usual once the pause ends.
+func TestUsers_PauseAlertsInsteadOfLocking(t *testing.T) {
+	r, ran := usersRig(t)
+	r.a.pausedUntil = r.now.Add(time.Hour)
+	r.a.accounts(r.snap)
+	r.a.accounts(r.snap)
+	if um := usermods(*ran); len(um) != 0 {
+		t.Fatalf("locked during a pause: %v", um)
+	}
+	var told []string
+	for _, in := range r.kind("user-new") {
+		if strings.Contains(in.Detail, "paused") {
+			told = append(told, in.User)
+		}
+	}
+	if !slices.Equal(told, []string{"evil"}) {
+		t.Fatalf("told paused: %v", told)
+	}
+	r.now = r.now.Add(2 * time.Hour)
+	r.a.accounts(r.snap)
+	if um := usermods(*ran); len(um) != 1 || um[0][1] != "--lock" {
+		t.Fatalf("after the pause: %v", um)
 	}
 }

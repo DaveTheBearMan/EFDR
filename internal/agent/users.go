@@ -39,6 +39,9 @@ func (a *agent) accounts(s *proc.Snapshot) {
 	if a.userSaid == nil {
 		a.userSaid = map[string]bool{}
 	}
+	if a.userPaused == nil {
+		a.userPaused = map[string]bool{}
+	}
 	base := a.baseUsers()
 	ssh := a.cfg.SSH
 	var recovery *baseline.Account
@@ -69,13 +72,25 @@ func (a *agent) accounts(s *proc.Snapshot) {
 		if a.disabled[acc.Name] || a.userSaid[acc.Name] {
 			continue
 		}
-		a.userSaid[acc.Name] = true
 		in := incident.Incident{UID: acc.UID, User: acc.Name, Detail: fmt.Sprintf("uid %d, shell %s", acc.UID, acc.Shell)}
 		if acc.UID < firstUserUID || !loginShell(acc.Shell) || a.runsGuarded(s, acc.UID) {
+			a.userSaid[acc.Name] = true
 			in.Kind, in.Action, in.Severity = "user-new", "alert", model.SevMedium
 			a.record(in)
 			continue
 		}
+		// A pause makes the lock an alert, told once; the account is
+		// judged as usual when the pause ends.
+		if a.paused() {
+			if !a.userPaused[acc.Name] {
+				in.Kind, in.Action, in.Severity = "user-new", "alert", model.SevMedium
+				in.Detail += "; not locked: paused"
+				a.record(in)
+				a.userPaused[acc.Name] = true
+			}
+			continue
+		}
+		a.userSaid[acc.Name] = true
 		in.Kind, in.Action, in.Severity = "user-disabled", "repaired", model.SevHigh
 		if err := a.run("usermod", "--lock", "--expiredate", "1", acc.Name); err != nil {
 			in.Action, in.Detail = "kill-failed", in.Detail+"; usermod: "+err.Error()
