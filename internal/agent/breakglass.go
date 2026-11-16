@@ -75,10 +75,19 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 }
 
 // scanSpool applies tokens left in the spool, so ones written while the
-// agent was down take effect.
+// agent was down take effect, and deletes the files that can never be
+// valid here (not a token, not the rule key's, another host's, expired):
+// anyone may put files in the spool, and they must not pile up.
 func (a *agent) scanSpool() {
-	for _, s := range breakglass.ReadSpool(a.spool) {
-		e := breakglass.ParseEntry(s)
+	for _, f := range breakglass.ReadSpoolFiles(a.spool) {
+		e := breakglass.ParseEntry(f.Content)
+		if a.tokenPub != nil {
+			t, err := breakglass.Parse(e.Token, a.tokenPub)
+			if err != nil || t.Host != a.cfg.Host || a.now().After(t.Expires.Add(breakglass.Skew)) {
+				os.Remove(filepath.Join(a.spool, f.Name))
+				continue
+			}
+		}
 		a.useToken(e.Token, e.Session, false)
 	}
 }

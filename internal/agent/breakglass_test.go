@@ -128,3 +128,29 @@ func TestBreakglass_ApprovalSurvivesRestart(t *testing.T) {
 		t.Fatal("break-glass approval lost on restart")
 	}
 }
+
+func TestScanSpool_PrunesWhatCanNeverBeValid(t *testing.T) {
+	r, key := tokenRig(t)
+	os.MkdirAll(r.a.spool, 0o700)
+	put := func(name, body string) { os.WriteFile(filepath.Join(r.a.spool, name), []byte(body), 0o600) }
+	put("junk.tok", "not a token")
+	put("forged.tok", mint(r, func() ed25519.PrivateKey { _, k, _ := ed25519.GenerateKey(nil); return k }(), "00000000000000e1", "pause")+"\n")
+	expired := breakglass.Mint(breakglass.Token{V: 1, ID: "00000000000000e2", Host: "web01", Action: "pause", NotBefore: r.now.Add(-5 * time.Hour), Expires: r.now.Add(-4 * time.Hour)}, key)
+	put("expired.tok", expired+"\n")
+	put("other-host.tok", breakglass.Mint(breakglass.Token{V: 1, ID: "00000000000000e3", Host: "web02", Action: "pause", NotBefore: r.now.Add(-time.Minute), Expires: r.now.Add(time.Hour)}, key)+"\n")
+	later := breakglass.Mint(breakglass.Token{V: 1, ID: "00000000000000e4", Host: "web01", Action: "pause", NotBefore: r.now.Add(time.Hour), Expires: r.now.Add(3 * time.Hour)}, key)
+	put("later.tok", later+"\n")
+	put("good.tok", mint(r, key, "00000000000000e5", "approve-session")+"\n9\n")
+	r.a.scanSpool()
+	left := map[string]bool{}
+	ents, _ := os.ReadDir(r.a.spool)
+	for _, e := range ents {
+		left[e.Name()] = true
+	}
+	if left["junk.tok"] || left["forged.tok"] || left["expired.tok"] || left["other-host.tok"] {
+		t.Fatalf("not pruned: %v", left)
+	}
+	if !left["later.tok"] || !left["good.tok"] {
+		t.Fatalf("a token that can still be valid was removed: %v", left)
+	}
+}
