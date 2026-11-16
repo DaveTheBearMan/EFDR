@@ -2,11 +2,16 @@ package agent
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"xdr/internal/baseline"
 	"xdr/internal/collect"
@@ -131,20 +136,57 @@ func (a *agent) holdRecovery(acc *baseline.Account) {
 	a.record(in)
 }
 
-// writeKeys replaces an authorized_keys file, owned by the account.
+// writeKeys replaces dir/authorized_keys (dir is a home's .ssh), owned by
+// the account. The agent is root and the account owns what is written
+// into, so nothing here follows a symlink: the home is opened, then .ssh
+// beneath it, both O_NOFOLLOW, and the file is made fresh (O_EXCL, a
+// random name) and renamed over the old one inside that directory.
 func (a *agent) writeKeys(dir, path string, data []byte, uid, gid uint32) error {
-	if st, err := os.Lstat(dir); err == nil && !st.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+	name := filepath.Base(path)
+	if filepath.Dir(path) != dir {
+		return fmt.Errorf("%s is not in %s", path, dir)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	home, err := unix.Open(filepath.Dir(dir), unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("home %s: %w", filepath.Dir(dir), err)
+	}
+	defer unix.Close(home)
+	if err := unix.Mkdirat(home, filepath.Base(dir), 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
 		return err
 	}
-	os.Lchown(dir, int(uid), int(gid))
-	tmp := path + ".xdr-tmp"
-	os.Remove(tmp)
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	d, err := unix.Openat(home, filepath.Base(dir), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("%s: %w", dir, err) // a symlink, or not a directory
+	}
+	defer unix.Close(d)
+	unix.Fchown(d, int(uid), int(gid))
+	var tmp string
+	var f int
+	for range 8 {
+		var rnd [6]byte
+		rand.Read(rnd[:])
+		tmp = "." + name + "." + hex.EncodeToString(rnd[:])
+		f, err = unix.Openat(d, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			return err
+		}
+	}
+	if err != nil {
 		return err
 	}
-	os.Lchown(tmp, int(uid), int(gid))
-	return os.Rename(tmp, path)
+	file := os.NewFile(uintptr(f), tmp)
+	defer file.Close()
+	if _, err := file.Write(data); err != nil {
+		unix.Unlinkat(d, tmp, 0)
+		return err
+	}
+	file.Chown(int(uid), int(gid))
+	if err := unix.Renameat(d, tmp, d, name); err != nil {
+		unix.Unlinkat(d, tmp, 0)
+		return err
+	}
+	return nil
 }

@@ -107,6 +107,7 @@ func TestApplyCreds_SambaNT(t *testing.T) {
 
 func TestApplyCreds_Keys(t *testing.T) {
 	r, _, _ := credsRig(t)
+	os.MkdirAll(filepath.Join(r.root, "home/alice"), 0o755)
 	r.a.onOrder(credsOrder(creds.Set{ID: "s5", Users: map[string]creds.User{"alice": {Hash: aliceHash, Keys: []string{"ssh-ed25519 AAAA new"}}}}))
 	if b, _ := os.ReadFile(filepath.Join(r.root, "home/alice/.ssh/authorized_keys")); string(b) != "ssh-ed25519 AAAA new\n" {
 		t.Fatalf("keys %q", b)

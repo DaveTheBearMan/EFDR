@@ -116,3 +116,66 @@ func TestRecovery_Missing(t *testing.T) {
 		t.Fatalf("missing %+v", got)
 	}
 }
+
+// A user owns the directory the key file is written into: a symlink there
+// must never make the agent (root) write somewhere else.
+func TestWriteKeys_NoSymlinkFollow(t *testing.T) {
+	r, _ := usersRig(t)
+	victim := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(victim, []byte("precious\n"), 0o600)
+	home := filepath.Join(r.root, "home/xdrrecover")
+
+	// A planted temp name does nothing: the temp file is not at a fixed name.
+	os.Symlink(victim, filepath.Join(home, ".ssh/authorized_keys.xdr-tmp"))
+	os.WriteFile(filepath.Join(home, ".ssh/authorized_keys"), []byte("junk\n"), 0o600)
+	r.a.accounts(r.snap)
+	if b, _ := os.ReadFile(victim); string(b) != "precious\n" {
+		t.Fatalf("victim overwritten: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, ".ssh/authorized_keys")); string(b) != "ssh-ed25519 AAAA k\n" {
+		t.Fatalf("keys not restored: %q", b)
+	}
+
+	// .ssh itself a symlink to another directory: refused, nothing written there.
+	other := t.TempDir()
+	os.RemoveAll(filepath.Join(home, ".ssh"))
+	os.Symlink(other, filepath.Join(home, ".ssh"))
+	r.a.recoverySaid = false
+	r.a.accounts(r.snap)
+	if ents, _ := os.ReadDir(other); len(ents) != 0 {
+		t.Fatalf("wrote through a .ssh symlink: %v", ents)
+	}
+	got := r.kind("recovery-drift")
+	if len(got) < 2 || got[len(got)-1].Action != "alert" {
+		t.Fatalf("a refused write should be an alert: %+v", got)
+	}
+
+	// authorized_keys itself a symlink: replaced, not followed.
+	os.Remove(filepath.Join(home, ".ssh"))
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.Symlink(victim, filepath.Join(home, ".ssh/authorized_keys"))
+	r.a.accounts(r.snap)
+	if b, _ := os.ReadFile(victim); string(b) != "precious\n" {
+		t.Fatalf("victim overwritten through authorized_keys: %q", b)
+	}
+	if st, _ := os.Lstat(filepath.Join(home, ".ssh/authorized_keys")); st.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("symlink left in place")
+	}
+}
+
+// The temp file is made fresh (O_EXCL, a name nobody can plant): a user
+// who plants something at the old fixed name cannot block the repair.
+func TestWriteKeys_PlantedTempNameCannotBlock(t *testing.T) {
+	r, _ := usersRig(t)
+	home := filepath.Join(r.root, "home/xdrrecover/.ssh")
+	os.WriteFile(filepath.Join(home, "authorized_keys"), []byte("junk\n"), 0o600)
+	plant := filepath.Join(home, "authorized_keys.xdr-tmp")
+	os.MkdirAll(filepath.Join(plant, "x"), 0o700)
+	r.a.accounts(r.snap)
+	if b, _ := os.ReadFile(filepath.Join(home, "authorized_keys")); string(b) != "ssh-ed25519 AAAA k\n" {
+		t.Fatalf("repair blocked by a planted name: %q; %+v", b, r.kind("recovery-drift"))
+	}
+	if ents, _ := os.ReadDir(home); len(ents) != 2 { // authorized_keys and the planted directory
+		t.Fatalf("temp file left behind: %v", ents)
+	}
+}
