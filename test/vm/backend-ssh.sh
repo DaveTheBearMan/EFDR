@@ -88,8 +88,6 @@ boxes_down() {
 }
 ip_of() { hostvar "$1" private_ip; }
 jump_ip() { hostvar "$JUMP" private_ip; }
-# The boxes' DHCP server: their default gateway.
-dhcp_server() { VM=${BOXES[0]} x ip -4 route show default | awk '{print $3; exit}'; }
 
 # ctl_run N: start the controller on the jump box; its output goes to CTLOUT
 # there.

@@ -49,8 +49,6 @@ ip_of() {
 }
 # jump_ip: the jump box's address as the boxes see it.
 jump_ip() { lxc network get lxdbr0 ipv4.address | cut -d/ -f1; }
-# The boxes' DHCP server.
-dhcp_server() { jump_ip; }
 
 CTLPID=""
 # ctl_run N: start the controller; its output goes to CTLOUT.

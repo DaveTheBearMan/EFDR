@@ -23,11 +23,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.SSHPort != 22 || len(c.XDRPorts) != 1 || c.XDRPorts[0] != 7443 || !c.DHCP || !c.Kill || c.DNS.Listen != "127.0.0.1:53" {
+	if c.SSHPort != 22 || len(c.XDRPorts) != 1 || c.XDRPorts[0] != 7443 || !c.Kill || c.DNS.Listen != "127.0.0.1:53" {
 		t.Fatalf("defaults wrong: %+v", c)
 	}
-	c, err = load(t, `{"jump":["192.0.2.7"],"dhcp":false,"kill":false,"xdr_ports":[9000]}`)
-	if err != nil || c.DHCP || c.Kill || len(c.XDRPorts) != 1 || c.XDRPorts[0] != 9000 {
+	c, err = load(t, `{"jump":["192.0.2.7"],"kill":false,"xdr_ports":[9000]}`)
+	if err != nil || c.Kill || len(c.XDRPorts) != 1 || c.XDRPorts[0] != 9000 {
 		t.Fatalf("explicit values not kept: %+v %v", c, err)
 	}
 }
@@ -52,7 +52,6 @@ func TestValidate_Table(t *testing.T) {
 	bad := map[string]string{
 		"proto":        `"scored":[{"proto":"sctp","port":80}]`,
 		"port zero":    `"scored":[{"proto":"tcp","port":0}]`,
-		"allow_out":    `"allow_out":[{"to":"192.0.2.3","proto":"icmp","port":1}]`,
 		"guard rel":    `"guard_exes":["apache2"]`,
 		"dns resolver": `"dns":{"enabled":true}`,
 		"dns allow":    `"dns":{"allow":["Bad_Name."]}`,
@@ -117,7 +116,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Jump) == 0 || len(c.Scored) == 0 || len(c.AllowOut) == 0 || len(c.GrayUsers) != 1 || c.GrayUsers[0] != "gray1" {
+	if len(c.Jump) == 0 || len(c.Scored) == 0 || len(c.GrayUsers) != 1 || c.GrayUsers[0] != "gray1" {
 		t.Fatalf("example is thin: %+v", c)
 	}
 }
@@ -149,23 +148,6 @@ func TestValidate_Fleet(t *testing.T) {
 	}
 }
 
-func TestProtected(t *testing.T) {
-	c, err := load(t, `{"jump":["192.0.2.7"],"peers":["192.0.2.4"],"ssh_from":["198.51.100.0/25"],
-	 "allow_out":[{"to":"192.0.2.6","proto":"tcp","port":3306}],"dhcp_server":["192.0.2.254"],
-	 "dns":{"resolver":"192.0.2.1"}}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, p := range c.Protected() {
-		got = append(got, p.String())
-	}
-	want := []string{"192.0.2.7/32", "192.0.2.4/32", "198.51.100.0/25", "192.0.2.6/32", "192.0.2.1/32", "192.0.2.254/32"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("got %v", got)
-	}
-}
-
 func TestValidate_Mesh(t *testing.T) {
 	base := `{"host":"web01","jump":["192.0.2.7"],"xdr_ports":[7443,2379],"fleet":{"endpoints":["192.0.2.7:2379"]},`
 	for frag, want := range map[string]string{
@@ -182,5 +164,34 @@ func TestValidate_Mesh(t *testing.T) {
 	c, err := load(t, base+`"peers":["192.0.2.4","2001:db8::4"],"mesh":{"port":7443}}`)
 	if err != nil || c.Mesh == nil || c.Mesh.Port != 7443 {
 		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+// The allowlist is gone: a config that still names it must not load,
+// since ignoring it would leave the operator believing traffic is being
+// allowed or blocked.
+func TestLoad_OldFirewallKeysRefused(t *testing.T) {
+	for key, frag := range map[string]string{
+		"allow_out":   `"allow_out":[{"to":"192.0.2.6","proto":"tcp","port":3306}]`,
+		"dhcp":        `"dhcp":true`,
+		"dhcp_server": `"dhcp_server":["192.0.2.254"]`,
+	} {
+		if _, err := load(t, `{"jump":["192.0.2.7"],`+frag+`}`); err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s: err = %v", key, err)
+		}
+	}
+}
+
+func TestProtected_NoAllowlist(t *testing.T) {
+	c, err := load(t, `{"jump":["192.0.2.7"],"peers":["192.0.2.4"],"ssh_from":["198.51.100.0/25"],"dns":{"resolver":"192.0.2.1"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range c.Protected() {
+		got = append(got, p.String())
+	}
+	if strings.Join(got, " ") != "192.0.2.7/32 192.0.2.4/32 198.51.100.0/25 192.0.2.1/32" {
+		t.Fatalf("got %v", got)
 	}
 }

@@ -39,7 +39,6 @@ boxes_up "$VM1" "$VM2" || exit 1
 HOST=$(jump_ip)
 IP1=$(ip_of "$VM1") || exit 1
 IP2=$(ip_of "$VM2") || exit 1
-DHCP=$(dhcp_server)
 echo "== jump box $HOST, $VM1 $IP1, $VM2 $IP2"
 
 # The jump box side: made here, then run on the jump box.
@@ -82,16 +81,15 @@ setup_box() {
   for f in ca.pem host.pem host-key.pem rules.pub; do
     push "$bundle/$f" /etc/xdr/fleet/$f 0600 || return 1
   done
-  python3 - "$HOST" "$name" "$IP1" "$IP2" "$DHCP" > "$OUT/$name.json" <<'PY'
+  python3 - "$HOST" "$name" "$IP1" "$IP2" > "$OUT/$name.json" <<'PY'
 import json, sys
-host, name, ip1, ip2, dhcp = sys.argv[1:]
+host, name, ip1, ip2 = sys.argv[1:]
 print(json.dumps({
     "host": name,
     "jump": [host],
     "peers": [ip1, ip2],
     "xdr_ports": [7443, 2379],
     "listeners": [],
-    "dhcp_server": [dhcp],
     "kill": True,
     "dns": {"resolver": host},
     "fleet": {"endpoints": [host + ":2379"]},

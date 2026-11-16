@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"xdr/internal/baseline"
-	"xdr/internal/config"
 	"xdr/internal/detect"
 	"xdr/internal/fleet"
 	"xdr/internal/hunt"
@@ -168,7 +167,7 @@ func TestReload_RevalidatesRules(t *testing.T) {
 		t.Fatal("rule not taken")
 	}
 	next := *r.a.cfg
-	next.AllowOut = []config.Dest{{To: pfx("198.51.100.0/24"), Proto: "tcp", Port: 443}}
+	next.DNS.Resolver = netip.MustParseAddr("198.51.100.9") // the rule's address is now protected
 	if err := r.a.reload(&next); err != nil {
 		t.Fatal(err)
 	}

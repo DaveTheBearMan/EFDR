@@ -41,13 +41,6 @@ type Port struct {
 	Port  uint16 `json:"port"`
 }
 
-// Dest is an outbound destination a scored service needs.
-type Dest struct {
-	To    Net    `json:"to"`
-	Proto string `json:"proto"`
-	Port  uint16 `json:"port"`
-}
-
 // Listener is a listening socket known to be legitimate.
 type Listener struct {
 	Proto string `json:"proto"` // tcp, udp, or packet/raw (holders of such sockets; no port)
@@ -70,19 +63,16 @@ type DNS struct {
 // Config is one box's deployment configuration.
 type Config struct {
 	Host       string     `json:"host"`
-	Jump       []Net      `json:"jump"`        // SSH and XDR are allowed from here
-	Peers      []Net      `json:"peers"`       // the other agents
-	SSHFrom    []Net      `json:"ssh_from"`    // further SSH sources
-	SSHPort    uint16     `json:"ssh_port"`    //
-	XDRPorts   []uint16   `json:"xdr_ports"`   //
-	Scored     []Port     `json:"scored"`      // open to anyone
-	AllowOut   []Dest     `json:"allow_out"`   // outbound a scored service needs
-	GuardExes  []string   `json:"guard_exes"`  // scored-service binaries, never killed
-	Listeners  []Listener `json:"listeners"`   // known listeners
-	GrayUsers  []string   `json:"gray_users"`  // accounts that are never touched
-	DHCP       bool       `json:"dhcp"`        //
-	DHCPServer []Net      `json:"dhcp_server"` // where renewals and replies may go and come from
-	Kill       bool       `json:"kill"`        // false: log would-kill instead
+	Jump       []Net      `json:"jump"`       // SSH and XDR are allowed from here
+	Peers      []Net      `json:"peers"`      // the other agents
+	SSHFrom    []Net      `json:"ssh_from"`   // further SSH sources
+	SSHPort    uint16     `json:"ssh_port"`   //
+	XDRPorts   []uint16   `json:"xdr_ports"`  //
+	Scored     []Port     `json:"scored"`     // open to anyone
+	GuardExes  []string   `json:"guard_exes"` // scored-service binaries, never killed
+	Listeners  []Listener `json:"listeners"`  // known listeners
+	GrayUsers  []string   `json:"gray_users"` // accounts that are never touched
+	Kill       bool       `json:"kill"`       // false: log would-kill instead
 	DNS        DNS        `json:"dns"`
 	Fleet      *Fleet     `json:"fleet"`       // nil: a standalone agent
 	Mesh       *Mesh      `json:"mesh"`        // nil: no peer links
@@ -139,7 +129,7 @@ func Load(path string) (*Config, error) {
 
 // Parse decodes and validates a config's bytes.
 func Parse(data []byte) (*Config, error) {
-	c := &Config{SSHPort: 22, XDRPorts: []uint16{7443}, DHCP: true, Kill: true, DNS: DNS{Listen: "127.0.0.1:53"},
+	c := &Config{SSHPort: 22, XDRPorts: []uint16{7443}, Kill: true, DNS: DNS{Listen: "127.0.0.1:53"},
 		RulesCache: "/var/lib/xdr/rules.json"}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -193,14 +183,6 @@ func (c *Config) Validate() error {
 	for _, p := range c.Scored {
 		if err := transport("scored", p.Proto, p.Port); err != nil {
 			return err
-		}
-	}
-	for _, d := range c.AllowOut {
-		if err := transport("allow_out", d.Proto, d.Port); err != nil {
-			return err
-		}
-		if !d.To.IsValid() {
-			return fmt.Errorf("allow_out: no \"to\" address")
 		}
 	}
 	for _, l := range c.Listeners {
@@ -343,14 +325,8 @@ func (c *Config) Protected() []netip.Prefix {
 			out = append(out, n.Prefix)
 		}
 	}
-	for _, d := range c.AllowOut {
-		out = append(out, d.To.Prefix)
-	}
 	if a := c.DNS.Resolver; a.IsValid() {
 		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
-	}
-	for _, n := range c.DHCPServer {
-		out = append(out, n.Prefix)
 	}
 	return out
 }

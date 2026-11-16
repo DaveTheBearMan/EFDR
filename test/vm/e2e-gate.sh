@@ -36,7 +36,6 @@ trap cleanup EXIT
 boxes_up "$VM" || exit 1
 HOST=$(jump_ip)
 IP=$(ip_of "$VM")
-DHCP=$(dhcp_server)
 echo "== jump box $HOST, $VM $IP"
 
 # The test accounts' key.
@@ -77,15 +76,14 @@ for f in ca.pem host.pem host-key.pem rules.pub; do
 done
 echo "== capture baseline"
 x xdr capture --root / --out "$BASE" || exit 1
-python3 - "$HOST" "$IP" "$DHCP" "$PUB" > "$OUT/agent.json" <<'PY'
+python3 - "$HOST" "$IP" "$PUB" > "$OUT/agent.json" <<'PY'
 import json, sys
-host, ip, dhcp, pub = sys.argv[1:]
+host, ip, pub = sys.argv[1:]
 print(json.dumps({
     "host": "e2e",
     "jump": [host],
     "xdr_ports": [7443, 2379],
     "listeners": [{"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"}],
-    "dhcp_server": [dhcp],
     "gray_users": ["gray1"],
     "kill": True,
     "dns": {"resolver": host},

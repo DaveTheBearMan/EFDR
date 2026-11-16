@@ -9,18 +9,12 @@
     {"proto": "tcp", "port": 80},
     {"proto": "tcp", "port": 443}
   ],
-  "allow_out": [
-    {"to": "192.0.2.6", "proto": "tcp", "port": 3306},
-    {"to": "198.51.100.128/25", "proto": "tcp", "port": 80}
-  ],
   "guard_exes": ["/usr/sbin/apache2", "/usr/bin/dockerd", "/usr/bin/containerd-shim-runc-v2"],
   "listeners": [
     {"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"},
     {"proto": "udp", "port": 68, "exe": "/usr/lib/systemd/systemd-networkd"}
   ],
   "gray_users": ["gray1"],
-  "dhcp": true,
-  "dhcp_server": ["192.0.2.254"],
   "kill": true,
   "dns": {
     "resolver": "192.0.2.1",

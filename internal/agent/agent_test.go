@@ -79,7 +79,6 @@ func newRig(t *testing.T) *rig {
 		Scored:    []config.Port{{Proto: "tcp", Port: 80}},
 		GuardExes: []string{"/usr/sbin/apache2"},
 		GrayUsers: []string{"gray1"},
-		DHCP:      true,
 		Kill:      true,
 		DNS:       config.DNS{Listen: "127.0.0.1:53"},
 	}
