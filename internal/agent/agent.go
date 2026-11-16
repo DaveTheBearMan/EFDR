@@ -121,10 +121,16 @@ type agent struct {
 	snap     *proc.Snapshot
 	snapAt   time.Time
 
-	ssh         *sshgate.Asserter // nil: no SSH gate
-	gateExe     string            // what pam_exec runs: this binary
-	gateOffSaid bool              // the gate-off alert was recorded
-	run         sshgate.Runner    // loginctl, usermod, systemctl
+	ssh         *sshgate.Asserter   // nil: no SSH gate
+	gateExe     string              // what pam_exec runs: this binary
+	gateOffSaid bool                // the gate-off alert was recorded
+	run         sshgate.Runner      // loginctl, usermod, systemctl
+	sess        map[string]*session // live sessions by id
+	approved    map[string]bool     // session ids approved (orders, break-glass)
+	ended       map[string]bool     // session ids ordered ended
+	okUsers     map[string]bool     // new accounts approved
+	pausedUntil time.Time           // a pause token holds until then
+	uidSaid     map[string]uint32   // gray accounts whose bad uid was reported
 
 	unitMu sync.Mutex
 	units  map[string]string // unit → unit file hash, this sweep
@@ -615,6 +621,7 @@ func (a *agent) sweep() {
 		return
 	}
 	a.handle(s, detect.Sweep(s, pol))
+	a.sessions(s)
 }
 
 // wanted reports whether an event needs a look at the process behind it.

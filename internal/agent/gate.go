@@ -4,7 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
+	"time"
+
+	"xdr/internal/collect"
+	"xdr/internal/proc"
 
 	"xdr/internal/incident"
 	"xdr/internal/model"
@@ -46,4 +52,142 @@ func runCmd(name string, args ...string) error {
 
 func outputCmd(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
+}
+
+// session is what the agent keeps of a live session.
+type session struct {
+	first time.Time // when it was first seen or registered
+	said  bool      // its alert or pending incident was recorded
+	ended bool      // its end was recorded
+}
+
+// gateOn reports whether sessions are judged: a gate is configured and its
+// config could be rendered.
+func (a *agent) gateOn() bool { return a.cfg.SSH != nil && a.ssh != nil && !a.gateOffSaid }
+
+// paused reports whether a pause token holds now.
+func (a *agent) paused() bool { return a.now().Before(a.pausedUntil) }
+
+// sessions judges each logind session and acts on the verdicts; s is the
+// sweep's snapshot, for the fallback kill of a session's leader.
+func (a *agent) sessions(s *proc.Snapshot) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.gateOn() {
+		return
+	}
+	a.checkGrayUIDs()
+	list, err := sshgate.Sessions(a.root)
+	if err != nil {
+		a.logf("sessions: %v", err)
+		return
+	}
+	if a.sess == nil {
+		a.sess = map[string]*session{}
+	}
+	now := a.now()
+	p := sshgate.Policy{Cfg: a.cfg, BaseUsers: a.baseUsers(), Users: a.okUsers, Approved: a.approved, Killed: a.ended, Paused: a.paused(), Now: now}
+	live := map[string]bool{}
+	for _, ls := range list {
+		live[ls.ID] = true
+		st := a.sess[ls.ID]
+		if st == nil {
+			st = &session{first: now}
+			a.sess[ls.ID] = st
+		}
+		v, why := sshgate.Judge(ls, st.first, p)
+		in := incident.Incident{UID: ls.UID, User: ls.User, PID: ls.Leader, Detail: fmt.Sprintf("session %s from %s", ls.ID, ls.RemoteHost)}
+		if why != "" {
+			in.Detail += ": " + why
+		}
+		switch v {
+		case sshgate.Alert:
+			if !st.said {
+				in.Kind, in.Action, in.Severity = "session", "alert", model.SevMedium
+				if ls.User == a.cfg.SSH.Recovery || strings.HasPrefix(why, "user not in baseline") {
+					in.Severity = model.SevHigh
+				}
+				a.record(in)
+				st.said = true
+			}
+		case sshgate.Pending:
+			if !st.said {
+				in.Kind, in.Action, in.Severity = "session-pending", "alert", model.SevMedium
+				a.record(in)
+				st.said = true
+			}
+		case sshgate.End:
+			if st.ended {
+				continue
+			}
+			in.Kind, in.Action, in.Severity = "session-terminated", "killed", model.SevHigh
+			if err := sshgate.Terminate(a.run, ls.ID); err != nil {
+				in.Detail += "; loginctl: " + err.Error()
+				if !a.killLeader(s, ls.Leader) {
+					in.Action = "kill-failed"
+				}
+			}
+			a.record(in)
+			st.ended = true
+		}
+	}
+	for id := range a.sess {
+		if !live[id] {
+			delete(a.sess, id)
+		}
+	}
+}
+
+// killLeader is the fallback when logind cannot end a session: its leader's
+// process tree, scored services and the agent spared.
+func (a *agent) killLeader(s *proc.Snapshot, pid int) bool {
+	p := s.Procs[pid]
+	if p == nil || pid <= 1 {
+		return false
+	}
+	protect := func(q *proc.Proc) bool { return q.PID == a.pol.Self || a.pol.Guarded(s, q) }
+	_, err := a.kill(pid, p.Start, protect)
+	return err == nil
+}
+
+// baseUsers is the baseline's accounts by name.
+func (a *agent) baseUsers() map[string]uint32 {
+	m := map[string]uint32{}
+	if a.pol.Base != nil {
+		for _, acc := range a.pol.Base.Accounts {
+			if !acc.Bad {
+				m[acc.Name] = acc.UID
+			}
+		}
+	}
+	return m
+}
+
+// checkGrayUIDs reports a gray account whose uid is not its baseline uid,
+// or is 0: once for each bad uid.
+func (a *agent) checkGrayUIDs() {
+	data, err := collect.ReadFile(filepath.Join(a.root, "etc/passwd"), 1<<20)
+	if err != nil {
+		return
+	}
+	base := a.baseUsers()
+	if a.uidSaid == nil {
+		a.uidSaid = map[string]uint32{}
+	}
+	for _, acc := range collect.ParsePasswd(strings.NewReader(string(data))) {
+		if acc.Bad || !slices.Contains(a.cfg.GrayUsers, acc.Name) {
+			continue
+		}
+		was, known := base[acc.Name]
+		if acc.UID != 0 && (!known || acc.UID == was) {
+			delete(a.uidSaid, acc.Name)
+			continue
+		}
+		if said, ok := a.uidSaid[acc.Name]; ok && said == acc.UID {
+			continue
+		}
+		a.uidSaid[acc.Name] = acc.UID
+		a.record(incident.Incident{Kind: "account-uid", Action: "alert", Severity: model.SevCritical, UID: acc.UID, User: acc.Name,
+			Detail: fmt.Sprintf("protected account %s has uid %d (baseline %d)", acc.Name, acc.UID, was)})
+	}
 }

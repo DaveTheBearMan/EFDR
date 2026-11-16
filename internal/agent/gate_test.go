@@ -3,6 +3,8 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +65,64 @@ func TestAgent_SSHDriftRepaired(t *testing.T) {
 	got := r.kind("ssh-drift")
 	if len(got) != 1 || got[0].Severity != model.SevHigh || got[0].Detail != "/etc/pam.d/sshd restored" {
 		t.Fatalf("ssh-drift: %+v", got)
+	}
+}
+
+func sessionFile(t *testing.T, root, id, user, from string, leader int) {
+	testfs.File(t, root, "run/systemd/sessions/"+id, "USER="+user+"\nUID=1001\nSERVICE=sshd\nCLASS=user\nREMOTE_HOST="+from+"\nLEADER="+strconv.Itoa(leader)+"\n", 0o644)
+}
+
+func gateOn(t *testing.T) (*rig, *[][]string) {
+	r, ran := gateRig(t, &baseline.Baseline{
+		Files:    map[string]baseline.FileEntry{"/etc/ssh/sshd_config": {Content: []byte("UsePAM yes\n")}, "/etc/pam.d/sshd": {Content: []byte(pamBase)}},
+		Accounts: []baseline.Account{{Name: "root"}, {Name: "alice", UID: 1001}, {Name: "gray1", UID: 2001}},
+	})
+	r.snap = tree()
+	return r, ran
+}
+
+func terminates(ran [][]string) int {
+	n := 0
+	for _, c := range ran {
+		if c[0] == "loginctl" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAgentSessions_TerminateAfterGrace(t *testing.T) {
+	r, ran := gateOn(t)
+	sessionFile(t, r.root, "7", "alice", "192.0.2.7", 4242)
+	start := r.now
+	r.a.sessions(r.snap)
+	if got := r.kind("session-pending"); len(got) != 1 || got[0].User != "alice" || !strings.Contains(got[0].Detail, "7") {
+		t.Fatalf("pending: %+v", got)
+	}
+	r.now = start.Add(89 * time.Second)
+	r.a.sessions(r.snap)
+	if terminates(*ran) != 0 || len(r.kind("session-pending")) != 1 {
+		t.Fatalf("early: %v", *ran)
+	}
+	r.now = start.Add(90 * time.Second)
+	r.a.sessions(r.snap)
+	r.a.sessions(r.snap)
+	if terminates(*ran) != 1 || len(r.kind("session-terminated")) != 1 || r.kind("session-terminated")[0].Severity != model.SevHigh {
+		t.Fatalf("terminate: %v %+v", *ran, r.kind("session-terminated"))
+	}
+	testfs.Remove(t, r.root, "run/systemd/sessions/7")
+	r.a.sessions(r.snap)
+	if len(r.a.sess) != 0 {
+		t.Fatal("ended session not forgotten")
+	}
+}
+
+func TestAgentSessions_GrayUIDChanged(t *testing.T) {
+	r, _ := gateOn(t)
+	testfs.File(t, r.root, "etc/passwd", "root:x:0:0::/root:/bin/bash\ngray1:x:0:0::/home/gray1:/bin/bash\n", 0o644)
+	r.a.sessions(r.snap)
+	r.a.sessions(r.snap)
+	if got := r.kind("account-uid"); len(got) != 1 || got[0].Severity != model.SevCritical || got[0].User != "gray1" {
+		t.Fatalf("account-uid: %+v", got)
 	}
 }
