@@ -108,12 +108,14 @@ func (e ExecSSH) Run(ctx context.Context, addr, command string, stdin io.Reader)
 }
 
 // script is the whole of what runs on the box. It holds no value from the
-// controller's side: the host's files arrive as a tar on stdin.
+// controller's side, and no single quote (sudo's sh -c wraps it in two):
+// the host's files arrive as a tar on stdin.
 const script = `set -e
 d=$(mktemp -d)
-trap 'rm -rf "$d"' EXIT
+trap "rm -rf \"\$d\"" EXIT
 tar -x -f - -C "$d"
 mkdir -p /etc/xdr
+chattr -i -R /etc/xdr/fleet /etc/xdr/agent.json /etc/xdr/agent.json.sig 2>/dev/null || true
 rm -rf /etc/xdr/fleet
 mv "$d/fleet" /etc/xdr/fleet
 cp "$d/agent.json" /etc/xdr/agent.json
@@ -201,7 +203,7 @@ func Reinstall(ctx context.Context, dir string, cfg *Config, host string, ssh SS
 	}
 	cmd := script
 	if rc.User != "root" {
-		cmd = "sudo -n sh -c '" + script + "'" // script holds no single quote
+		cmd = "sudo -n sh -c '" + script + "'" // the script holds no single quote, which this wrapper needs
 	}
 	return ssh.Run(ctx, h.Addr, cmd, &buf)
 }

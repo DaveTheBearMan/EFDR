@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -135,6 +136,58 @@ func TestReinstall_Steps(t *testing.T) {
 	}
 	if err := Reinstall(context.Background(), dir, cfg, "web01", &fakeSSH{err: errors.New("boom")}, bin); err == nil {
 		t.Fatal("an ssh failure was swallowed")
+	}
+}
+
+func TestReinstall_RemoteCommand(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	for _, user := range []string{"root", "ops"} {
+		cfg.Reinstall.User = user
+		f := &fakeSSH{}
+		if err := Reinstall(context.Background(), dir, cfg, "web01", f, bin); err != nil {
+			t.Fatal(err)
+		}
+		cmd := f.calls[0].cmd
+		if out, err := exec.Command("sh", "-n", "-c", cmd).CombinedOutput(); err != nil {
+			t.Fatalf("%s: command is not well-formed: %v %s\n%s", user, err, out, cmd)
+		}
+		if user != "root" {
+			if !strings.HasPrefix(cmd, "sudo -n sh -c '") || !strings.HasSuffix(cmd, "'") {
+				t.Fatalf("sudo wrapper: %s", cmd)
+			}
+			// the wrapper is the only quoting: the script inside has none
+			if strings.Count(cmd, "'") != 2 {
+				t.Fatalf("script has single quotes inside the sudo wrapper: %s", cmd)
+			}
+			if !strings.Contains(cmd, `\$d`) && strings.Contains(cmd, "trap ") && !strings.Contains(cmd, `trap "rm -rf \$d"`) {
+				t.Fatalf("$d would expand early: %s", cmd)
+			}
+		}
+		if len(untar(t, f.calls[0].stdin)) == 0 || strings.Index(cmd, "mktemp") > strings.Index(cmd, "tar -x") {
+			t.Fatalf("%s: tar payload / order", user)
+		}
+	}
+}
+
+func TestReinstall_ClearsImmutable(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	f := &fakeSSH{}
+	if err := Reinstall(context.Background(), dir, cfg, "web01", f, bin); err != nil {
+		t.Fatal(err)
+	}
+	cmd := f.calls[0].cmd
+	ch := strings.Index(cmd, "chattr -i -R /etc/xdr/fleet /etc/xdr/agent.json /etc/xdr/agent.json.sig")
+	if ch < 0 {
+		t.Fatalf("no chattr -i of the old files: %s", cmd)
+	}
+	for _, op := range []string{"rm -rf /etc/xdr/fleet", `mv "$d/fleet"`, "cp \"$d/agent.json\" /etc/xdr/agent.json", "cp \"$d/agent.json.sig\""} {
+		i := strings.Index(cmd, op)
+		if i < 0 || i < ch {
+			t.Fatalf("%q at %d, not after chattr at %d", op, i, ch)
+		}
+	}
+	if !strings.Contains(cmd[ch:], "|| true") {
+		t.Fatal("chattr failure (not immutable, no chattr) must not abort")
 	}
 }
 
