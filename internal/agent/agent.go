@@ -647,6 +647,9 @@ func (a *agent) sweep() {
 		return
 	}
 	a.handle(s, detect.Sweep(s, pol))
+	a.mu.Lock()
+	a.purgeQuarantine()
+	a.mu.Unlock()
 	a.sessions(s)
 	a.accounts(s)
 }

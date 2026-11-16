@@ -41,6 +41,11 @@ func (a *agent) onOrder(o fleet.Order) {
 	}
 	a.initOrders()
 	switch o.Kind {
+	case "file":
+		if !o.Deleted {
+			a.fileOrder(o.Name, v.Verdict)
+		}
+		return
 	case "session":
 		// Session ids restart at every boot, and etcd replays what it
 		// holds: an order older than this boot is for another session.
