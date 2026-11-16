@@ -62,6 +62,7 @@ type Client struct {
 	queue   chan item
 	seq     atomic.Uint64
 	takeMu  sync.Mutex
+	up      atomic.Bool // a session with etcd is open
 	mu      sync.Mutex
 	version uint64 // the highest version accepted
 	raw     []byte // the envelope accepted at version
@@ -104,6 +105,9 @@ func (c *Client) Cached() (*rules.Set, error) {
 	c.mu.Unlock()
 	return s, nil
 }
+
+// Connected reports whether a session with etcd is open now.
+func (c *Client) Connected() bool { return c.up.Load() }
 
 // enqueue adds it, dropping the oldest item when the queue is full.
 func (c *Client) enqueue(it item) {
@@ -482,6 +486,7 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 		cli, err := c.dial()
 		if err == nil {
 			err = c.session(ctx, cli, func() {
+				c.up.Store(true)
 				locked(func() { up, upAt = true, time.Now() })
 			}, safeRules, safeIncident, safeHunt, safeOrder)
 			cli.Close()
@@ -489,6 +494,7 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 		if ctx.Err() != nil {
 			return
 		}
+		c.up.Store(false)
 		wasHealthy := false
 		locked(func() {
 			wasHealthy = healthy

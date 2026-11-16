@@ -74,6 +74,7 @@ type Options struct {
 // fleetLink is the agent's link to the controller (fleet.Client).
 type fleetLink interface {
 	Cached() (*rules.Set, error)
+	Connected() bool // a session with etcd is open
 	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request), onOrder func(fleet.Order))
 	Propose([]rules.Rule)
 	Report(incident.Incident)
@@ -116,16 +117,21 @@ type agent struct {
 	blocksOver int               // how many the table had no room for, last time
 	foreign    map[string]bool   // base chains of other tables already seen (nil: not looked yet)
 
-	fleet    fleetLink // nil: a standalone agent
-	mesh     meshLink  // nil: no peer links
-	hunts    *hunter   // nil: no hunts run here
-	search   func(context.Context, *hunt.Request) hunt.Result
-	baseHash func(string) bool      // a hash of the baseline; nil: none
-	selfHash string                 // this binary's hash; "": unknown
-	ruleSet  *rules.Set             // the last verified set, before the agent's own check
-	exeSize  func(*proc.Proc) int64 // nil: unknown
-	snap     *proc.Snapshot
-	snapAt   time.Time
+	fleet     fleetLink // nil: a standalone agent
+	heal      ladderState
+	linkSnap  linkSnap                                          // the network as first found, for the ladder
+	out       func(name string, args ...string) ([]byte, error) // command output; nil: exec
+	readFile  func(string) ([]byte, error)                      // nil: os.ReadFile
+	writeFile func(string, []byte) error                        // nil: os.WriteFile
+	mesh      meshLink                                          // nil: no peer links
+	hunts     *hunter                                           // nil: no hunts run here
+	search    func(context.Context, *hunt.Request) hunt.Result
+	baseHash  func(string) bool      // a hash of the baseline; nil: none
+	selfHash  string                 // this binary's hash; "": unknown
+	ruleSet   *rules.Set             // the last verified set, before the agent's own check
+	exeSize   func(*proc.Proc) int64 // nil: unknown
+	snap      *proc.Snapshot
+	snapAt    time.Time
 
 	ssh          *sshgate.Asserter                                     // nil: no SSH gate
 	gateExe      string                                                // what pam_exec runs: this binary
@@ -941,6 +947,7 @@ func Run(ctx context.Context, o Options) error {
 		go a.scanLoop(sctx, cfg.Scan.Interval.Duration, cfg.Scan.Full.Duration)
 	}
 
+	a.takeLinkSnap()
 	a.sweep()
 	sweeps, guards := time.NewTicker(sweepEvery), time.NewTicker(guardEvery)
 	defer sweeps.Stop()
@@ -969,6 +976,7 @@ func Run(ctx context.Context, o Options) error {
 			addrs := localAddrs()
 			local.Store(&addrs)
 			a.guard()
+			a.ladder(a.run)
 		case ev, ok := <-events:
 			if !ok {
 				events = nil

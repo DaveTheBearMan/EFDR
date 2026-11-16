@@ -28,9 +28,11 @@ type fakeFleet struct {
 	reported []incident.Incident
 	hunts    []*hunt.Request
 	running  chan struct{}
+	down     bool // etcd is not connected
 }
 
 func (f *fakeFleet) Cached() (*rules.Set, error) { return f.cached, nil }
+func (f *fakeFleet) Connected() bool             { return !f.down }
 func (f *fakeFleet) Run(ctx context.Context, _ func(*rules.Set), _ func(incident.Incident), _ func(*hunt.Request), _ func(fleet.Order)) {
 	close(f.running)
 	<-ctx.Done()

@@ -457,6 +457,22 @@ func (m *Mesh) watch(ctx context.Context, start time.Time) {
 	}
 }
 
+// Reachable is how many peers have beaten within the silent window: the
+// same test watch uses to call a peer silent. A peer never heard from does
+// not count.
+func (m *Mesh) Reachable() int {
+	now, n := time.Now(), 0
+	for _, p := range m.peers {
+		p.mu.Lock()
+		last := p.last
+		p.mu.Unlock()
+		if !last.IsZero() && now.Sub(last) < m.silentAfter {
+			n++
+		}
+	}
+	return n
+}
+
 // Run listens for peers and links to each until ctx is done.
 func (m *Mesh) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", m.cfg.Listen.String())

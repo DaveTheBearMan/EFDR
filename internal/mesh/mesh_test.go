@@ -365,3 +365,15 @@ func TestMesh_HuntFloodBounded(t *testing.T) {
 		t.Fatalf("%d hunts, %d drop alerts", len(h), len(kinds(ins, "hunt-dropped")))
 	}
 }
+
+func TestReachable(t *testing.T) {
+	now := time.Now()
+	m := &Mesh{silentAfter: 15 * time.Second, peers: map[netip.Addr]*peer{
+		netip.MustParseAddr("192.0.2.1"): {last: now.Add(-time.Second)},
+		netip.MustParseAddr("192.0.2.2"): {last: now.Add(-time.Minute)},
+		netip.MustParseAddr("192.0.2.3"): {},
+	}}
+	if n := m.Reachable(); n != 1 {
+		t.Fatalf("reachable %d, want 1", n)
+	}
+}

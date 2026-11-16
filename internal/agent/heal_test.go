@@ -1,0 +1,248 @@
+package agent
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"xdr/internal/config"
+	"xdr/internal/model"
+)
+
+const (
+	healNft = "table inet bad {\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n" +
+		"\t\tip saddr 192.0.2.7 drop # handle 4\n\t\ttcp dport 80 drop # handle 5\n\t}\n}\n"
+	healRoutes = "default via 10.0.0.1 dev eth0\nblackhole 192.0.2.7\n"
+)
+
+// healRig is a rig whose box is cut off: etcd down, no mesh peers. Commands
+// are faked: out answers by the command line, run records them.
+type healRig struct {
+	*rig
+	f    *fakeFleet
+	m    *fakeMesh
+	ran  []string
+	outs map[string]string
+	deny string
+}
+
+func newHealRig(t *testing.T) *healRig {
+	r, f := fleetRig(t)
+	m := &fakeMesh{}
+	r.a.mesh = m
+	r.a.cfg.Fleet = &config.Fleet{Endpoints: []string{"198.51.100.5:2379"}}
+	f.down = true
+	h := &healRig{rig: r, f: f, m: m, outs: map[string]string{
+		"nft -a list ruleset": healNft, "ip route": healRoutes,
+		"ss -H -ltn":                  "LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n",
+		"ip -o link show eth0":        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+		"ip -o -4 addr show dev eth0": "2: eth0 inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\n",
+		"ip route show default":       "default via 10.0.0.1 dev eth0\n",
+	}}
+	r.a.out = func(name string, args ...string) ([]byte, error) {
+		k := strings.Join(append([]string{name}, args...), " ")
+		if s, ok := h.outs[k]; ok {
+			return []byte(s), nil
+		}
+		return nil, fmt.Errorf("no such command %q", k)
+	}
+	r.a.readFile = func(p string) ([]byte, error) {
+		if strings.HasSuffix(p, "hosts.deny") {
+			return []byte(h.deny), nil
+		}
+		return nil, fmt.Errorf("no file %s", p)
+	}
+	r.a.writeFile = func(p string, b []byte) error { h.deny = string(b); return nil }
+	r.a.run = func(name string, args ...string) error {
+		h.ran = append(h.ran, strings.Join(append([]string{name}, args...), " "))
+		return nil
+	}
+	return h
+}
+
+func (h *healRig) step() {
+	h.a.ladder(h.a.run)
+}
+
+// cutOff makes the box isolated: both signals absent for ten seconds.
+func (h *healRig) cutOff() {
+	h.a.ladder(h.a.run) // starts the clock; not isolated yet
+	h.now = h.now.Add(11 * time.Second)
+}
+
+func TestIsolated_NeedsBothAndTenSeconds(t *testing.T) {
+	h := newHealRig(t)
+	a := h.a
+	if a.isolated() {
+		t.Fatal("isolated at once")
+	}
+	h.now = h.now.Add(9 * time.Second)
+	if a.isolated() {
+		t.Fatal("isolated after 9 s")
+	}
+	h.now = h.now.Add(2 * time.Second)
+	if !a.isolated() {
+		t.Fatal("not isolated after 11 s of no etcd and no peers")
+	}
+	// A peer comes back: the clock resets.
+	h.m.reach = 1
+	if a.isolated() {
+		t.Fatal("isolated with a peer reachable")
+	}
+	h.m.reach = 0
+	h.now = h.now.Add(9 * time.Second)
+	if a.isolated() {
+		t.Fatal("the clock did not restart")
+	}
+	// etcd back alone is enough to end it.
+	h.now = h.now.Add(5 * time.Second)
+	h.f.down = false
+	if a.isolated() {
+		t.Fatal("isolated with etcd connected")
+	}
+	// No mesh at all counts as no peers.
+	h.f.down = true
+	a.mesh = nil
+	a.isolated()
+	h.now = h.now.Add(11 * time.Second)
+	if !a.isolated() {
+		t.Fatal("a box with no mesh is not isolated")
+	}
+	// A standalone agent has no etcd to lose.
+	a.fleet = nil
+	if a.isolated() {
+		t.Fatal("a standalone agent is isolated")
+	}
+}
+
+func TestLadder_NothingWhenNotIsolated(t *testing.T) {
+	h := newHealRig(t)
+	h.f.down = false
+	for i := 0; i < 5; i++ {
+		h.now = h.now.Add(time.Minute)
+		h.step()
+	}
+	if len(h.ran) != 0 || len(h.fw.applied) != 0 || len(h.got) != 0 {
+		t.Fatalf("ran %q applied %d incidents %+v", h.ran, len(h.fw.applied), h.got)
+	}
+}
+
+func TestLadder_StepsInOrderAndBacksOff(t *testing.T) {
+	h := newHealRig(t)
+	h.deny = "ALL: 192.0.2.7\nsshd: 203.0.113.5\n"
+	h.cutOff()
+
+	// Step 1: the box's own table, and the isolation incident.
+	h.step()
+	if len(h.fw.applied) != 1 || len(h.ran) != 0 {
+		t.Fatalf("step 1: applied %d ran %q", len(h.fw.applied), h.ran)
+	}
+	if n := h.kind("isolation"); len(n) != 1 {
+		t.Fatalf("isolation incidents %+v", h.got)
+	}
+	// Before the backoff nothing runs.
+	h.now = h.now.Add(time.Second)
+	h.step()
+	if len(h.fw.applied) != 1 || len(h.ran) != 0 || len(h.kind("tamper")) != 0 {
+		t.Fatalf("ran inside the backoff: %q", h.ran)
+	}
+	// Step 2: the removals, exactly what was named.
+	h.now = h.now.Add(2 * time.Second)
+	h.step()
+	want := []string{
+		"nft delete rule inet bad input handle 4",
+		"ip route del blackhole 192.0.2.7",
+	}
+	if strings.Join(h.ran, "|") != strings.Join(want, "|") {
+		t.Fatalf("removals %q, want %q", h.ran, want)
+	}
+	if h.deny != "sshd: 203.0.113.5\n" {
+		t.Fatalf("hosts.deny %q", h.deny)
+	}
+	tamp := h.kind("tamper")
+	if len(tamp) != 3 {
+		t.Fatalf("tamper incidents %+v", tamp)
+	}
+	for _, in := range tamp {
+		if in.Action != "removed" || in.Severity != model.SevCritical {
+			t.Fatalf("incident %+v", in)
+		}
+	}
+	// The backoff doubled: 2 s later is too soon, 4 s is not. Step 3 finds
+	// the link whole, step 4 finds nothing on port 22 and restarts sshd.
+	h.ran = nil
+	h.now = h.now.Add(3 * time.Second)
+	h.step()
+	if len(h.ran) != 0 {
+		t.Fatalf("ran inside the doubled backoff: %q", h.ran)
+	}
+	h.now = h.now.Add(2 * time.Second)
+	h.step() // step 3
+	if len(h.ran) != 0 {
+		t.Fatalf("link was whole: %q", h.ran)
+	}
+	h.now = h.now.Add(8 * time.Second)
+	h.step() // step 4
+	if len(h.ran) != 1 || h.ran[0] != "systemctl restart ssh.service" {
+		t.Fatalf("step 4: %q", h.ran)
+	}
+	// Etcd is back: the end is said, listing what was removed.
+	h.f.down = false
+	h.now = h.now.Add(time.Second)
+	h.step()
+	over := h.kind("isolation-over")
+	if len(over) != 1 {
+		t.Fatalf("isolation-over %+v", h.got)
+	}
+	for _, s := range []string{"nft delete rule inet bad input handle 4", "ip route del blackhole 192.0.2.7", "ALL: 192.0.2.7"} {
+		if !strings.Contains(over[0].Detail, s) {
+			t.Fatalf("detail %q misses %q", over[0].Detail, s)
+		}
+	}
+	// Nothing more runs.
+	n := len(h.ran)
+	h.now = h.now.Add(time.Minute)
+	h.step()
+	if len(h.ran) != n || len(h.kind("isolation-over")) != 1 {
+		t.Fatal("ran after the isolation ended")
+	}
+}
+
+func TestLadder_ScoredPortAndSshdListening(t *testing.T) {
+	h := newHealRig(t)
+	h.outs["nft -a list ruleset"] = "table inet only {\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n\t\ttcp dport 80 drop # handle 5\n\t}\n}\n"
+	h.outs["ip route"] = "default via 10.0.0.1 dev eth0\n"
+	h.outs["ss -H -ltn"] = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
+	h.cutOff()
+	for i := 0; i < 8; i++ {
+		h.step()
+		h.now = h.now.Add(31 * time.Second)
+	}
+	if len(h.ran) != 0 {
+		t.Fatalf("ran %q: a scored rule was removed, or ssh restarted while it listened", h.ran)
+	}
+}
+
+func TestLadder_RestoresLinkAndRoute(t *testing.T) {
+	h := newHealRig(t)
+	h.a.linkSnap = linkSnap{Link: "eth0", Addr: "10.0.0.5/24", Via: "10.0.0.1"}
+	h.outs["ip -o link show eth0"] = "2: eth0: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n"
+	h.outs["ip -o -4 addr show dev eth0"] = ""
+	h.outs["ip route show default"] = ""
+	h.outs["nft -a list ruleset"] = ""
+	h.outs["ip route"] = ""
+	h.cutOff()
+	for i := 0; i < 3; i++ { // table, removals, link
+		h.step()
+		h.now = h.now.Add(31 * time.Second)
+	}
+	want := []string{
+		"ip link set eth0 up",
+		"ip addr add 10.0.0.5/24 dev eth0",
+		"ip route add default via 10.0.0.1 dev eth0",
+	}
+	if strings.Join(h.ran, "|") != strings.Join(want, "|") {
+		t.Fatalf("ran %q, want %q", h.ran, want)
+	}
+}

@@ -33,6 +33,7 @@ const (
 type meshLink interface {
 	PushHunt(r *hunt.Request, except netip.Addr)
 	PushRules()
+	Reachable() int // peers heard from lately
 }
 
 // hunter runs other boxes' hunts on this one, one at a time.

@@ -25,12 +25,19 @@ type fakeMesh struct {
 	mu     sync.Mutex
 	hunts  []*hunt.Request
 	pushes int
+	reach  int
 }
 
 func (m *fakeMesh) PushHunt(r *hunt.Request, _ netip.Addr) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hunts = append(m.hunts, r)
+}
+
+func (m *fakeMesh) Reachable() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reach
 }
 
 func (m *fakeMesh) PushRules() {
