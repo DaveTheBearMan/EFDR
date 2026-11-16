@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -28,6 +29,7 @@ type Watcher struct {
 	dirs     map[string]bool   // directories whose every entry is
 	byHandle map[string]string // a directory's file handle → its path
 	skipped  int
+	dropped  atomic.Uint64 // events lost: the kernel's queue overflowed, or the channel was full
 }
 
 const mask = unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_ATTRIB | unix.FAN_CREATE | unix.FAN_DELETE |
@@ -89,6 +91,12 @@ func (w *Watcher) Events() <-chan Event { return w.events }
 // Skipped is how many directories could not be marked.
 func (w *Watcher) Skipped() int { return w.skipped }
 
+// Dropped is how many events were lost so far: each overflow of the
+// kernel's queue counts one, as does each event the channel had no room for.
+func (w *Watcher) Dropped() uint64 { return w.dropped.Load() }
+
+func (w *Watcher) noteDrop() { w.dropped.Add(1) }
+
 // Close stops the watcher.
 func (w *Watcher) Close() error { return w.f.Close() }
 
@@ -119,7 +127,11 @@ func (w *Watcher) parse(buf []byte) {
 		}
 		dir, name := w.where(buf[off+int(md.Metadata_len) : end])
 		off = end
-		if md.Mask&unix.FAN_Q_OVERFLOW != 0 || dir == "" {
+		if md.Mask&unix.FAN_Q_OVERFLOW != 0 {
+			w.noteDrop()
+			continue
+		}
+		if dir == "" {
 			continue
 		}
 		full := dir
@@ -138,6 +150,7 @@ func (w *Watcher) parse(buf []byte) {
 		select {
 		case w.events <- Event{Path: full, Op: strings.Join(which, "+"), PID: int(md.Pid)}:
 		default: // a flood: the first of it was seen
+			w.noteDrop()
 		}
 	}
 }

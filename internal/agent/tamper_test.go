@@ -276,3 +276,66 @@ func TestTamper_PinnedFilesDeletedAreRewritten(t *testing.T) {
 		t.Fatal("acted while uninstalling")
 	}
 }
+
+// While its own uninstall runs the agent says nothing of the files going.
+func TestTamper_NothingWhileUninstalling(t *testing.T) {
+	r, _ := tamperRig(t, mk(800, 1, 1000, "/tmp/evil"))
+	r.a.uninstalled = true
+	r.a.onTamper(hit(800))
+	if len(r.got) != 0 || len(r.kills) != 0 {
+		t.Fatalf("%+v kills %v", r.got, r.kills)
+	}
+}
+
+// A pid missing from the snapshot costs a full /proc read at most every
+// 250 ms; one in between is an alert with the event's pid.
+func TestTamper_ProcReadRateLimited(t *testing.T) {
+	r, _ := tamperRig(t)
+	reads := r.reads
+	r.a.onTamper(hit(901))
+	r.a.onTamper(hit(902))
+	r.now = r.now.Add(100 * time.Millisecond)
+	r.a.onTamper(hit(903))
+	if r.reads-reads != 1 {
+		t.Fatalf("%d reads", r.reads-reads)
+	}
+	got := r.kind("tamper")
+	if len(got) != 3 || got[1].Action != "alert" || got[1].PID != 902 || got[2].PID != 903 {
+		t.Fatalf("%+v", got)
+	}
+	r.now = r.now.Add(200 * time.Millisecond)
+	r.a.onTamper(hit(904))
+	if r.reads-reads != 2 {
+		t.Fatalf("after 250 ms: %d reads", r.reads-reads)
+	}
+}
+
+// Events the kernel (or the channel) dropped are one alert a minute.
+func TestTamper_DroppedEventsReportedOncePerMinute(t *testing.T) {
+	r, _ := tamperRig(t)
+	var dropped uint64
+	r.a.tamperDropped = func() uint64 { return dropped }
+	r.a.tamperDrops()
+	if len(r.got) != 0 {
+		t.Fatalf("%+v", r.got)
+	}
+	dropped = 5
+	r.a.tamperDrops()
+	dropped = 9
+	r.now = r.now.Add(10 * time.Second)
+	r.a.tamperDrops()
+	got := r.kind("tamper")
+	if len(got) != 1 || got[0].Action != "alert" || !strings.Contains(got[0].Detail, "5 ") {
+		t.Fatalf("%+v", got)
+	}
+	r.now = r.now.Add(time.Minute)
+	r.a.tamperDrops()
+	if got := r.kind("tamper"); len(got) != 2 || !strings.Contains(got[1].Detail, "4 ") {
+		t.Fatalf("%+v", got)
+	}
+	r.now = r.now.Add(time.Minute)
+	r.a.tamperDrops()
+	if n := len(r.kind("tamper")); n != 2 {
+		t.Fatalf("no new drops, yet %d", n)
+	}
+}

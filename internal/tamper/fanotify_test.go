@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 func next(t *testing.T, w *Watcher, within time.Duration) (Event, bool) {
@@ -90,5 +93,19 @@ func TestKernel_TamperWatch(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("a delete of a watched file raised nothing")
+	}
+}
+
+// The kernel's queue overflow, and an event the full channel had no room
+// for, are counted.
+func TestParse_CountsDrops(t *testing.T) {
+	w := &Watcher{events: make(chan Event), paths: map[string]bool{}, dirs: map[string]bool{"/d": true}, byHandle: map[string]string{}}
+	md := unix.FanotifyEventMetadata{Mask: unix.FAN_Q_OVERFLOW, Fd: -1}
+	md.Event_len = uint32(unsafe.Sizeof(md))
+	md.Metadata_len = uint16(md.Event_len)
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&md)), md.Event_len)
+	w.parse(append(append([]byte{}, b...), b...))
+	if w.Dropped() != 2 {
+		t.Fatalf("overflow: %d", w.Dropped())
 	}
 }

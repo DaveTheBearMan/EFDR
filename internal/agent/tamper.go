@@ -24,6 +24,8 @@ const (
 	tamperGap  = time.Second
 	maxChain   = 16
 	maxSeenKey = 256
+	procGap    = 250 * time.Millisecond // at most one full /proc read per this, for tamper events
+	dropsGap   = time.Minute            // at most one alert of lost tamper events per this
 )
 
 // execInfo is what the sensor saw of a process starting.
@@ -78,6 +80,9 @@ func (a *agent) ownExe(exe, hash string) bool {
 func (a *agent) onTamper(ev tamper.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.uninstalled {
+		return // its own uninstall removing the files
+	}
 	pid := ev.PID
 	if pid <= 0 || pid == a.pol.Self {
 		return
@@ -87,11 +92,19 @@ func (a *agent) onTamper(ev tamper.Event) {
 	if t, ok := a.tamperSeen[key]; ok && now.Sub(t) < tamperGap {
 		return
 	}
+	// A pid the snapshot lacks costs a full /proc read, at most every
+	// procGap: a flood of events must not become a flood of reads. One in
+	// between is judged on what is known (the exec cache) and, its process
+	// unseen, is an alert with the event's pid.
 	snap := a.snap
-	if snap == nil || snap.Procs[pid] == nil {
+	if (snap == nil || snap.Procs[pid] == nil) && now.Sub(a.tamperRead) >= procGap {
+		a.tamperRead = now
 		if s, err := a.read(); err == nil && s != nil {
 			snap = s
 		}
+	}
+	if snap == nil {
+		snap = &proc.Snapshot{}
 	}
 	var actor *proc.Proc
 	known := false
@@ -189,6 +202,7 @@ func (a *agent) startTamper(ctx context.Context) {
 	if n := w.Skipped(); n > 0 {
 		a.logf("tamper: %d directories could not be watched", n)
 	}
+	a.tamperDropped = w.Dropped
 	go func() { <-ctx.Done(); w.Close() }()
 	go func() {
 		for ev := range w.Events() {
@@ -283,4 +297,23 @@ func (a *agent) keepPinned() {
 		in.Action, in.Severity, in.Detail = "alert", model.SevCritical, in.Detail+": "+err.Error()
 	}
 	a.record(in)
+}
+
+// tamperDrops reports the tamper events the watcher lost (the kernel's queue
+// overflowed, or the agent fell behind), at most one alert per dropsGap:
+// what they were is not known, only that changes went unseen.
+func (a *agent) tamperDrops() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.tamperDropped == nil || a.uninstalled {
+		return
+	}
+	n := a.tamperDropped()
+	now := a.now()
+	if n <= a.dropsSeen || !a.dropsSaid.IsZero() && now.Sub(a.dropsSaid) < dropsGap {
+		return
+	}
+	a.record(incident.Incident{Kind: "tamper", Action: "alert", Severity: model.SevHigh,
+		Detail: fmt.Sprintf("%d tamper events lost (fanotify queue overflow or a flood): changes to the installed files went unseen", n-a.dropsSeen)})
+	a.dropsSeen, a.dropsSaid = n, now
 }
