@@ -46,6 +46,11 @@ uss() {
   local u=$1; shift
   ssh -F "$SSHCFG" -n -i "$OUT/key" -o IdentitiesOnly=yes -o ControlMaster=no -o ControlPath=none -l "$u" "$VM" "$@"
 }
+# ussin USER CMD: uss with this shell's stdin (a token kept out of argv).
+ussin() {
+  local u=$1; shift
+  ssh -F "$SSHCFG" -i "$OUT/key" -o IdentitiesOnly=yes -o ControlMaster=no -o ControlPath=none -l "$u" "$VM" "$@"
+}
 # alive PID: the background login PID still runs.
 alive() { kill -0 "$1" 2>/dev/null; }
 
@@ -153,7 +158,7 @@ kill $p 2>/dev/null
 
 echo "== own-session-breakglass"
 mark
-uss alice "/usr/local/sbin/xdr breakglass '$APPROVE' && sleep 60" > "$OUT/bg.out" 2>&1 & p=$!; pids+=($p)
+printf '%s\n' "$APPROVE" | ussin alice "/usr/local/sbin/xdr breakglass - && sleep 60" > "$OUT/bg.out" 2>&1 & p=$!; pids+=($p)
 sleep $((GRACE + 10))
 if alive $p && wait_inc 2 breakglass "" "'approve-session' in i.get('detail', '')"; then ok own-session-breakglass
 else fail own-session-breakglass "alive? $(alive $p && echo yes || echo no); $(cat "$OUT/bg.out"); $(x grep -h breakglass $LOG)"; fi
@@ -183,7 +188,7 @@ stop_agent
 if uss alice true 2>/dev/null; then fail agent-dead "alice got in with the agent dead"
 elif ! uss xdrrecover true; then fail agent-dead "recovery locked out"
 else
-  out=$(uss xdrrecover /usr/local/sbin/xdr breakglass "$PAUSE")
+  out=$(printf '%s\n' "$PAUSE" | ussin xdrrecover /usr/local/sbin/xdr breakglass -)
   if ! grep -q 'agent down: token spooled' <<<"$out"; then fail agent-dead "breakglass: $out"
   elif ! uss alice true; then fail agent-dead "alice still refused with a pause token spooled"
   else ok agent-dead; fi

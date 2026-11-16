@@ -11,6 +11,7 @@ VM_MEM=${VM_MEM:-768MiB}
 JXDR=bin/xdr
 
 x() { lxc exec "$VM" -- "$@"; }
+xin() { lxc exec "$VM" -- "$@"; } # x with stdin, for secrets kept out of argv
 # push SRC PATH MODE: copy a local file to PATH on the box.
 push() { lxc file push "$1" "$VM$2" --mode "$3"; }
 # jb CMD...: run on the jump box, which is here.

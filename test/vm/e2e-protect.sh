@@ -361,7 +361,7 @@ mark
 bin/xdr controller mint-breakglass --dir "$CTL" --hosts e2e --action uninstall --from "$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%SZ)" \
   --every 2h --out "$OUT/tok" >/dev/null || exit 1
 tok=$(cat "$OUT"/tok/*.tok)
-uout=$(x /usr/local/sbin/xdr breakglass "$tok" 2>&1)
+uout=$(printf '%s\n' "$tok" | xin /usr/local/sbin/xdr breakglass - 2>&1)
 gone_all() {
   x sh -c "for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF $IBASE; do [ -e \$f ] && exit 1; done; [ ! -e /var/lib/xdr/backup ]" &&
     ! x nft list table inet xdr >/dev/null 2>&1 &&

@@ -232,7 +232,7 @@ else ok creds; fi
 
 echo "== breakglass"
 tok=$(capi POST /api/breakglass '{"host": "e2e", "action": "pause", "minutes": 30}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
-out=$(x /usr/local/sbin/xdr breakglass "$tok" 2>&1)
+out=$(printf '%s\n' "$tok" | xin /usr/local/sbin/xdr breakglass - 2>&1)
 if [ -z "$tok" ]; then fail breakglass "no token"
 elif ! grep -q 'pause' <<<"$out"; then fail breakglass "the box did not take it: $out"
 elif [ "$(code -b "$CJ" -X POST -H 'X-XDR: 1' -H 'Content-Type: application/json' -d '{"host":"nope","action":"pause","minutes":30}' "$BASEURL/api/breakglass")" != 400 ]; then fail breakglass "a token for a host that is not enrolled"

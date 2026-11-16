@@ -48,6 +48,8 @@ SSHCFG=$SSHDIR/config
 # rsh HOST CMD...: CMD's words, quoted, run by root's shell on HOST.
 rsh() { local h=$1; shift; ssh -F "$SSHCFG" "$h" "$(printf '%q ' "$@")" </dev/null; }
 x() { rsh "$VM" "$@"; }
+# xin CMD...: x with this shell's stdin, for secrets kept out of argv.
+xin() { ssh -F "$SSHCFG" "$VM" "$(printf '%q ' "$@")"; }
 # push SRC PATH MODE: copy a local file to PATH on the box.
 push() { ssh -F "$SSHCFG" "$VM" "cat > '$2.new' && chmod $3 '$2.new' && mv '$2.new' '$2'" < "$1"; }
 jb() { rsh "$JUMP" "$@"; }
