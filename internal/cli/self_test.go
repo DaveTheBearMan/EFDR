@@ -12,6 +12,7 @@ import (
 	"xdr/internal/breakglass"
 	"xdr/internal/install"
 	"xdr/internal/rules"
+	"xdr/internal/sshgate"
 )
 
 type fakeSys struct {
@@ -88,6 +89,9 @@ func TestGuardCLI_NeedsAUnit(t *testing.T) {
 func uninstallRig(t *testing.T) (string, *fakeSys, func(host, action string, nb, exp time.Time) string) {
 	t.Helper()
 	l, f := selfRig(t)
+	old := gateSocket
+	gateSocket = filepath.Join(t.TempDir(), "none.sock") // the agent is dead
+	t.Cleanup(func() { gateSocket = old })
 	ctl, bundle := filepath.Join(t.TempDir(), "ctl"), filepath.Join(t.TempDir(), "fleet")
 	var so, se bytes.Buffer
 	if code := Run([]string{"controller", "init", "--dir", ctl, "--name", "192.0.2.7"}, &so, &se); code != 0 {
@@ -153,5 +157,21 @@ func TestUninstallCLI_ReleasesTheGate(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(pam); string(b) != base {
 		t.Fatalf("pam.d/sshd:\n%s", b)
+	}
+}
+
+// With the agent alive the CLI refuses: the agent uninstalls itself, from
+// the token sent with `xdr breakglass`.
+func TestUninstallCLI_AgentAliveRefuses(t *testing.T) {
+	_, f, mint := uninstallRig(t)
+	gateSocket = serveGate(t, func(sshgate.Msg) sshgate.Reply { return sshgate.Reply{} })
+	now := time.Now()
+	var so, se bytes.Buffer
+	code := Run([]string{"uninstall", "--token", mint("web01", "uninstall", now.Add(-time.Minute), now.Add(time.Hour))}, &so, &se)
+	if code == 0 || !strings.Contains(se.String(), "xdr breakglass") {
+		t.Fatalf("exit %d %q", code, se.String())
+	}
+	if len(f.cmds) != 0 {
+		t.Fatalf("ran %v", f.cmds)
 	}
 }

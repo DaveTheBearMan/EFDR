@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -95,7 +97,9 @@ func guardCmd(args []string, stdout, stderr io.Writer) error {
 }
 
 // uninstallCmd is `xdr uninstall --token T [--dir FLEETDIR]`: for a dead
-// agent. The token is checked here, with the fleet bundle's rule key and
+// agent. With the agent alive (its gate socket answers) it refuses: the
+// token goes to the agent with `xdr breakglass`, and the agent uninstalls
+// itself, so nothing here races its self-healing. The token is checked here, with the fleet bundle's rule key and
 // this box's certificate name; it never reaches a shell. There is no ledger
 // here: a token is not marked used, so within its window it can be replayed
 // by anyone who holds it and is root on this box (the install is gone after
@@ -110,6 +114,10 @@ func uninstallCmd(args []string, stdout, stderr io.Writer) error {
 	if *tok == "" {
 		fmt.Fprint(stderr, "xdr uninstall: --token is required\n")
 		return errUsage
+	}
+	if c, err := net.DialTimeout("unix", gateSocket, time.Second); err == nil {
+		c.Close()
+		return errors.New("the agent is running; use `xdr breakglass <token>` instead (the agent uninstalls itself)")
 	}
 	pub, err := rules.LoadPublic(filepath.Join(*dir, "rules.pub"))
 	if err != nil {
