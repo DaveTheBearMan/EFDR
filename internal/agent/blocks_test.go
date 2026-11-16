@@ -10,6 +10,7 @@ import (
 
 	"xdr/internal/model"
 	"xdr/internal/rules"
+	"xdr/internal/testfs"
 )
 
 func remoteRule(addr string, port uint16, proto string) rules.Rule {
@@ -111,5 +112,48 @@ func TestReload_RefusesPinChange(t *testing.T) {
 	next.DNS.Pin = true
 	if err := r.a.reload(&next); err == nil || !strings.Contains(err.Error(), "dns.pin") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A box pinned by a run with dns.pin on must come back when the agent
+// starts with it off: otherwise resolv.conf points at a stub nobody runs.
+func TestDNS_PinOffRestoresPinnedFiles(t *testing.T) {
+	r := newRig(t)
+	testfs.File(t, r.root, "etc/hosts", "127.0.0.1 localhost\n10.9.9.9 appserver\n", 0o644)
+	testfs.File(t, r.root, "etc/nsswitch.conf", "hosts: files dns\n", 0o644)
+	testfs.File(t, r.root, "run/systemd/resolve/stub-resolv.conf", "nameserver 127.0.0.53\n", 0o644)
+	testfs.Symlink(t, r.root, "etc/resolv.conf", "../run/systemd/resolve/stub-resolv.conf")
+	r.a.cfg.DNS.Pin = true
+	r.a.assert(false)
+	if b, _ := os.ReadFile(filepath.Join(r.root, "etc/hosts")); strings.Contains(string(b), "appserver") {
+		t.Fatal("not pinned")
+	}
+	r.a.cfg.DNS.Pin = false // the next run of the agent, as its config now says
+	r.a.assert(false)
+	if b, _ := os.ReadFile(filepath.Join(r.root, "etc/hosts")); !strings.Contains(string(b), "appserver") {
+		t.Fatalf("hosts not restored: %q", b)
+	}
+	if target, err := os.Readlink(filepath.Join(r.root, "etc/resolv.conf")); err != nil || target != "../run/systemd/resolve/stub-resolv.conf" {
+		t.Fatalf("resolv.conf: %q %v", target, err)
+	}
+	got := r.kind("dns-files")
+	if len(got) != 3 || got[0].Action != "repaired" || !strings.Contains(got[0].Detail, "restored") {
+		t.Fatalf("dns-files: %+v", got)
+	}
+	r.a.assert(false)
+	r.a.guard()
+	if len(r.kind("dns-files")) != 3 {
+		t.Fatal("restored again")
+	}
+}
+
+func TestDNS_PinnedWithoutBackupAlertsOnce(t *testing.T) {
+	r := newRig(t)
+	testfs.File(t, r.root, "etc/resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n", 0o644)
+	r.a.guard()
+	r.a.guard()
+	got := r.kind("dns-files")
+	if len(got) != 1 || got[0].Action != "alert" || got[0].Severity != model.SevHigh || !strings.Contains(got[0].Detail, "no backup") {
+		t.Fatalf("dns-files: %+v", got)
 	}
 }

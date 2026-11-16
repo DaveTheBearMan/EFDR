@@ -101,6 +101,7 @@ func newRig(t *testing.T) *rig {
 		fw:    r.fw,
 		now:   func() time.Time { return r.now },
 		root:  r.root,
+		state: filepath.Join(r.root, "var/lib/xdr"),
 		netns: netns,
 		users: map[uint32]string{0: "root", 1000: "alice", 2001: "gray1"},
 		logf:  func(string, ...any) {},

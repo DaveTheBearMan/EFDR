@@ -145,6 +145,7 @@ type agent struct {
 	disabled     map[string]bool                                       // accounts the agent locked
 	userSaid     map[string]bool                                       // new accounts already alerted on
 	recoverySaid bool                                                  // recovery-missing was recorded
+	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	runIn        func(stdin []byte, name string, args ...string) error // chpasswd
 
 	unitMu sync.Mutex
@@ -473,8 +474,27 @@ func (a *agent) assert(report bool) {
 	report = report && pinned == a.pinned
 	var changed []string
 	var err error
+	backup := filepath.Join(a.state, "dns-orig")
 	if a.cfg.DNS.Pin {
+		if serr := dnsguard.Save(a.root, backup); serr != nil {
+			a.record(incident.Incident{Kind: "dns-files", Action: "alert", Severity: model.SevMedium, Detail: "the files to be pinned were not saved: " + serr.Error()})
+		}
 		changed, err = dnsguard.Assert(a.root, a.cfg, now)
+	} else {
+		// An earlier run pinned the box: put it back, or name resolution
+		// stays pointed at a stub nobody runs.
+		restored, rerr := dnsguard.Restore(a.root, backup)
+		for _, path := range restored {
+			a.record(incident.Incident{Kind: "dns-files", Action: "repaired", Severity: model.SevMedium, Detail: path + " restored: dns.pin is off"})
+		}
+		if rerr != nil {
+			a.record(incident.Incident{Kind: "dns-files", Action: "alert", Severity: model.SevHigh, Detail: "restoring the pinned files: " + rerr.Error()})
+		}
+		if len(restored) == 0 && rerr == nil && !a.pinSaid && dnsguard.LooksPinned(a.root) {
+			a.pinSaid = true
+			a.record(incident.Incident{Kind: "dns-files", Action: "alert", Severity: model.SevHigh,
+				Detail: "the resolver files are pinned (by an earlier agent) with no backup and dns.pin is off: restore /etc/resolv.conf, /etc/hosts and /etc/nsswitch.conf by hand"})
+		}
 	}
 	if err == nil {
 		a.pinned = pinned

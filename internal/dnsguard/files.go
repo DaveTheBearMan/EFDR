@@ -73,7 +73,9 @@ func current(full string) (content []byte, ok bool) {
 	return content, st.Mode().Perm() == fileMode
 }
 
-func replace(full string, content []byte) error {
+func replace(full string, content []byte) error { return replaceMode(full, content, fileMode) }
+
+func replaceMode(full string, content []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
@@ -84,7 +86,7 @@ func replace(full string, content []byte) error {
 	defer os.Remove(tmp.Name()) // a no-op once renamed
 	_, err = tmp.Write(content)
 	if err == nil {
-		err = tmp.Chmod(fileMode)
+		err = tmp.Chmod(mode)
 	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr

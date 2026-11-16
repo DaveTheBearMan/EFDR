@@ -214,3 +214,55 @@ func TestAssert_HostsWithoutHostName(t *testing.T) {
 		t.Fatalf("hosts:\n%s", got)
 	}
 }
+
+func TestSaveRestore_PutsTheBoxBack(t *testing.T) {
+	root := etc(t)
+	backup := filepath.Join(t.TempDir(), "dns-orig")
+	hosts0, ns0 := read(t, root, "/etc/hosts"), read(t, root, "/etc/nsswitch.conf")
+	if err := Save(root, backup); err != nil {
+		t.Fatal(err)
+	}
+	assert(t, root, cfg())
+	if !LooksPinned(root) {
+		t.Fatal("not pinned after Assert")
+	}
+	// Saving again, with the box pinned, must not keep the pinned files as the originals.
+	if err := Save(root, backup); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := Restore(root, backup)
+	if err != nil || len(changed) != 3 {
+		t.Fatalf("changed %v, err %v", changed, err)
+	}
+	if got := read(t, root, "/etc/hosts"); got != hosts0 {
+		t.Errorf("hosts:\n%s", got)
+	}
+	if got := read(t, root, "/etc/nsswitch.conf"); got != ns0 {
+		t.Errorf("nsswitch:\n%s", got)
+	}
+	target, err := os.Readlink(filepath.Join(root, "/etc/resolv.conf"))
+	if err != nil || target != "../run/systemd/resolve/stub-resolv.conf" {
+		t.Errorf("resolv.conf: %q %v", target, err)
+	}
+	if LooksPinned(root) {
+		t.Error("still pinned")
+	}
+	if _, err := os.Stat(backup); err == nil {
+		t.Error("backup left behind")
+	}
+	if changed, err := Restore(root, backup); err != nil || changed != nil {
+		t.Errorf("restore with no backup: %v %v", changed, err)
+	}
+}
+
+func TestSave_PinnedBoxHasNoBackup(t *testing.T) {
+	root := etc(t)
+	assert(t, root, cfg()) // an earlier agent pinned it, saving nothing
+	backup := filepath.Join(t.TempDir(), "dns-orig")
+	if err := Save(root, backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(backup); err == nil {
+		t.Fatal("pinned files were saved as the originals")
+	}
+}
