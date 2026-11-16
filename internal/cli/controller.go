@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"xdr/internal/config"
+	"xdr/internal/console"
 	"xdr/internal/controller"
 	"xdr/internal/incident"
 	"xdr/internal/pki"
@@ -25,7 +28,7 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds\n")
+		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|console-password|mint-breakglass|approve-session|kill-session|approve-user|rotate|creds\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
@@ -120,6 +123,28 @@ func controllerCmd(args []string, stdout, stderr io.Writer) error {
 		return rotateCmd(rest, stdout, stderr)
 	case "creds":
 		return credsCmd(rest, stdout, stderr)
+	case "console-password":
+		fs := flags("controller console-password", stderr)
+		dir := fs.String("dir", "", "controller directory")
+		if err := parse(fs, rest); err != nil {
+			return err
+		}
+		if *dir == "" {
+			fmt.Fprint(stderr, "xdr controller console-password: --dir is required (the password is read from stdin)\n")
+			return errUsage
+		}
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 1025))
+		if err != nil {
+			return err
+		}
+		pw := strings.TrimRight(string(b), "\r\n")
+		if len(pw) > 1024 {
+			return fmt.Errorf("the password is over 1024 characters")
+		}
+		if err := console.SetPassword(*dir, pw); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "console password set in %s/console.json\n", *dir)
 	case "mint-breakglass":
 		return mintCmd(rest, stdout, stderr)
 	case "sign-config":
@@ -190,7 +215,17 @@ func controllerRun(dir, cfgPath string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	log, err := incident.Open(filepath.Join(dir, "incidents.jsonl"), time.Minute)
+	logPath := filepath.Join(dir, "incidents.jsonl")
+	var view *console.State
+	if cfg.Console != nil {
+		if view, err = console.NewState(dir, time.Now); err != nil {
+			return err
+		}
+		if err := view.LoadLog(logPath); err != nil {
+			fmt.Fprintf(stdout, "console: reading the incident log: %v\n", err)
+		}
+	}
+	log, err := incident.Open(logPath, time.Minute)
 	if err != nil {
 		return err
 	}
@@ -198,12 +233,18 @@ func controllerRun(dir, cfgPath string, stdout io.Writer) error {
 	log.OnWrite = func(in incident.Incident) {
 		fmt.Fprint(stdout, printable(in.Host, false)+" ")
 		printIncidents(stdout, []incident.Incident{in})
+		if view != nil {
+			view.Feed(in)
+		}
 	}
 	ctl, err := controller.New(dir, c, guard, key, log)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "controller: listening on %s, %d hosts enrolled, rules version %d\n", cfg.Listen, len(hosts), ctl.Current().Version)
+	if view != nil {
+		startConsole(ctx, dir, cfg, c, key, ctl, view, stdout)
+	}
 	return ctl.Run(ctx)
 }
 
@@ -278,4 +319,27 @@ func rulesCmd(args []string, stdout, stderr io.Writer) error {
 			r.Seen.UTC().Format(time.RFC3339), printable(r.Exe, false))
 	}
 	return nil
+}
+
+// startConsole serves the web console in the background. A console that
+// cannot start (no password set, the address taken) is said so and the
+// controller goes on without it.
+func startConsole(ctx context.Context, dir string, cfg *controller.Config, c *clientv3.Client, key ed25519.PrivateKey, ctl *controller.Controller, view *console.State, stdout io.Writer) {
+	if _, err := os.Stat(filepath.Join(dir, "console.json")); err != nil {
+		fmt.Fprintln(stdout, "console: not started: no password set (run `xdr controller console-password --dir "+dir+"`)")
+		return
+	}
+	l, err := net.Listen("tcp", cfg.Console.Listen)
+	if err != nil {
+		fmt.Fprintf(stdout, "console: not started: %v\n", err)
+		return
+	}
+	act := &console.Actions{Dir: dir, Client: func() (*clientv3.Client, error) { return c, nil }, Cfg: cfg, Key: key, State: view, Now: time.Now}
+	srv := console.NewServer(dir, func() console.View { return view.View(ctl.Hosts(), ctl.Current()) }, act, time.Now, os.Stderr)
+	fmt.Fprintf(stdout, "console: https://%s\n", l.Addr())
+	go func() {
+		if err := console.Serve(ctx, l, dir, srv); err != nil {
+			fmt.Fprintf(stdout, "console: stopped: %v\n", err)
+		}
+	}()
 }

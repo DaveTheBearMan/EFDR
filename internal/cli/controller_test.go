@@ -13,6 +13,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 
+	"xdr/internal/console"
 	"xdr/internal/controller"
 	"xdr/internal/fleet"
 	"xdr/internal/fleettest"
@@ -125,5 +126,60 @@ func TestDisableHostCLI(t *testing.T) {
 	}
 	if code := Run([]string{"controller", "disable-host", "--dir", f.Dir, "--host", "nope"}, &so, &se); code == 0 {
 		t.Fatal("an unenrolled host was disabled")
+	}
+}
+
+func TestConsolePasswordCLI(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ctl")
+	var so, se bytes.Buffer
+	if code := Run([]string{"controller", "init", "--dir", dir, "--name", "127.0.0.1"}, &so, &se); code != 0 {
+		t.Fatal(se.String())
+	}
+	stdin := func(s string) {
+		f, err := os.CreateTemp(t.TempDir(), "stdin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteString(s)
+		f.Seek(0, 0)
+		old := os.Stdin
+		os.Stdin = f
+		t.Cleanup(func() { os.Stdin = old; f.Close() })
+	}
+	stdin("short\n")
+	if code := Run([]string{"controller", "console-password", "--dir", dir}, &so, &se); code == 0 || !strings.Contains(se.String(), "at least 12") {
+		t.Fatalf("a short password: %d %q", code, se.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "console.json")); err == nil {
+		t.Fatal("console.json written for a refused password")
+	}
+	se.Reset()
+	stdin("a long enough passphrase\n")
+	if code := Run([]string{"controller", "console-password", "--dir", dir}, &so, &se); code != 0 {
+		t.Fatalf("exit %d %q", code, se.String())
+	}
+	st, err := os.Stat(filepath.Join(dir, "console.json"))
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("console.json: %v %v", st, err)
+	}
+	if !console.CheckPassword(dir, "a long enough passphrase") || console.CheckPassword(dir, "a long enough passphrase\n") {
+		t.Fatal("the stored hash does not verify the password given (without its newline)")
+	}
+}
+
+func TestControllerConfig_Console(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "controller.json")
+	os.WriteFile(p, []byte(`{"listen":"127.0.0.1:2379","console":{"listen":"127.0.0.1:8443"}}`), 0o600)
+	c, err := controller.LoadConfig(p)
+	if err != nil || c.Console == nil || c.Console.Listen != "127.0.0.1:8443" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	os.WriteFile(p, []byte(`{"listen":"127.0.0.1:2379","console":{"listen":"nonsense"}}`), 0o600)
+	if _, err := controller.LoadConfig(p); err == nil {
+		t.Fatal("a bad console listen address was accepted")
+	}
+	os.WriteFile(p, []byte(`{"listen":"127.0.0.1:2379"}`), 0o600)
+	if c, err = controller.LoadConfig(p); err != nil || c.Console != nil {
+		t.Fatalf("no console: %+v %v", c, err)
 	}
 }

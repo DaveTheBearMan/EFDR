@@ -230,3 +230,23 @@ func TestState_Bounded(t *testing.T) {
 		t.Fatalf("state file %d bytes", st.Size())
 	}
 }
+
+func TestState_LoadLog(t *testing.T) {
+	s, _, dir := newState(t)
+	path := filepath.Join(dir, "incidents.jsonl")
+	var b strings.Builder
+	b.WriteString(`{"time":"2026-11-16T12:00:00Z","host":"web01","kind":"session-pending","action":"alert","severity":"high","detail":"session 7 from 192.0.2.7 (ends in 1m30s)","user":"alice"}` + "\n")
+	b.WriteString("not json\n")
+	b.WriteString(`{"time":"2026-11-16T12:00:01Z","host":"web01","kind":"egress","action":"killed","severity":"high","detail":"tcp to 203.0.113.9:4444"}` + "\n")
+	os.WriteFile(path, []byte(b.String()), 0o600)
+	if err := s.LoadLog(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LoadLog(filepath.Join(dir, "none.jsonl")); err != nil {
+		t.Fatalf("a missing log: %v", err)
+	}
+	v := s.View(nil, nil)
+	if s.Len() != 2 || approval(v, "s:web01:7") == nil || v.Summary.Killed != 1 {
+		t.Fatalf("len %d, %+v", s.Len(), v.Summary)
+	}
+}

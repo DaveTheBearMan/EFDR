@@ -22,6 +22,12 @@ type Config struct {
 	GrayUsers []string     `json:"gray_users"` // accounts no order or rotation may touch
 	Recovery  string       `json:"recovery"`   // the recovery account: its key is held off-box, never rotated
 	Auto      []string     `json:"auto"`       // platform accounts: never rotated
+	Console   *Console     `json:"console"`    // nil: no web console
+}
+
+// Console is where the operator's web console listens.
+type Console struct {
+	Listen string `json:"listen"` // host:port, HTTPS
 }
 
 // LoadConfig reads and checks a controller config.
@@ -36,6 +42,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return nil, fmt.Errorf("%s: listen %q: %w", path, c.Listen, err)
+	}
+	if c.Console != nil {
+		if _, _, err := net.SplitHostPort(c.Console.Listen); err != nil {
+			return nil, fmt.Errorf("%s: console.listen %q: %w", path, c.Console.Listen, err)
+		}
 	}
 	return &c, nil
 }

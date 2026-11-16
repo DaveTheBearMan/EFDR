@@ -4,11 +4,13 @@
 package console
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -158,6 +160,43 @@ func (s *State) Feed(in incident.Incident) {
 	if len(s.ring) > maxIncidents {
 		s.ring = s.ring[len(s.ring)-maxIncidents:]
 	}
+}
+
+// LoadLog fills the view from the tail of the controller's incident log,
+// so a restart does not start with an empty page.
+func (s *State) LoadLog(path string) error {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	const tail = 4 << 20
+	skipFirst := false
+	if st.Size() > tail {
+		if _, err := f.Seek(st.Size()-tail, io.SeekStart); err != nil {
+			return err
+		}
+		skipFirst = true
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for first := true; sc.Scan(); first = false {
+		if first && skipFirst {
+			continue // a line cut in half
+		}
+		var in incident.Incident
+		if json.Unmarshal(sc.Bytes(), &in) == nil {
+			s.Feed(in)
+		}
+	}
+	return nil
 }
 
 // Len is how many incidents are held.
