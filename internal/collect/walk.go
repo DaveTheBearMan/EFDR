@@ -44,7 +44,9 @@ func matchAny(patterns []string, p string) bool {
 // Ignored for what is left out). It never follows symlinks and opens only
 // regular files. An object it could not read is still recorded, with Err
 // set; the same errors are returned as text.
-func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil, maxHash, nil) }
+func Walk(root string) (map[string]baseline.FileEntry, []string) {
+	return walk(root, nil, maxHash, nil)
+}
 
 // WalkDirs is Walk limited to the directories dirs (paths from root, such
 // as "/etc"); one that does not exist is skipped. Parents of those
