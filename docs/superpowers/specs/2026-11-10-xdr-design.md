@@ -312,6 +312,15 @@ Web UI served by the controller on the jump box. Primary use on desktop; must al
 - **Hosts:** agent / firewall / baseline-drift / heartbeat per box; break-glass control; the DNS switch with its state and expiry.
 - **Credentials:** every rotated password, by host and account, each with a copy button, plus one "copy all" that produces a block to paste to the scoring engine (host, service, account, password). Values are masked until revealed or copied, show when they were last rotated, and a rotate-again action lives beside each. Copy must work on the phone as well as the desktop. Served only to the authenticated operator, from the jump box's local store.
 
+*(Builder's calls, plan 5, 2026-11-16: the console before self-protection, at the operator's request.)*
+- **Scope.** The console is: the web UI in the controller, the agents' continuous baseline-drift report that feeds it, and the approvals it offers. The service inspectors (MySQL, Docker, Postfix, Samba) are not part of it and come later; "restore a clean binary" needs a package source the air-gapped boxes do not have, so it is not offered. The DNS switch is left out: DNS passes by default now, and the lockdown it switched is opt-in.
+- **Approvals offered:** approve or kill an SSH session; approve a new user; remove a file the agent found (a *new* file in a persistence location, never a changed or removed base-image file), moved to a quarantine and restorable for 24 hours; kill a process the agent held because it is a scored service, after the operator says so; ignore any of them.
+- **Drift report.** Each agent compares persistence locations against the baseline every 30 s (a fast walk of those directories only) and the whole disk every 10 min, and reports each new or changed finding once as a `file-drift` incident naming the path. The comparison for a partial walk is restricted to the same directories, so nothing outside them reads as removed.
+- **Serving.** `controller.json` gets `"console": {"listen": "ADDR:PORT"}`; without it there is no console. It is HTTPS with the controller's own server certificate (signed by the fleet CA, which the operator can trust in a browser). One operator password, set with `xdr controller console-password`, stored hashed; a login gives an `HttpOnly`, `Secure`, `SameSite=Strict` cookie for 12 hours; failed logins are rate-limited; every change needs the cookie and a custom header.
+- **Hostile text.** Everything an agent sends (process names, paths, details) is shown as text, never as markup, and the page sends a strict Content-Security-Policy: a red-team process named `<script>` must not run in the operator's browser.
+- **Credentials page.** Served only to the logged-in operator from the jump box's store; masked until revealed or copied; "copy all" gives the block for the scoring engine; rotate-again is beside each entry.
+- **State.** The console keeps the last 2000 incidents and which approvals were handled in `DIR/console-state.json`, so a controller restart does not bring back finished approvals.
+
 ## 12. Cut / demoted
 
 - SSH port rotation — cut as prevention; optional probe tripwire/alert only, slow interval.
