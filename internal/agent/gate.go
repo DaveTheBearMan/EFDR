@@ -62,6 +62,7 @@ type session struct {
 	first time.Time // when it was first seen or registered
 	said  bool      // its alert or pending incident was recorded
 	ended bool      // its end was recorded
+	held  bool      // seen during a pause
 }
 
 // gateOn reports whether sessions are judged: a gate is configured and its
@@ -98,6 +99,13 @@ func (a *agent) sessions(s *proc.Snapshot) {
 		if st == nil {
 			st = &session{first: now}
 			a.sess[ls.ID] = st
+		}
+		// While a pause holds the grace does not run: it starts when the
+		// pause ends, and the session is then reported as pending.
+		if p.Paused {
+			st.first, st.held = now, true
+		} else if st.held {
+			st.first, st.held, st.said = now, false, false
 		}
 		v, why := sshgate.Judge(ls, st.first, p)
 		in := incident.Incident{UID: ls.UID, User: ls.User, PID: ls.Leader, Detail: fmt.Sprintf("session %s from %s", ls.ID, ls.RemoteHost)}

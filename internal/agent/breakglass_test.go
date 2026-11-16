@@ -154,3 +154,30 @@ func TestScanSpool_PrunesWhatCanNeverBeValid(t *testing.T) {
 		t.Fatalf("a token that can still be valid was removed: %v", left)
 	}
 }
+
+// A session opened during a pause is not "late" when the pause ends: its
+// grace starts then, so the operator who paused to get in has time.
+func TestBreakglass_PauseEndRestartsGrace(t *testing.T) {
+	r, key := tokenRig(t)
+	r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000f1", "pause")})
+	sessionFile(t, r.root, "9", "alice", "192.0.2.7", 4242)
+	r.a.sessions(r.snap)
+	r.now = r.now.Add(90 * time.Minute)
+	r.a.sessions(r.snap)
+	if len(r.kind("session-terminated")) != 0 {
+		t.Fatal("ended during the pause")
+	}
+	r.now = r.now.Add(40 * time.Minute) // the pause (2h from the token's start) is over
+	r.a.sessions(r.snap)
+	if len(r.kind("session-terminated")) != 0 {
+		t.Fatalf("ended at the moment the pause expired: %+v", r.kind("session-terminated"))
+	}
+	if len(r.kind("session-pending")) != 1 {
+		t.Fatalf("no pending alert when the pause ended: %+v", r.kind("session-pending"))
+	}
+	r.now = r.now.Add(90 * time.Second)
+	r.a.sessions(r.snap)
+	if len(r.kind("session-terminated")) != 1 {
+		t.Fatal("not ended after its grace")
+	}
+}
