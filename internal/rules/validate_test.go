@@ -115,6 +115,8 @@ func TestValidate_ParentLaunchers(t *testing.T) {
 		"/usr/sbin/cron", "/usr/sbin/atd", "/usr/bin/login", "/usr/bin/sudo", "/usr/bin/su",
 		"/usr/bin/tmux", "/usr/bin/screen", "/usr/bin/containerd-shim-runc-v2",
 		"/usr/bin/bash", "/usr/bin/python3.12", "/usr/bin/perl",
+		"/usr/bin/run-parts", "/usr/bin/timeout", "/usr/bin/xargs", "/usr/bin/flock", "/usr/bin/watch",
+		"/usr/bin/script", "/usr/sbin/runuser", "/usr/bin/tini", "/usr/bin/conmon",
 	} {
 		err := Guard{}.Validate(Rule{Kind: "parent", ParentExe: p, Exe: "/bin/sh"})
 		if err == nil || !strings.Contains(err.Error(), "launcher parent") {

@@ -26,7 +26,8 @@ const maxPath = 512
 
 // launchers start sessions, jobs and containers: a shell under one of
 // them is how people and stock jobs work, so no parent rule may name it.
-var launchers = []string{"systemd", "init", "sshd", "sshd-session", "cron", "atd", "login", "sudo", "su", "tmux", "screen"}
+var launchers = []string{"systemd", "init", "sshd", "sshd-session", "cron", "atd", "login", "sudo", "su", "tmux", "screen",
+	"run-parts", "timeout", "xargs", "flock", "watch", "script", "runuser", "tini", "conmon"}
 
 var unitName = regexp.MustCompile(`^[A-Za-z0-9:_.@-]{1,200}\.(service|timer|socket)$`)
 

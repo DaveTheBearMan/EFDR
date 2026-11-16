@@ -156,3 +156,28 @@ func TestProposes_HeldEgressProposesNothing(t *testing.T) {
 		t.Fatal("a killed egress no longer proposes")
 	}
 }
+
+// A parent the controller would refuse (a launcher, or a child that is not
+// a shell) is not proposed at all: it would only be rule-rejected noise.
+func TestFromIncident_NoParentTheGuardRefuses(t *testing.T) {
+	in := incident.Incident{Time: t0, Host: "web01", Kind: "revshell-stdio", Action: "killed", Exe: "/usr/bin/bash",
+		Chain: []incident.ProcRef{{Exe: "/usr/bin/bash"}, {Exe: "/usr/sbin/sshd"}}}
+	for _, parent := range []string{"/usr/sbin/sshd", "/usr/sbin/cron", "/usr/bin/python3.12"} {
+		in.Chain[1].Exe = parent
+		for _, r := range FromIncident(in, true) {
+			if r.Kind == "parent" {
+				t.Errorf("%s: proposed %+v", parent, r)
+			}
+		}
+	}
+	in.Chain[1].Exe = "/usr/sbin/apache2"
+	var n int
+	for _, r := range FromIncident(in, true) {
+		if r.Kind == "parent" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatal("apache2 parent not proposed")
+	}
+}

@@ -33,7 +33,11 @@ func FromIncident(in incident.Incident, baselineExe bool) []Rule {
 		add(Rule{Kind: "hash", SHA256: in.SHA256, Exe: in.Exe})
 	}
 	if (in.Kind == "revshell-stdio" || in.Kind == "service-shell") && len(in.Chain) >= 2 && in.Chain[1].Exe != "" && in.Exe != "" {
-		add(Rule{Kind: "parent", ParentExe: in.Chain[1].Exe, Exe: in.Exe})
+		// A parent every guard refuses (a launcher, a child that is not a
+		// shell) would only come back rule-rejected.
+		if r := (Rule{Kind: "parent", ParentExe: in.Chain[1].Exe, Exe: in.Exe}); (Guard{}).Validate(r) == nil {
+			add(r)
+		}
 	}
 	if u, ok := strings.CutPrefix(in.Origin, "unit:"); ok && in.OriginSHA256 != "" {
 		add(Rule{Kind: "unit", Unit: u, SHA256: in.OriginSHA256})
