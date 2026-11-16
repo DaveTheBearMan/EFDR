@@ -297,6 +297,10 @@ func TestMeshAddrs(t *testing.T) {
 // so the controller is not left waiting on boxes that skip a hunt they saw.
 func TestHunt_RedropRehuntedAfterWindow(t *testing.T) {
 	r, f, m := huntRig(t)
+	searched := atomic.Int32{}
+	r.a.mu.Lock()
+	r.a.search = func(context.Context, *hunt.Request) hunt.Result { searched.Add(1); return hunt.Result{} }
+	r.a.mu.Unlock()
 	x := mk(300, 100, 1000, "/tmp/.x")
 	r.a.handle(tree(x), []detect.Detection{egress(x)})
 	r.now = r.now.Add(time.Minute)
@@ -312,13 +316,13 @@ func TestHunt_RedropRehuntedAfterWindow(t *testing.T) {
 		t.Fatalf("after the window: put %d, pushed %d", len(f.hunts), len(m.hunts))
 	}
 
-	searched := atomic.Int32{}
-	r.a.search = func(context.Context, *hunt.Request) hunt.Result { searched.Add(1); return hunt.Result{} }
 	h := fileHunt("db01", hunt.File{SHA256: sumOf("x"), Path: "/tmp/.y"})
 	r.a.offerHunt(h, "etcd")
 	r.a.offerHunt(h, "etcd")
 	waitFor(t, "first search", func() bool { return searched.Load() == 1 })
+	r.a.mu.Lock() // the runner reads the clock under the lock
 	r.now = r.now.Add(9 * time.Minute)
+	r.a.mu.Unlock()
 	r.a.offerHunt(h, "etcd")
 	waitFor(t, "search after the window", func() bool { return searched.Load() == 2 })
 }

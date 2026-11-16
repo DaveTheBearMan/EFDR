@@ -371,11 +371,20 @@ func async(fn func(incident.Incident), n int) (call func(incident.Incident), sto
 }
 
 // record writes one incident.
-func (a *agent) record(in incident.Incident) {
+func (a *agent) record(in incident.Incident) { a.recordUnlocked(a.stamp(in)) }
+
+// stamp fills in the host and, when unset, the time. The caller holds a.mu.
+func (a *agent) stamp(in incident.Incident) incident.Incident {
 	in.Host = a.cfg.Host
 	if in.Time.IsZero() {
 		in.Time = a.now()
 	}
+	return in
+}
+
+// recordUnlocked writes a stamped incident to the log and the fleet; it
+// needs no lock (the log and the fleet client have their own).
+func (a *agent) recordUnlocked(in incident.Incident) {
 	if _, err := a.log.Add(in); err != nil {
 		a.logf("incident log: %v", err)
 	}

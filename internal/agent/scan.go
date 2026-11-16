@@ -116,6 +116,15 @@ func (a *agent) scan(full bool) {
 	}
 	findings := diff.Diff(ref, live)
 
+	// What the scan reports is gathered under the lock and written after
+	// it: up to scanCap+1 log writes and fleet reports would hold up the
+	// sweep and the gate.
+	var out []incident.Incident
+	defer func() {
+		for _, in := range out {
+			a.recordUnlocked(in)
+		}
+	}()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.drift == nil {
@@ -166,7 +175,7 @@ func (a *agent) scan(full bool) {
 		if len(e.SHA256) >= 12 {
 			detail += " (sha256 " + e.SHA256[:12] + ")" // the log folds identical lines: a changed file is a new one
 		}
-		a.record(incident.Incident{Kind: "file-drift", Action: "alert", Severity: f.Severity, Path: path, SHA256: e.SHA256, Size: e.Size, Detail: detail})
+		out = append(out, a.stamp(incident.Incident{Kind: "file-drift", Action: "alert", Severity: f.Severity, Path: path, SHA256: e.SHA256, Size: e.Size, Detail: detail}))
 		id := FileID(path)
 		if f.Kind == model.KindAdded && (e.Type == baseline.TypeFile || e.Type == baseline.TypeLink) && f.Category != classify.Fallback {
 			link, _ := pathenc.Decode(e.Link)
@@ -183,8 +192,8 @@ func (a *agent) scan(full bool) {
 		}
 	}
 	if waiting > 0 {
-		a.record(incident.Incident{Kind: "file-drift", Action: "alert", Severity: model.SevMedium,
-			Detail: fmt.Sprintf("%d more findings not reported yet; the next scans report them", waiting)})
+		out = append(out, a.stamp(incident.Incident{Kind: "file-drift", Action: "alert", Severity: model.SevMedium,
+			Detail: fmt.Sprintf("%d more findings not reported yet; the next scans report them", waiting)}))
 	}
 }
 

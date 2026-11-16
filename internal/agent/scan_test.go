@@ -11,6 +11,7 @@ import (
 
 	"xdr/internal/baseline"
 	"xdr/internal/config"
+	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/pathenc"
 	"xdr/internal/testfs"
@@ -222,5 +223,30 @@ func TestScan_NoiseCannotBlindTheReport(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("a real finding was not reported after the noise filled the memory")
+	}
+}
+
+// A scan's findings are written with the agent's lock free: the sweep and
+// the gate do not wait on the log and the fleet queue.
+func TestScan_RecordsWithoutTheLock(t *testing.T) {
+	r := scanRig(t)
+	for i := 0; i < 5; i++ {
+		testfs.File(t, r.root, fmt.Sprintf("etc/cron.d/evil%d", i), "* * * * * root /tmp/x\n", 0o644)
+	}
+	held := 0
+	onWrite := r.a.log.OnWrite
+	r.a.log.OnWrite = func(in incident.Incident) {
+		if in.Kind == "file-drift" {
+			if r.a.mu.TryLock() {
+				r.a.mu.Unlock()
+			} else {
+				held++
+			}
+		}
+		onWrite(in)
+	}
+	r.a.scan(false)
+	if n := len(r.kind("file-drift")); n < 5 || held != 0 {
+		t.Fatalf("%d findings, %d written under the lock", n, held)
 	}
 }
