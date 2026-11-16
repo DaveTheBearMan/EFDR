@@ -294,3 +294,32 @@ func TestAuth_SuccessReleasesItsAttempt(t *testing.T) {
 		t.Fatalf("the successful login used an attempt: %d", resp.StatusCode)
 	}
 }
+
+// Logout is a write: a cross-site form must not be able to log the
+// operator out.
+func TestAuth_LogoutNeedsHeader(t *testing.T) {
+	r := newServerRig(t)
+	_, tok := r.login(goodPassword)
+	if got := r.do("POST", "/logout", tok, nil, nil); got.StatusCode != http.StatusForbidden {
+		t.Fatalf("logout without the header: %d", got.StatusCode)
+	}
+	if got := r.do("GET", "/api/state", tok, nil, nil); got.StatusCode != 200 {
+		t.Fatalf("session gone after a refused logout: %d", got.StatusCode)
+	}
+}
+
+// A new password ends every session made with the old one.
+func TestAuth_PasswordChangeEndsSessions(t *testing.T) {
+	r := newServerRig(t)
+	_, tok := r.login(goodPassword)
+	if err := SetPassword(r.dir, "another long passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.do("GET", "/api/state", tok, nil, nil); got.StatusCode != 401 {
+		t.Fatalf("old session after a password change: %d", got.StatusCode)
+	}
+	_, tok = r.login("another long passphrase")
+	if got := r.do("GET", "/api/state", tok, nil, nil); got.StatusCode != 200 {
+		t.Fatalf("new session: %d", got.StatusCode)
+	}
+}

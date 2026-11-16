@@ -310,6 +310,10 @@ func (ctl *Controller) flooded(host string) bool {
 	return ctl.writes[host] == ctl.floodLimit+1
 }
 
+// Record writes an incident of the controller's own (a console action) to
+// its log.
+func (ctl *Controller) Record(in incident.Incident) { ctl.record(in) }
+
 func (ctl *Controller) record(in incident.Incident) {
 	if ctl.log == nil {
 		return

@@ -1,9 +1,13 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -288,6 +292,54 @@ func TestActions_ConcurrentRotationsAgree(t *testing.T) {
 		parts := strings.Split(hash, "$") // "", "6", salt, sum
 		if len(parts) != 4 || pw == "" || creds.SHA512Crypt(pw, parts[2], 5000) != hash {
 			t.Errorf("%s: the stored password is not the one the order was made from (hash %q, stored %q)", u, hash, pw)
+		}
+	}
+}
+
+// Every console action is an incident in the controller's log: who (the
+// source address), what, and for which host.
+func TestServer_ActionsAudited(t *testing.T) {
+	a, s, _ := actionsRig(t)
+	if err := SetPassword(a.Dir, "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	var got []incident.Incident
+	srv := NewServer(a.Dir, func() View { return s.View(nil, nil) }, a, func() time.Time { return t0 }, io.Discard)
+	srv.Audit = func(in incident.Incident) { got = append(got, in) }
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	post := func(path, cookie string, body any) *http.Response {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", ts.URL+path, bytes.NewReader(b))
+		req.Header.Set("X-XDR", "1")
+		if cookie != "" {
+			req.Header.Set("Cookie", "xdr="+cookie)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	var tok string
+	for _, c := range post("/login", "", map[string]string{"password": "correct horse battery"}).Cookies() {
+		tok = c.Value
+	}
+	s.Feed(inc("web01", "session-pending", "alert", 0, func(i *incident.Incident) { i.User, i.Detail = "alice", "session 7 from 192.0.2.7 (ends in 1m30s)" }))
+	if resp := post("/api/decide", tok, map[string]string{"id": "s:web01:7", "action": "approve"}); resp.StatusCode != 204 {
+		t.Fatalf("decide: %d", resp.StatusCode)
+	}
+	if resp := post("/api/breakglass", tok, map[string]any{"host": "web01", "action": "pause", "minutes": 30}); resp.StatusCode != 200 {
+		t.Fatalf("breakglass: %d", resp.StatusCode)
+	}
+	if len(got) != 2 {
+		t.Fatalf("%d audit incidents: %+v", len(got), got)
+	}
+	for i, want := range []string{"approve", "pause"} {
+		in := got[i]
+		if in.Kind != "console-action" || in.Host != "web01" || !strings.Contains(in.Detail, "127.0.0.1") || !strings.Contains(in.Detail, want) {
+			t.Errorf("audit %d: %+v", i, in)
 		}
 	}
 }

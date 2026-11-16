@@ -9,13 +9,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"xdr/internal/incident"
+	"xdr/internal/model"
 )
 
 //go:embed web/index.html web/app.js web/app.css
@@ -38,6 +43,10 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-sr
 
 // Server is the console's HTTP side: the page, the login and the API.
 type Server struct {
+	// Audit, when set, records each console action (who, what, which host)
+	// in the controller's incident log.
+	Audit func(incident.Incident)
+
 	dir  string
 	view func() View
 	act  *Actions
@@ -46,16 +55,40 @@ type Server struct {
 
 	checks   chan struct{} // two password checks at a time: each costs 100000 rounds of sha512
 	mu       sync.Mutex
-	sessions map[[32]byte]time.Time // sha256 of the cookie → expiry
+	sessions map[[32]byte]session // sha256 of the cookie → the session
 	fails    map[string][]time.Time
 	allFails []time.Time
+}
+
+// session is one login: when it ends, and the password file it was made
+// under (a new password ends it).
+type session struct {
+	exp time.Time
+	pw  [32]byte
+}
+
+// passwordStamp is the sha256 of console.json; zero when it cannot be read.
+func passwordStamp(dir string) [32]byte {
+	b, err := os.ReadFile(filepath.Join(dir, "console.json"))
+	if err != nil {
+		return [32]byte{}
+	}
+	return sha256.Sum256(b)
+}
+
+// audit records a console action by the operator at r's source address.
+func (s *Server) audit(r *http.Request, host, what string) {
+	if s.Audit != nil {
+		s.Audit(incident.Incident{Time: s.now(), Kind: "console-action", Action: "alert", Severity: model.SevMedium, Host: host,
+			Detail: fmt.Sprintf("console, from %s: %s", source(r), what)})
+	}
 }
 
 // NewServer is a server over view and act; dir holds console.json. Its
 // log (no passwords, no cookies) goes to logw.
 func NewServer(dir string, view func() View, act *Actions, now func() time.Time, logw io.Writer) *Server {
 	return &Server{dir: dir, view: view, act: act, now: now, log: log.New(logw, "console: ", log.LstdFlags),
-		sessions: map[[32]byte]time.Time{}, fails: map[string][]time.Time{}, checks: make(chan struct{}, 2)}
+		sessions: map[[32]byte]session{}, fails: map[string][]time.Time{}, checks: make(chan struct{}, 2)}
 }
 
 // Serve serves srv over TLS 1.3 on l with dir's server certificate, until
@@ -203,6 +236,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		ok = CheckPassword(s.dir, in.Password)
 		<-s.checks
 	}
+	stamp := passwordStamp(s.dir)
+	if stamp == ([32]byte{}) {
+		ok = false
+	}
 	if !ok {
 		s.log.Printf("login refused from %s", ip)
 		http.Error(w, "no", http.StatusUnauthorized)
@@ -217,22 +254,22 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	tok := hex.EncodeToString(raw)
 	s.mu.Lock()
 	now := s.now()
-	for k, exp := range s.sessions {
-		if !exp.After(now) {
+	for k, ss := range s.sessions {
+		if !ss.exp.After(now) {
 			delete(s.sessions, k)
 		}
 	}
 	if len(s.sessions) >= maxLoginSessions {
 		var oldest [32]byte
 		var when time.Time
-		for k, exp := range s.sessions {
-			if when.IsZero() || exp.Before(when) {
-				oldest, when = k, exp
+		for k, ss := range s.sessions {
+			if when.IsZero() || ss.exp.Before(when) {
+				oldest, when = k, ss.exp
 			}
 		}
 		delete(s.sessions, oldest)
 	}
-	s.sessions[sha256.Sum256([]byte(tok))] = now.Add(sessionLife)
+	s.sessions[sha256.Sum256([]byte(tok))] = session{exp: now.Add(sessionLife), pw: stamp}
 	s.mu.Unlock()
 	s.log.Printf("login from %s", ip)
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/", MaxAge: int(sessionLife / time.Second),
@@ -241,6 +278,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	// A cross-site form cannot send the header: no logging the operator out.
+	if r.Header.Get("X-XDR") != "1" {
+		http.Error(w, "missing header", http.StatusForbidden)
+		return
+	}
 	if c, err := r.Cookie(cookieName); err == nil {
 		s.mu.Lock()
 		delete(s.sessions, sha256.Sum256([]byte(c.Value)))
@@ -257,9 +299,14 @@ func (s *Server) api(write bool, h func(w http.ResponseWriter, r *http.Request))
 		c, err := r.Cookie(cookieName)
 		ok := false
 		if err == nil {
+			stamp := passwordStamp(s.dir)
+			key := sha256.Sum256([]byte(c.Value))
 			s.mu.Lock()
-			exp, found := s.sessions[sha256.Sum256([]byte(c.Value))]
-			ok = found && exp.After(s.now())
+			ss, found := s.sessions[key]
+			ok = found && ss.exp.After(s.now()) && ss.pw == stamp && stamp != [32]byte{}
+			if found && !ok {
+				delete(s.sessions, key) // expired, or made under another password
+			}
 			s.mu.Unlock()
 		}
 		if !ok {
@@ -301,11 +348,14 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	ap, _ := s.act.State.Peek(in.ID)
+	host := ap.Host
 	if err := s.act.Decide(r.Context(), in.ID, in.Action); err != nil {
 		fail400(w, err)
 		return
 	}
 	s.log.Printf("decided %s: %s", in.ID, in.Action)
+	s.audit(r, host, fmt.Sprintf("decided %s: %s", in.ID, in.Action))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -328,6 +378,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Printf("rotated %d accounts on %s", len(out), in.Host)
+	s.audit(r, in.Host, fmt.Sprintf("rotated %d accounts", len(out)))
 	writeJSON(w, map[string]any{"entries": s.act.Entries()})
 }
 
@@ -346,5 +397,6 @@ func (s *Server) breakglass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Printf("minted a %s token for %s", in.Action, in.Host)
+	s.audit(r, in.Host, fmt.Sprintf("minted a %s token for %d minutes", in.Action, in.Minutes))
 	writeJSON(w, map[string]string{"token": tok})
 }
