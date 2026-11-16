@@ -346,3 +346,41 @@ func TestExecSSH_CappedOutputAndOptions(t *testing.T) {
 		t.Fatalf("kept %d (cap %d)", len(tw.buf), cap(tw.buf))
 	}
 }
+
+// The payload lands under /var/lib/xdr, not a world-writable /tmp.
+func TestReinstall_ScriptStagesUnderVarLib(t *testing.T) {
+	if !strings.Contains(script, "mkdir -p /var/lib/xdr\nd=$(mktemp -d /var/lib/xdr/.reinstall.XXXXXX)\n") || strings.Contains(script, "mktemp -d)") {
+		t.Fatalf("script:\n%s", script)
+	}
+}
+
+// A disabled host is never reinstalled: it was cut off on purpose.
+func TestTrigger_SkipsDisabledHost(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	cfg.Reinstall.After.Duration = time.Minute
+	now := time.Unix(1_000_000, 0)
+	ctl := &Controller{dir: dir, beats: map[string]*beat{}, disabled: map[string]bool{"web01": true}, now: func() time.Time { return now }}
+	f := &fakeSSH{}
+	ctl.EnableReinstall(cfg, f, bin)
+	ctl.heartbeat("web01", true)
+	ctl.heartbeat("web01", false)
+	now = now.Add(time.Hour)
+	ctl.checkReinstall()
+	ctl.rwg.Wait()
+	if f.n() != 0 {
+		t.Fatalf("a disabled host was reinstalled: %d", f.n())
+	}
+}
+
+// The defaults are applied to a copy: the controller's shared config is
+// never written from a reinstall's goroutine.
+func TestReinstall_DoesNotMutateTheSharedConfig(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	cfg.Reinstall.User = ""
+	if err := Reinstall(context.Background(), dir, cfg, "web01", &fakeSSH{}, bin); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Reinstall.User != "" || cfg.Reinstall.After.Duration != 0 {
+		t.Fatalf("mutated: %+v", cfg.Reinstall)
+	}
+}

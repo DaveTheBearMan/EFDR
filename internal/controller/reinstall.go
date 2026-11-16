@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -147,7 +148,8 @@ const script = `set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
-d=$(mktemp -d)
+mkdir -p /var/lib/xdr
+d=$(mktemp -d /var/lib/xdr/.reinstall.XXXXXX)
 trap "rm -rf \"\$d\"" EXIT
 tar -x -f - -C "$d"
 mkdir -p /etc/xdr
@@ -168,7 +170,7 @@ func Reinstall(ctx context.Context, dir string, cfg *Config, host string, ssh SS
 	if cfg == nil || cfg.Reinstall == nil {
 		return errors.New("reinstall is not configured")
 	}
-	rc := cfg.Reinstall
+	rc := *cfg.Reinstall // check applies defaults: to a copy, never the shared config
 	if err := rc.check(); err != nil {
 		return err
 	}
@@ -258,9 +260,12 @@ func (ctl *Controller) EnableReinstall(cfg *Config, ssh SSH, binary string) {
 }
 
 // checkReinstall starts a reinstall, in its own goroutine, for each listed
-// host silent for After: once per silence, and at most once per
+// host, not disabled, silent for After: once per silence, and at most once per
 // reinstallEvery per host.
 func (ctl *Controller) checkReinstall() {
+	ctl.mu.Lock() // before bmu, as Hosts takes them
+	off := maps.Clone(ctl.disabled)
+	ctl.mu.Unlock()
 	ctl.bmu.Lock()
 	defer ctl.bmu.Unlock()
 	if ctl.rcfg == nil {
@@ -268,6 +273,9 @@ func (ctl *Controller) checkReinstall() {
 	}
 	now := ctl.now()
 	for h, b := range ctl.beats {
+		if off[h] {
+			continue // cut off on purpose: never put back
+		}
 		if !b.silent || b.reinstalled || now.Sub(b.silentAt) < ctl.rcfg.After.Duration {
 			continue
 		}
