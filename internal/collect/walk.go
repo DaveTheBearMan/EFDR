@@ -44,7 +44,7 @@ func matchAny(patterns []string, p string) bool {
 // Ignored for what is left out). It never follows symlinks and opens only
 // regular files. An object it could not read is still recorded, with Err
 // set; the same errors are returned as text.
-func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil, maxHash) }
+func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil, maxHash, nil) }
 
 // WalkDirs is Walk limited to the directories dirs (paths from root, such
 // as "/etc"); one that does not exist is skipped. Parents of those
@@ -55,10 +55,21 @@ func WalkDirs(root string, dirs []string, limit int64) (map[string]baseline.File
 	if len(dirs) == 0 {
 		return map[string]baseline.FileEntry{}, nil
 	}
-	return walk(root, dirs, limit)
+	return walk(root, dirs, limit, nil)
 }
 
-func walk(root string, starts []string, limit int64) (map[string]baseline.FileEntry, []string) {
+// WalkDirsCached is WalkDirs reusing the hashes in c of files unchanged
+// since the walk before, and leaving this walk's in it.
+func WalkDirsCached(root string, dirs []string, limit int64, c *HashCache) (map[string]baseline.FileEntry, []string) {
+	if len(dirs) == 0 {
+		return map[string]baseline.FileEntry{}, nil
+	}
+	c.start()
+	defer c.finish()
+	return walk(root, dirs, limit, c)
+}
+
+func walk(root string, starts []string, limit int64, cache *HashCache) (map[string]baseline.FileEntry, []string) {
 	root = filepath.Clean(root)
 	files := map[string]baseline.FileEntry{}
 	var errs []string
@@ -121,7 +132,14 @@ func walk(root string, starts []string, limit int64) (map[string]baseline.FileEn
 		switch {
 		case mode.IsRegular():
 			content := e.Size <= maxContent && classify.Path(rel).KeepContent
+			if sum, data, ok := cache.lookup(rel, info, content); ok {
+				e.SHA256, e.Content = sum, data
+				break
+			}
 			e.SHA256, e.Content, err = hashFile(full, content, limit)
+			if err == nil {
+				cache.store(rel, info, content, e.SHA256, e.Content)
+			}
 		case mode&os.ModeSymlink != 0:
 			var target string
 			target, err = os.Readlink(full)

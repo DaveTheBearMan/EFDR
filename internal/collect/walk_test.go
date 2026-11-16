@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +161,34 @@ func TestWalkDirs_LimitsHashing(t *testing.T) {
 	all, _ := Walk(root)
 	if got := all["/tmp/big"].SHA256; got != sum(big) {
 		t.Fatalf("a full walk hashed %q", got)
+	}
+}
+
+// A file whose size, mtime, ctime and inode are unchanged since the last
+// walk keeps the hash that walk took; any change hashes it again, and a
+// file gone is forgotten.
+func TestWalkDirs_HashCache(t *testing.T) {
+	root := testfs.Root(t)
+	testfs.File(t, root, "etc/cron.d/job", "* * * * * root x\n", 0o644)
+	testfs.File(t, root, "etc/cron.d/gone", "x\n", 0o644)
+	c := NewHashCache()
+	files, _ := WalkDirsCached(root, []string{"/etc"}, 1<<20, c)
+	want := files["/etc/cron.d/job"].SHA256
+	if want == "" || c.Len() != 2 {
+		t.Fatalf("first walk: %q, %d cached", want, c.Len())
+	}
+	c.poison("/etc/cron.d/job", "cached")
+	files, _ = WalkDirsCached(root, []string{"/etc"}, 1<<20, c)
+	if got := files["/etc/cron.d/job"].SHA256; got != "cached" {
+		t.Fatalf("an unchanged file was hashed again: %q", got)
+	}
+	testfs.File(t, root, "etc/cron.d/job", "* * * * * root y\n", 0o644) // same size
+	os.Remove(filepath.Join(root, "etc/cron.d/gone"))
+	files, _ = WalkDirsCached(root, []string{"/etc"}, 1<<20, c)
+	if got := files["/etc/cron.d/job"]; got.SHA256 == "cached" || got.SHA256 == want || string(got.Content) != "* * * * * root y\n" {
+		t.Fatalf("a changed file kept its cached hash: %+v", got)
+	}
+	if c.Len() != 1 {
+		t.Fatalf("%d cached after a file went", c.Len())
 	}
 }

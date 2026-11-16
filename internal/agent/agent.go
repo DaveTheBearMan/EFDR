@@ -141,6 +141,7 @@ type agent struct {
 	noRecoverySaid bool                                                  // the missing ssh.recovery was told
 	refusedAt      time.Time                                             // a refused break-glass token was last told
 	refusedHeld    int                                                   // refused tokens since, not yet told
+	hashCache      *collect.HashCache                                    // the fast scan's hashes, reused while a file is unchanged
 	run            sshgate.Runner                                        // loginctl, usermod, systemctl
 	sess           map[string]*session                                   // live sessions by id
 	approved       map[string]bool                                       // session ids approved (orders, break-glass)

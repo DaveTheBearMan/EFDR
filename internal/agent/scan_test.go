@@ -250,3 +250,12 @@ func TestScan_RecordsWithoutTheLock(t *testing.T) {
 		t.Fatalf("%d findings, %d written under the lock", n, held)
 	}
 }
+
+// The fast scan keeps its hashes for the next one.
+func TestScan_FastScanCachesHashes(t *testing.T) {
+	r := scanRig(t)
+	r.a.scan(false)
+	if r.a.hashCache == nil || r.a.hashCache.Len() == 0 {
+		t.Fatal("no hash cache after a fast scan")
+	}
+}

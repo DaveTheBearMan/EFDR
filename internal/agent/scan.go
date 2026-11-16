@@ -105,7 +105,12 @@ func (a *agent) scan(full bool) {
 		}
 		ref = base
 	} else {
-		files, _ := collect.WalkDirs(root, scanRoots, fastHash)
+		// Only one scan runs at a time (scanLoop), so the cache is this
+		// scan's alone: unchanged files are not read again.
+		if a.hashCache == nil {
+			a.hashCache = collect.NewHashCache()
+		}
+		files, _ := collect.WalkDirsCached(root, scanRoots, fastHash, a.hashCache)
 		live = &baseline.Baseline{Files: files, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
 		ref = &baseline.Baseline{Files: map[string]baseline.FileEntry{}, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
 		for key, e := range base.Files {
