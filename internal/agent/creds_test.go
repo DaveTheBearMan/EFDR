@@ -77,10 +77,31 @@ func TestApplyCreds_Idempotent(t *testing.T) {
 func TestApplyCreds_SambaNT(t *testing.T) {
 	r, ran, _ := credsRig(t)
 	r.a.onOrder(credsOrder(creds.Set{ID: "s4", Users: map[string]creds.User{"svc": {Hash: aliceHash, NT: "8846f7eaee8fb117ad06bdd830b7586c"}}}))
-	if !slices.ContainsFunc(*ran, func(c []string) bool {
-		return slices.Equal(c, []string{"pdbedit", "-u", "svc", "--set-nt-hash", "8846f7eaee8fb117ad06bdd830b7586c"})
-	}) {
-		t.Fatalf("ran %v", *ran)
+	// The hash never goes on a command line, where any user could read it.
+	var imported string
+	r.a.run = func(name string, args ...string) error {
+		*ran = append(*ran, append([]string{name}, args...))
+		if name == "pdbedit" && len(args) == 2 && args[0] == "-i" && strings.HasPrefix(args[1], "smbpasswd:") {
+			p := strings.TrimPrefix(args[1], "smbpasswd:")
+			b, _ := os.ReadFile(p)
+			st, _ := os.Stat(p)
+			if st != nil && st.Mode().Perm() == 0o600 {
+				imported = string(b)
+			}
+		}
+		return nil
+	}
+	r.a.onOrder(credsOrder(creds.Set{ID: "s4b", Users: map[string]creds.User{"svc": {Hash: aliceHash, NT: "8846f7eaee8fb117ad06bdd830b7586c"}}}))
+	for _, c := range *ran {
+		if strings.Contains(strings.Join(c, " "), "8846f7ea") {
+			t.Fatalf("hash on a command line: %v", c)
+		}
+	}
+	if !strings.HasPrefix(imported, "svc:1600:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:8846F7EAEE8FB117AD06BDD830B7586C:[U          ]:") {
+		t.Fatalf("import file %q", imported)
+	}
+	if left, _ := filepath.Glob(filepath.Join(r.a.state, "*smbpasswd*")); len(left) != 0 {
+		t.Fatalf("import file left behind: %v", left)
 	}
 }
 

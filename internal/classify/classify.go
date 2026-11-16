@@ -47,6 +47,8 @@ var rules = []rule{
 	{Class{"mail", model.SevHigh, true}, []string{"/etc/aliases", "/etc/postfix/**", home + "/.forward"}},
 	// smb.conf can run commands (root preexec, magic script); usershares
 	// define shares outside it.
+	// Password hashes, recorded by digest only, as /etc/shadow is.
+	{Class{"samba-secrets", model.SevHigh, false}, []string{"/etc/samba/smbpasswd", "/etc/samba/**/*.tdb", "/etc/samba/*.tdb"}},
 	{Class{"samba", model.SevHigh, true}, []string{"/etc/samba/**", "/var/lib/samba/usershares/**"}},
 	{Class{"account-db", model.SevMedium, true}, []string{"/etc/{passwd,group}"}},
 	// Password hashes are compared by digest only, never copied into a baseline.

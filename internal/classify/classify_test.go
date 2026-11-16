@@ -42,6 +42,8 @@ func TestPath_Table(t *testing.T) {
 		{"/etc/samba/smb.conf", "samba", true},
 		{"/etc/samba/conf.d/x.conf", "samba", true},
 		{"/var/lib/samba/usershares/evil", "samba", true},
+		{"/etc/samba/smbpasswd", "samba-secrets", false},
+		{"/etc/samba/secrets.tdb", "samba-secrets", false},
 		// password hashes are never copied into a baseline
 		{"/etc/passwd", "account-db", true},
 		{"/etc/shadow", "account-db", false},

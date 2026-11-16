@@ -101,7 +101,7 @@ func (a *agent) applyCreds(s creds.Set) {
 	for _, n := range ok {
 		u, acc := s.Users[n], accts[n]
 		if u.NT != "" {
-			if err := a.run("pdbedit", "-u", n, "--set-nt-hash", u.NT); err != nil {
+			if err := a.setNT(n, acc.UID, u.NT); err != nil {
 				failed = append(failed, n+" samba: "+err.Error())
 			}
 		}
@@ -207,4 +207,34 @@ func moveAside(from, to string) error {
 		return err
 	}
 	return os.Remove(from)
+}
+
+// setNT gives Samba account name the NT hash nt, through an smbpasswd-format
+// file only root can read: on pdbedit's command line any user could read
+// it, and an NT hash is as good as the password.
+func (a *agent) setNT(name string, uid uint32, nt string) error {
+	if len(nt) != 32 || strings.Trim(strings.ToLower(nt), "0123456789abcdef") != "" {
+		return fmt.Errorf("not an NT hash")
+	}
+	if err := os.MkdirAll(a.state, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(a.state, ".smbpasswd-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	line := fmt.Sprintf("%s:%d:%s:%s:[U          ]:LCT-%08X:\n", name, uid, strings.Repeat("X", 32), strings.ToUpper(nt), a.now().Unix())
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.WriteString(line); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return a.run("pdbedit", "-i", "smbpasswd:"+f.Name())
 }

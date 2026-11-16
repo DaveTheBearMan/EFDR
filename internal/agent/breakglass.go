@@ -55,6 +55,7 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 			a.approved = map[string]bool{}
 		}
 		a.approved[session] = true
+		a.saveOrders()
 	case "pause":
 		if t.Expires.After(a.pausedUntil) {
 			a.pausedUntil = t.Expires

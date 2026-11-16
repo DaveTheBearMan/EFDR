@@ -116,3 +116,15 @@ func TestMakeSpool_ReachableByOthers(t *testing.T) {
 		t.Fatalf("spool %v", sp.Mode())
 	}
 }
+
+// An approval by break-glass holds across an agent restart, like an order.
+func TestBreakglass_ApprovalSurvivesRestart(t *testing.T) {
+	r, key := tokenRig(t)
+	sessionFile(t, r.root, "9", "alice", "192.0.2.7", 4242)
+	r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000d1", "approve-session"), Session: "9"})
+	r.a.approved = nil
+	r.a.loadOrders()
+	if !r.a.approved["9"] {
+		t.Fatal("break-glass approval lost on restart")
+	}
+}
