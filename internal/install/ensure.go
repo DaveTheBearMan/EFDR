@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// ErrNotInstalled is Ensure's error on a box with no pinned hash: never
-// installed, or uninstalled (which takes the pinned hash first).
+// ErrNotInstalled is Ensure's error on a box marked uninstalled, or with
+// neither a pinned hash nor any of the install's units (never installed).
 var ErrNotInstalled = errors.New("not installed")
 
 // Ensure puts back whatever of the manifest is missing or differs, from a
@@ -23,11 +23,21 @@ var ErrNotInstalled = errors.New("not installed")
 // nothing: it restores nothing and says so.
 // What it did, or why it could not, is left as a note (see TakeNotes).
 func Ensure(l Layout, run Runner) (Report, error) {
+	if Uninstalled(l) {
+		return Report{}, fmt.Errorf("%w (marked uninstalled)", ErrNotInstalled)
+	}
 	pinned, err := pinnedHash(l)
-	if err != nil {
+	if err != nil && !UnitsPresent(l) {
 		return Report{}, fmt.Errorf("%w (%w)", ErrNotInstalled, err)
 	}
-	rep, err := ensure(l, run, pinned)
+	var rep Report
+	if err != nil {
+		// Both pinned copies gone while the units are there: nothing to
+		// trust a copy by. The agent rewrites them; this is said, not hidden.
+		err = fmt.Errorf("the pinned hash is gone (both copies) though the install's units are there: %w", err)
+	} else {
+		rep, err = ensure(l, run, pinned)
+	}
 	if len(rep.Restored)+len(rep.Started) > 0 || err != nil {
 		n := Note{Time: time.Now().UTC(), Restored: rep.Restored, Started: rep.Started}
 		if err != nil {

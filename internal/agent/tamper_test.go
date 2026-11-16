@@ -213,3 +213,66 @@ func TestTamper_KillSparesGuardedChild(t *testing.T) {
 		t.Fatal("the writer itself is protected")
 	}
 }
+
+// Both copies of the pinned hash and of the manifest deleted: the agent
+// writes them again, from the manifest it read, and reports it. Once the
+// box is marked uninstalled it writes nothing.
+func TestTamper_PinnedFilesDeletedAreRewritten(t *testing.T) {
+	r, _ := tamperRig(t)
+	l := install.DefaultLayout()
+	l.Root = t.TempDir()
+	run := func(string, ...string) ([]byte, error) { return []byte("active\n"), nil }
+	cfg := filepath.Join(l.Root, l.Config)
+	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	os.WriteFile(cfg, []byte("{}\n"), 0o600)
+	bin := filepath.Join(t.TempDir(), "xdr")
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	if _, err := install.Install(l, run, bin); err != nil {
+		t.Fatal(err)
+	}
+	r.a.layout, r.a.runner = l, run
+	pinned, _ := os.ReadFile(filepath.Join(l.Root, l.Pinned))
+	r.a.selfHash = strings.TrimSpace(string(pinned))
+	r.a.keepPinned() // a quiet box: reads the manifest, says nothing
+	if got := r.kind("tamper"); len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+	manifest, _ := os.ReadFile(filepath.Join(l.Root, l.Manifest))
+	files := []string{l.Pinned, l.Backup + "/pinned.sha256", l.Manifest, l.Backup + "/manifest.json"}
+	for _, p := range files {
+		os.Remove(filepath.Join(l.Root, p))
+	}
+	r.a.keepPinned()
+	got := r.kind("tamper")
+	if len(got) != 1 || got[0].Action != "repaired" || got[0].Severity < model.SevHigh || !strings.Contains(got[0].Detail, l.Pinned) {
+		t.Fatalf("tamper: %+v", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.Root, l.Pinned)); string(b) != string(pinned) {
+		t.Fatalf("pinned %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.Root, l.Manifest)); string(b) != string(manifest) {
+		t.Fatalf("manifest %q", b)
+	}
+	if _, err := install.Ensure(l, run); err != nil {
+		t.Fatal(err)
+	}
+	// Marked uninstalled by something other than the agent: said once,
+	// nothing written.
+	os.WriteFile(filepath.Join(l.Root, l.Uninstalled), nil, 0o600)
+	os.Remove(filepath.Join(l.Root, l.Pinned))
+	r.a.keepPinned()
+	r.a.keepPinned()
+	if _, err := os.Stat(filepath.Join(l.Root, l.Pinned)); err == nil {
+		t.Fatal("rewrote the pinned hash on a box marked uninstalled")
+	}
+	if got := r.kind("tamper"); len(got) != 2 || got[1].Action != "alert" || !strings.Contains(got[1].Detail, "uninstalled") {
+		t.Fatalf("%+v", got)
+	}
+	// While its own uninstall runs: nothing at all.
+	r.a.uninstalled = true
+	os.Remove(filepath.Join(l.Root, l.Uninstalled))
+	r.a.keepPinned()
+	if _, err := os.Stat(filepath.Join(l.Root, l.Pinned)); err == nil || len(r.kind("tamper")) != 2 {
+		t.Fatal("acted while uninstalling")
+	}
+}

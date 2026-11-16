@@ -102,6 +102,7 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}
 	a.uninstalled = true // no table, no gate from here on
+	a.uninstTried = true
 	if err := install.Uninstall(a.layout, a.runner); err != nil {
 		a.uninstalled = false
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: " + err.Error()})

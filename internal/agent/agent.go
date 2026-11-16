@@ -162,6 +162,9 @@ type agent struct {
 	exit         func()                                                // stops the agent for good
 	settle       func()                                                // lets the last report leave; nil: no wait
 	uninstalled  bool                                                  // a signed uninstall removed the install: assert nothing more
+	uninstTried  bool                                                  // this agent ran an uninstall (it may have failed): its marker is its own
+	manifest     []byte                                                // the manifest as last read, to put back if both copies go
+	markerSaid   bool                                                  // the uninstalled marker of another's making was reported
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
@@ -993,6 +996,7 @@ func Run(ctx context.Context, o Options) error {
 			local.Store(&addrs)
 			a.guard()
 			a.ladder(a.run)
+			a.keepPinned()
 			a.ensureNotes()
 		case ev, ok := <-events:
 			if !ok {

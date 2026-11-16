@@ -28,6 +28,9 @@ type Layout struct {
 	Config   string // the agent's config (and Config+".sig")
 	FleetDir string // ca.pem, host.pem, host-key.pem, rules.pub
 	Notes    string // what ensure had to do, for the agent to report
+	// Uninstalled is the marker Uninstall writes first and Install removes:
+	// what says the box is uninstalled, whatever else is or is not there.
+	Uninstalled string
 }
 
 // DefaultLayout is the layout of a box.
@@ -40,6 +43,8 @@ func DefaultLayout() Layout {
 		Config:   "/etc/xdr/agent.json",
 		FleetDir: "/etc/xdr/fleet",
 		Notes:    "/var/lib/xdr/ensure-notes.jsonl",
+
+		Uninstalled: "/var/lib/xdr/uninstalled",
 	}
 }
 
@@ -137,6 +142,18 @@ func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:
 
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
+// ReadManifestBytes is the manifest as it is on disk, or its backup's copy.
+func ReadManifestBytes(l Layout) ([]byte, error) {
+	b, err := readFile(l.p(l.Manifest))
+	if errors.Is(err, fs.ErrNotExist) {
+		b, err = readFile(l.p(l.Backup + "/manifest.json"))
+	}
+	if err == nil && !json.Valid(b) {
+		return nil, errors.New("manifest: not JSON")
+	}
+	return b, err
+}
+
 // ReadManifest reads the manifest, or its copy in the backup directory.
 func ReadManifest(l Layout) (Manifest, error) {
 	var m Manifest
@@ -151,6 +168,25 @@ func ReadManifest(l Layout) (Manifest, error) {
 		return m, fmt.Errorf("manifest: %w", err)
 	}
 	return m, nil
+}
+
+// Uninstalled reports whether the box carries the uninstalled marker.
+func Uninstalled(l Layout) bool {
+	if l.Uninstalled == "" {
+		return false
+	}
+	_, err := os.Lstat(l.p(l.Uninstalled))
+	return err == nil
+}
+
+// UnitsPresent reports whether any of the install's unit files is there.
+func UnitsPresent(l Layout) bool {
+	for _, u := range Units {
+		if _, err := os.Lstat(l.p("/etc/systemd/system/" + u)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // pinnedHash is the pinned hash, from its file or the backup's copy.

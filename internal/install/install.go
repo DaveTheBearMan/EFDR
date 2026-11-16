@@ -36,61 +36,19 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 	if _, err := os.Stat(l.p(l.Config)); err != nil {
 		return rep, fmt.Errorf("no config to install: %w", err)
 	}
-	var items []item
-	for _, c := range l.Copies {
-		items = append(items, item{path: c, content: bin, mode: 0o755, kind: "copy"})
-	}
-	for _, f := range Render(l) {
-		items = append(items, item{path: f.Path, content: f.Content, mode: f.Mode, kind: "file"})
-	}
-	// The config, its signature and the bundle, each with a backup beside
-	// the manifest: ensure restores either from the other.
-	pair := func(orig string) error {
-		b, err := os.ReadFile(l.p(orig))
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		st, err := os.Stat(l.p(orig))
-		if err != nil {
-			return err
-		}
-		backup := l.Backup + "/" + strings.TrimPrefix(orig, filepath.Dir(l.Config)+"/")
-		items = append(items, item{path: orig, content: b, mode: st.Mode().Perm(), kind: "config", source: backup},
-			item{path: backup, content: b, mode: 0o600, kind: "backup", source: orig})
-		return nil
-	}
-	if err := pair(l.Config); err != nil {
+	items, err := collect(l, bin)
+	if err != nil {
 		return rep, err
 	}
-	if err := pair(l.Config + ".sig"); err != nil {
-		return rep, err
-	}
-	ents, err := os.ReadDir(l.p(l.FleetDir))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return rep, err
-	}
-	for _, e := range ents {
-		if e.Type().IsRegular() {
-			if err := pair(l.FleetDir + "/" + e.Name()); err != nil {
-				return rep, err
-			}
-		}
-	}
-
 	// Stage: every changed file under a temporary name.
 	var todo []item
-	var m Manifest
+	m := manifestOf(items, sum(bin))
 	for _, it := range items {
-		m.Entries = append(m.Entries, Entry{Path: it.path, SHA256: sum(it.content), Mode: uint32(it.mode), Kind: it.kind, Source: it.source})
 		if cur, err := os.ReadFile(l.p(it.path)); err == nil && bytes.Equal(cur, it.content) {
 			continue
 		}
 		todo = append(todo, it)
 	}
-	slices.SortFunc(m.Entries, func(a, b Entry) int { return strings.Compare(a.Path, b.Path) })
 	var tmps []string
 	cleanup := func() {
 		for _, t := range tmps {
@@ -139,6 +97,12 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 		}
 		rep.Wrote = append(rep.Wrote, f.path)
 	}
+	// The install is back: ensure and the guards keep it again.
+	if l.Uninstalled != "" {
+		if err := os.Remove(l.p(l.Uninstalled)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return rep, err
+		}
+	}
 	if len(rep.Wrote) == 0 {
 		return rep, nil
 	}
@@ -155,7 +119,71 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 	return rep, nil
 }
 
-// Uninstall removes the pinned hash (so nothing can be restored or launched
+// collect is every file an install puts down besides the pinned hash and
+// the manifest. bin is the binary; nil leaves the copies' content empty.
+func collect(l Layout, bin []byte) ([]item, error) {
+	var items []item
+	for _, c := range l.Copies {
+		items = append(items, item{path: c, content: bin, mode: 0o755, kind: "copy"})
+	}
+	for _, f := range Render(l) {
+		items = append(items, item{path: f.Path, content: f.Content, mode: f.Mode, kind: "file"})
+	}
+	// The config, its signature and the bundle, each with a backup beside
+	// the manifest: ensure restores either from the other.
+	pair := func(orig string) error {
+		b, err := os.ReadFile(l.p(orig))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		st, err := os.Stat(l.p(orig))
+		if err != nil {
+			return err
+		}
+		backup := l.Backup + "/" + strings.TrimPrefix(orig, filepath.Dir(l.Config)+"/")
+		items = append(items, item{path: orig, content: b, mode: st.Mode().Perm(), kind: "config", source: backup},
+			item{path: backup, content: b, mode: 0o600, kind: "backup", source: orig})
+		return nil
+	}
+	if err := pair(l.Config); err != nil {
+		return nil, err
+	}
+	if err := pair(l.Config + ".sig"); err != nil {
+		return nil, err
+	}
+	ents, err := os.ReadDir(l.p(l.FleetDir))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	for _, e := range ents {
+		if e.Type().IsRegular() {
+			if err := pair(l.FleetDir + "/" + e.Name()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return items, nil
+}
+
+// manifestOf is the manifest of items, sorted by path; the copies get
+// copyHash.
+func manifestOf(items []item, copyHash string) Manifest {
+	var m Manifest
+	for _, it := range items {
+		h := sum(it.content)
+		if it.kind == "copy" {
+			h = copyHash
+		}
+		m.Entries = append(m.Entries, Entry{Path: it.path, SHA256: h, Mode: uint32(it.mode), Kind: it.kind, Source: it.source})
+	}
+	slices.SortFunc(m.Entries, func(a, b Entry) int { return strings.Compare(a.Path, b.Path) })
+	return m
+}
+
+// Uninstall writes the uninstalled marker, removes the pinned hash (so nothing can be restored or launched
 // while it works), stops the guards and the timer, makes everything of the manifest
 // mutable again, removes it and the manifest, deletes the firewall table,
 // reloads systemd and last stops the agent's unit: the agent may be the
@@ -166,6 +194,13 @@ func Uninstall(l Layout, run Runner) error {
 	// and ensure restores and starts nothing, so a guard caught mid-look
 	// by the stop below cannot bring anything back.
 	var errs []string
+	// The marker before all: it is what says "uninstalled" to ensure, the
+	// guards and the agent, whatever files remain.
+	if l.Uninstalled != "" {
+		if err := atomic(l.p(l.Uninstalled), nil, 0o600); err != nil {
+			return fmt.Errorf("uninstalled marker: %w", err)
+		}
+	}
 	for _, p := range []string{l.Pinned, l.Backup + "/pinned.sha256"} {
 		full := l.p(p)
 		if _, err := os.Lstat(full); err != nil {
@@ -231,3 +266,43 @@ func Uninstall(l Layout, run Runner) error {
 }
 
 const agentUnit = "xdr-agent.service"
+
+// Repin rewrites what is missing of the pinned hash (both copies, from
+// hash) and of the manifest (both copies, from manifest when given, else
+// rebuilt as install would write it), makes them immutable and returns what
+// it wrote. Nothing on a box marked uninstalled.
+func Repin(l Layout, run Runner, hash string, manifest []byte) ([]string, error) {
+	if Uninstalled(l) || hash == "" {
+		return nil, nil
+	}
+	var wrote, errs []string
+	missing := func(p string) bool { _, err := os.Lstat(l.p(p)); return errors.Is(err, fs.ErrNotExist) }
+	if manifest == nil && missing(l.Manifest) && missing(l.Backup+"/manifest.json") {
+		items, err := collect(l, nil)
+		if err != nil {
+			return nil, err
+		}
+		manifest, _ = json.Marshal(manifestOf(items, hash))
+	}
+	pinned := []byte(hash + "\n")
+	for _, f := range []item{
+		{path: l.Pinned, content: pinned, mode: 0o644},
+		{path: l.Backup + "/pinned.sha256", content: pinned, mode: 0o600},
+		{path: l.Manifest, content: manifest, mode: 0o644},
+		{path: l.Backup + "/manifest.json", content: manifest, mode: 0o600},
+	} {
+		if f.content == nil || !missing(f.path) {
+			continue
+		}
+		if err := atomic(l.p(f.path), f.content, f.mode); err != nil {
+			errs = append(errs, f.path+": "+err.Error())
+			continue
+		}
+		run("chattr", "+i", l.p(f.path))
+		wrote = append(wrote, f.path)
+	}
+	if errs != nil {
+		return wrote, errors.New(strings.Join(errs, "; "))
+	}
+	return wrote, nil
+}

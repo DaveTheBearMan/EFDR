@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -232,4 +233,54 @@ func (a *agent) ensureNotes() {
 		}
 		a.record(in)
 	}
+}
+
+// keepPinned puts back the pinned hash and the manifest when both copies of
+// either are gone: ensure has nothing to restore them from, and without
+// them every launch point stands down. The hash is the manifest's for the
+// copies (what install pinned), else the agent's own. A box marked
+// uninstalled by anything but this agent's own uninstall is reported, once,
+// and left: the CLI's uninstall may be at work.
+func (a *agent) keepPinned() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runner == nil || a.uninstalled || a.uninstTried {
+		return
+	}
+	l := a.layout
+	if b, err := install.ReadManifestBytes(l); err == nil {
+		a.manifest = b
+	}
+	if install.Uninstalled(l) {
+		if !a.markerSaid {
+			a.markerSaid = true
+			a.record(incident.Incident{Kind: "tamper", Action: "alert", Severity: model.SevHigh, Path: l.Uninstalled,
+				Detail: "the box is marked uninstalled while the agent runs: ensure and the guards stand down"})
+		}
+		return
+	}
+	a.markerSaid = false
+	hash := a.selfHash
+	var m install.Manifest
+	if a.manifest != nil && json.Unmarshal(a.manifest, &m) == nil {
+		for _, e := range m.Entries {
+			if e.Kind == "copy" && e.SHA256 != "" {
+				hash = e.SHA256
+				break
+			}
+		}
+	}
+	wrote, err := install.Repin(l, a.runner, hash, a.manifest)
+	if len(wrote) == 0 && err == nil {
+		return
+	}
+	in := incident.Incident{Kind: "tamper", Action: "repaired", Severity: model.SevHigh,
+		Detail: "the pinned hash or the manifest was gone, both copies: the agent rewrote " + strings.Join(wrote, ", ")}
+	if len(wrote) > 0 {
+		in.Path = wrote[0]
+	}
+	if err != nil {
+		in.Action, in.Severity, in.Detail = "alert", model.SevCritical, in.Detail+": "+err.Error()
+	}
+	a.record(in)
 }
