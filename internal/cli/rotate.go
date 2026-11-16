@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
+	"path/filepath"
 	"strings"
 	"time"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"xdr/internal/controller"
 	"xdr/internal/creds"
@@ -35,71 +37,43 @@ func rotateCmd(rest []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stderr, "xdr controller rotate: --dir, --host and --users are required\n")
 		return errUsage
 	}
-	names := strings.Split(*users, ",")
-	var sambaNames []string
+	spec := controller.RotateSpec{Host: *host, Users: strings.Split(*users, ","), HostKeys: *hostKeys}
 	if *samba != "" {
-		sambaNames = strings.Split(*samba, ",")
+		spec.Samba = strings.Split(*samba, ",")
 	}
-	for _, u := range names {
-		if !userArg.MatchString(u) {
-			return fmt.Errorf("%q is not a user name", u)
-		}
-		if err := refuseProtected(*dir, u, true); err != nil {
-			return err
-		}
-	}
-	for _, u := range sambaNames {
-		if !slices.Contains(names, u) {
-			return fmt.Errorf("--samba %s is not in --users", u)
-		}
-	}
-	var keys []string
 	if *keysFile != "" {
 		b, err := os.ReadFile(*keysFile)
 		if err != nil {
 			return err
 		}
-		keys = []string{}
+		spec.Keys = []string{}
 		sc := bufio.NewScanner(bytes.NewReader(b))
 		for sc.Scan() {
 			if l := strings.TrimSpace(sc.Text()); l != "" && !strings.HasPrefix(l, "#") {
-				keys = append(keys, l)
+				spec.Keys = append(spec.Keys, l)
 			}
 		}
 	}
-	if err := enrolled(*dir, *host); err != nil {
-		return err
-	}
-	store, err := creds.Load(*dir)
+	cfg, err := controller.LoadConfig(filepath.Join(*dir, "controller.json"))
 	if err != nil {
 		return err
 	}
-	pw := map[string]string{}
-	now := time.Now().UTC()
-	for _, u := range names {
-		pw[u] = creds.Password()
-		svc := "ssh"
-		if slices.Contains(sambaNames, u) {
-			svc = "samba"
-		}
-		store.Put(*host, u, creds.Entry{Password: pw[u], Service: svc, Rotated: now})
-	}
-	if err := store.Save(); err != nil {
-		return err
-	}
-	set := creds.NewSet(pw, sambaNames, keys, *hostKeys)
-	c, err := rootClient(*dir, *endpoint)
-	if err != nil {
-		return fmt.Errorf("passwords stored, not sent: %w", err)
-	}
-	defer c.Close()
+	var c *clientv3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := controller.PutOrder(ctx, c, *host, "creds", "", set); err != nil {
-		return fmt.Errorf("passwords stored, not sent (run rotate again): %w", err)
+	out, err := controller.Rotate(ctx, *dir, cfg, spec, func() (*clientv3.Client, error) {
+		var err error
+		c, err = rootClient(*dir, *endpoint)
+		return c, err
+	})
+	if c != nil {
+		defer c.Close()
 	}
-	for _, u := range names {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", *host, store.Hosts[*host][u].Service, u, pw[u])
+	if err != nil {
+		return err
+	}
+	for _, r := range out {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", r.Host, r.Service, r.User, r.Password)
 	}
 	return nil
 }

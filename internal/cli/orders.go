@@ -99,5 +99,5 @@ func enrolled(dir, host string) error {
 // an agent can tell one left over from before its boot (session ids
 // restart at every boot).
 func orderValue(verdict string, at time.Time) map[string]any {
-	return map[string]any{"verdict": verdict, "at": at.Unix()}
+	return controller.OrderValue(verdict, at, "")
 }
