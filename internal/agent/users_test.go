@@ -207,3 +207,19 @@ func TestUsers_PauseAlertsInsteadOfLocking(t *testing.T) {
 		t.Fatalf("after the pause: %v", um)
 	}
 }
+
+// A second uid 0 account is root by another name: Critical.
+func TestUsers_NewUID0IsCritical(t *testing.T) {
+	r, _ := usersRig(t)
+	testfs.File(t, r.root, "etc/passwd", passwd+"toor:x:0:0::/root:/bin/bash\n", 0o644)
+	r.a.accounts(r.snap)
+	for _, in := range r.kind("user-new") {
+		if in.User == "toor" {
+			if in.Severity != model.SevCritical {
+				t.Fatalf("%+v", in)
+			}
+			return
+		}
+	}
+	t.Fatal("toor not told")
+}

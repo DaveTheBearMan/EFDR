@@ -76,6 +76,9 @@ func (a *agent) accounts(s *proc.Snapshot) {
 		if acc.UID < firstUserUID || !loginShell(acc.Shell) || a.runsGuarded(s, acc.UID) {
 			a.userSaid[acc.Name] = true
 			in.Kind, in.Action, in.Severity = "user-new", "alert", model.SevMedium
+			if acc.UID == 0 {
+				in.Severity = model.SevCritical // root by another name
+			}
 			a.record(in)
 			continue
 		}
