@@ -458,7 +458,7 @@ func (s *State) derive() derived {
 			if _, done := s.covered(aid, in.Time); !done {
 				put(Approval{ID: aid, Host: in.Host, Kind: "proc", Title: fmt.Sprintf("%s (pid %d) held: %s", in.Kind, in.PID, in.Exe),
 					Why:    "Held because it is a scored service. Killing it takes the service offline until it is restarted. " + in.Detail,
-					Params: map[string]string{"pid": strconv.Itoa(in.PID), "sha256": in.SHA256, "exe": in.Exe}, Actions: []string{"kill", "ignore"}, Time: in.Time})
+					Params: map[string]string{"pid": strconv.Itoa(in.PID), "sha256": in.SHA256, "exe": in.Exe, "user": in.User}, Actions: []string{"kill", "ignore"}, Time: in.Time})
 			}
 		}
 	}

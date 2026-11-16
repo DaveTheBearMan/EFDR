@@ -343,3 +343,21 @@ func TestServer_ActionsAudited(t *testing.T) {
 		}
 	}
 }
+
+// A gray account is alert-only everywhere: the controller refuses a kill
+// order for its process before any agent must.
+func TestActions_ProcKillOfGrayRefused(t *testing.T) {
+	a, s, f := actionsRig(t)
+	s.Feed(inc("web01", "service-shell", "held", time.Second, func(i *incident.Incident) {
+		i.PID, i.Exe, i.SHA256, i.User = 960, "/usr/bin/dash", "abcdef0123456789abcdef", "gray1"
+	}))
+	if err := a.Decide(context.Background(), "p:web01:960:abcdef012345", "kill"); err == nil {
+		t.Fatal("a kill of a gray account's process was accepted")
+	}
+	if v, _ := get(t, f, fleet.To("web01")+"proc/960"); v != "" {
+		t.Fatalf("order put: %q", v)
+	}
+	if _, ok := s.Peek("p:web01:960:abcdef012345"); !ok {
+		t.Fatal("a refused approval was marked handled")
+	}
+}

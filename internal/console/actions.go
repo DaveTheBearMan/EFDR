@@ -64,6 +64,9 @@ func (a *Actions) Decide(ctx context.Context, id, action string) error {
 		}
 	case "proc":
 		if action == "kill" {
+			if err := controller.RefuseProtected(a.Cfg, ap.Params["user"], false); err != nil {
+				return err
+			}
 			kind, name, sum = "proc", ap.Params["pid"], ap.Params["sha256"]
 		}
 	}
