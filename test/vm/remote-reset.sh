@@ -4,7 +4,16 @@
 # stops XDR and the tests' leftovers, drops the firewall and restores those
 # files. Run by the ssh backend before and after a test, and by the box's
 # dead-man timer if the test never comes back.
+#   xdr-e2e-reset controller   on the jump box: only removes the controller
+#                              unit `xdr controller install` put there
 set -u
+if [ "${1:-}" = controller ]; then
+  systemctl disable --now xdr-controller.service >/dev/null 2>&1
+  systemctl reset-failed xdr-controller.service 2>/dev/null
+  rm -f /etc/systemd/system/xdr-controller.service
+  systemctl daemon-reload
+  exit 0
+fi
 SAVED=/var/backups/xdr-e2e-pristine.tar
 HOMES=/var/backups/xdr-e2e-homes # the homes there were at the first save
 ARMED=/var/lib/xdr-e2e-armed     # a test is running: reset at boot
