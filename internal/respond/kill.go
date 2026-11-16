@@ -24,6 +24,10 @@ func Decide(d detect.Detection, s *proc.Snapshot, p *detect.Policy) string {
 		return "held"
 	case d.Kind == "revshell-stdio" || d.Kind == "service-shell":
 		return "kill"
+	case (d.Kind == "egress" || d.Kind == "dns") && (p.Baseline(pr) || proc.Container(pr.Cgroup) != ""):
+		// A base-image program is a lead, not a kill; a container's
+		// process cannot be told from a scored service's child.
+		return "alert"
 	case p.IsGray(s, pr):
 		return "alert"
 	case p.Baseline(pr) && detect.Class(pr) == "":

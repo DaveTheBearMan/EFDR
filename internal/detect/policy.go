@@ -39,10 +39,11 @@ func within(nets []config.Net, a netip.Addr) bool {
 	return false
 }
 
-// AllowedOut reports whether a process may send to dst. It mirrors the
-// output chain of the firewall, except for the resolver: that is for the
-// stub alone.
-func (p *Policy) AllowedOut(dst netip.AddrPort, proto string) bool {
+// Known reports whether dst is somewhere every box talks to: loopback,
+// multicast, broadcast, this host's own addresses, and the jump box and
+// the peers on the agents' ports. There is no list of allowed destinations:
+// anywhere else is judged by the process that talks to it.
+func (p *Policy) Known(dst netip.AddrPort, proto string) bool {
 	a, port := dst.Addr().Unmap(), dst.Port()
 	switch {
 	case a.IsLoopback(), a.IsMulticast(), a == broadcast:
@@ -51,13 +52,6 @@ func (p *Policy) AllowedOut(dst netip.AddrPort, proto string) bool {
 		return true
 	case proto == "tcp" && slices.Contains(p.Cfg.XDRPorts, port) && (within(p.Cfg.Jump, a) || within(p.Cfg.Peers, a)):
 		return true
-	case p.Cfg.DHCP && proto == "udp" && port == 67:
-		return true
-	}
-	for _, d := range p.Cfg.AllowOut {
-		if d.Proto == proto && d.Port == port && d.To.Contains(a) {
-			return true
-		}
 	}
 	return false
 }

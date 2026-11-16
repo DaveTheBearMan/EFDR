@@ -112,17 +112,29 @@ func (p *Policy) serviceShell(cls string, s *proc.Snapshot, ancestors []*proc.Pr
 	return fmt.Sprintf("started under %s (pid %d)", name(svc), svc.PID), true
 }
 
-// egress names a destination a process may not reach: "dns" for a name
-// server, "egress" for anything else, "" when it is allowed.
-func (p *Policy) egress(dst netip.AddrPort, proto string) (kind, detail string) {
-	if !dst.IsValid() || dst.Addr().IsUnspecified() || p.AllowedOut(dst, proto) {
-		return "", ""
+// egress judges an outbound connection by the process behind it, not by
+// where it goes (nothing says which destinations a scored service may
+// need). A program of the base image with no shell, interpreter or network
+// tool role is normal and raises nothing; one with such a role is a lead
+// (Medium); anything else is High, and so is a process that has already
+// exited (pr nil). The kind is "dns" for a name server, "egress" for
+// anywhere else.
+func (p *Policy) egress(pr *proc.Proc, dst netip.AddrPort, proto string) (kind, detail string, sev model.Severity) {
+	if !dst.IsValid() || dst.Addr().IsUnspecified() || p.Known(dst, proto) {
+		return "", "", 0
+	}
+	sev = model.SevHigh
+	if pr != nil && p.Baseline(pr) {
+		if Class(pr) == "" {
+			return "", "", 0
+		}
+		sev = model.SevMedium
 	}
 	dst = netip.AddrPortFrom(dst.Addr().Unmap(), dst.Port())
 	if dst.Port() == 53 || dst.Port() == 853 {
-		return "dns", fmt.Sprintf("%s to name server %s, past the stub", proto, dst)
+		return "dns", fmt.Sprintf("%s to name server %s", proto, dst), sev
 	}
-	return "egress", fmt.Sprintf("%s to %s is not allowed out", proto, dst)
+	return "egress", fmt.Sprintf("%s to %s", proto, dst), sev
 }
 
 // listening is the tcp ports with a listener, per network namespace.
@@ -317,12 +329,12 @@ func Sweep(s *proc.Snapshot, p *Policy) []Detection {
 			if k.Proto == "tcp" && !k.SynSent && listens[pr.NetNS][k.Local.Port()] {
 				continue
 			}
-			kind, detail := p.egress(k.Remote, k.Proto)
+			kind, detail, sev := p.egress(pr, k.Remote, k.Proto)
 			if kind == "" || seen[detail] {
 				continue
 			}
 			seen[detail] = true
-			out = append(out, Detection{Kind: kind, PID: pid, Start: pr.Start, Severity: model.SevHigh, Remote: endpoint(k.Remote, k.Proto), Detail: detail})
+			out = append(out, Detection{Kind: kind, PID: pid, Start: pr.Start, Severity: sev, Remote: endpoint(k.Remote, k.Proto), Detail: detail})
 		}
 		if raw != "" && !p.knownRaw(raw, pr) {
 			out = append(out, Detection{Kind: "rawsock", PID: pid, Start: pr.Start, Severity: model.SevHigh, Detail: "holds a " + raw + " socket"})
@@ -352,11 +364,11 @@ func Event(ev sensor.Event, s *proc.Snapshot, p *Policy) []Detection {
 			hit.Detail += suffix
 			out = append(out, hit)
 		}
-		kind, detail := p.egress(ev.Dst, ev.Proto)
+		kind, detail, sev := p.egress(pr, ev.Dst, ev.Proto)
 		if kind == "" {
 			return out
 		}
-		d.Kind, d.Detail, d.Remote = kind, detail+suffix, endpoint(ev.Dst, ev.Proto)
+		d.Kind, d.Detail, d.Remote, d.Severity = kind, detail+suffix, endpoint(ev.Dst, ev.Proto), sev
 		return append(out, d)
 	case sensor.Socket:
 		raw := ""

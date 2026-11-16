@@ -643,7 +643,7 @@ func (a *agent) wanted(ev sensor.Event) bool {
 	defer a.mu.Unlock()
 	switch ev.Kind {
 	case sensor.Connect, sensor.Send:
-		return !a.pol.AllowedOut(ev.Dst, ev.Proto)
+		return !a.pol.Known(ev.Dst, ev.Proto)
 	}
 	return true
 }

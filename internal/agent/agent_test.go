@@ -155,6 +155,13 @@ func egress(p *proc.Proc) detect.Detection {
 		Detail: "connects to 203.0.113.9:4444, which is not allowed out"}
 }
 
+// revshell is the detection of a shell whose stdio is the connection to c2:
+// it kills even a base-image shell.
+func revshell(p *proc.Proc) detect.Detection {
+	return detect.Detection{Kind: "revshell-stdio", PID: p.PID, Start: p.Start, Severity: model.SevCritical, Remote: c2,
+		Detail: "stdio is a socket to 203.0.113.9:4444"}
+}
+
 func TestHandle_KillWritesIncident(t *testing.T) {
 	r := newRig(t)
 	x := mk(300, 100, 1000, "/tmp/x")
@@ -415,6 +422,7 @@ func TestGuard_ApplyFailureIsLoggedAndRetried(t *testing.T) {
 func TestGuard_DNSExpiryReappliesWithoutDriftIncident(t *testing.T) {
 	r := newRig(t)
 	r.a.cfg.DNS.Resolver = netip.MustParseAddr("192.0.2.53")
+	r.a.cfg.DNS.Pin = true
 	r.a.cfg.DNS.Enabled = true
 	r.a.cfg.DNS.Expires = r.now.Add(time.Hour)
 	mark := fmt.Sprintf("meta mark %#x", fw.DNSMark)

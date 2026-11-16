@@ -123,7 +123,7 @@ func TestSweep_Egress(t *testing.T) {
 		"connected to a stranger":  {conn(500, "tcp", "192.0.2.5:40000", "203.0.113.9:443"), []string{"egress:10"}},
 		"accepted on the listener": {conn(500, "tcp", "192.0.2.5:80", "203.0.113.9:51000"), nil},
 		"connected to a peer":      {conn(500, "tcp", "192.0.2.5:40000", "192.0.2.4:7443"), nil},
-		"allow_out":                {conn(500, "tcp", "192.0.2.5:40000", "192.0.2.6:3306"), nil},
+		"a peer, not an xdr port":  {conn(500, "tcp", "192.0.2.5:40000", "192.0.2.6:3306"), []string{"egress:10"}},
 		"loopback":                 {conn(500, "tcp", "127.0.0.1:40000", "127.0.0.1:3306"), nil},
 		"udp connected, dns":       {conn(500, "udp", "192.0.2.5:40000", "203.0.113.53:53"), []string{"dns:10"}},
 		"tcp to the resolver":      {conn(500, "tcp", "192.0.2.5:40000", "192.0.2.1:53"), []string{"dns:10"}},
@@ -133,7 +133,7 @@ func TestSweep_Egress(t *testing.T) {
 		"v4-mapped peer":           {proc.Sock{Inode: 500, Family: unix.AF_INET6, Proto: "tcp", Local: ap("192.0.2.5:40000"), Remote: ap("192.0.2.4:7443")}, nil},
 		"closed socket, no remote": {proc.Sock{Inode: 500, Family: unix.AF_INET, Proto: "tcp", Local: ap("0.0.0.0:0"), Remote: ap("0.0.0.0:0")}, nil},
 	} {
-		ds := Sweep(snap(append(web(), mk(10, 1, "/usr/bin/curl", map[int]uint64{5: 500, 6: 500})), http, c.sock), pol())
+		ds := Sweep(snap(append(web(), mk(10, 1, "/tmp/dropper", map[int]uint64{5: 500, 6: 500})), http, c.sock), pol())
 		if c.want == nil {
 			c.want = []string{}
 		}
@@ -218,7 +218,7 @@ func TestSweep_IgnoresSelfAndKernelThreads(t *testing.T) {
 }
 
 func TestEvent_ConnectDenied(t *testing.T) {
-	s := snap(procs{systemd, mk(50, 1, "/usr/bin/curl", nil)})
+	s := snap(procs{systemd, mk(50, 1, "/tmp/dropper", nil)})
 	ds := Event(sensor.Event{Kind: sensor.Connect, PID: 50, Dst: ap("203.0.113.9:443"), Proto: "tcp"}, s, pol())
 	want(t, ds, "egress:50")
 	if ds[0].Start != 1050 || ds[0].Severity != model.SevHigh || !reflect.DeepEqual(ds[0].Remote, &incident.Endpoint{Addr: "203.0.113.9", Port: 443, Proto: "tcp"}) {
@@ -330,4 +330,35 @@ func TestRawSock_KnownHolder(t *testing.T) {
 		t.Fatalf("event: %v", kinds(ds))
 	}
 	want(t, Event(sensor.Event{Kind: sensor.Socket, PID: 11, Family: unix.AF_PACKET, SockType: unix.SOCK_RAW}, s, p), "rawsock:11")
+}
+
+func TestEgress_ByProcess(t *testing.T) {
+	p := pol()
+	for _, c := range []struct {
+		name, exe, dst, proto string
+		kind                  string
+		sev                   model.Severity
+	}{
+		{"a base-image service", "/usr/sbin/chronyd", "203.0.113.9:123", "udp", "", 0},
+		{"a base-image shell", "/usr/bin/bash", "203.0.113.9:4444", "tcp", "egress", model.SevMedium},
+		{"a base-image interpreter", "/usr/bin/python3.12", "203.0.113.9:4444", "tcp", "egress", model.SevMedium},
+		{"not in the base image", "/tmp/x", "203.0.113.9:4444", "tcp", "egress", model.SevHigh},
+		{"a base-image path with other content", "/usr/bin/changed", "203.0.113.9:4444", "tcp", "egress", model.SevHigh},
+		{"loopback", "/tmp/x", "127.0.0.1:4444", "tcp", "", 0},
+		{"the jump box on an xdr port", "/tmp/x", "192.0.2.7:7443", "tcp", "", 0},
+		{"multicast", "/tmp/x", "224.0.0.251:5353", "udp", "", 0},
+		{"a name server, not in the base image", "/tmp/x", "192.0.2.1:53", "udp", "dns", model.SevHigh},
+		{"dns over tls, not in the base image", "/tmp/x", "203.0.113.53:853", "tcp", "dns", model.SevHigh},
+		{"the base-image resolver", "/usr/lib/systemd/systemd-resolved", "192.0.2.1:53", "udp", "", 0},
+		{"a base-image shell asking a name server", "/usr/bin/bash", "192.0.2.1:53", "udp", "dns", model.SevMedium},
+	} {
+		kind, detail, sev := p.egress(mk(10, 1, c.exe, nil), ap(c.dst), c.proto)
+		if kind != c.kind || sev != c.sev || (kind != "" && !strings.Contains(detail, c.dst)) {
+			t.Errorf("%s: got %q %q %v, want %q %v", c.name, kind, detail, sev, c.kind, c.sev)
+		}
+	}
+	// A process that exited before it could be looked at is still reported.
+	if kind, _, sev := p.egress(nil, ap("203.0.113.9:4444"), "tcp"); kind != "egress" || sev != model.SevHigh {
+		t.Errorf("nil process: %q %v", kind, sev)
+	}
 }

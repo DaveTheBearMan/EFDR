@@ -29,6 +29,7 @@ func ap(s string) netip.AddrPort { return netip.MustParseAddrPort(s) }
 var hashes = map[string]string{
 	"/usr/bin/bash": "aa", "/usr/bin/dash": "bb", "/usr/bin/curl": "cc", "/usr/sbin/apache2": "dd",
 	"/usr/bin/changed": "new", "/usr/lib/systemd/systemd": "ee",
+	"/usr/sbin/chronyd": "c1", "/usr/bin/python3.12": "p1", "/usr/lib/systemd/systemd-resolved": "r1",
 }
 
 func pol() *Policy {
@@ -116,7 +117,7 @@ func TestClass(t *testing.T) {
 	}
 }
 
-func TestAllowedOut_V4MappedAndOwnAddress(t *testing.T) {
+func TestKnown_V4MappedAndOwnAddress(t *testing.T) {
 	p := pol()
 	for _, c := range []struct {
 		dst, proto string
@@ -129,24 +130,16 @@ func TestAllowedOut_V4MappedAndOwnAddress(t *testing.T) {
 		{"[::1]:8080", "tcp", true},
 		{"224.0.0.251:5353", "udp", true},
 		{"255.255.255.255:67", "udp", true},
-		{"192.0.2.6:3306", "tcp", true}, // allow_out
-		{"192.0.2.1:67", "udp", true},   // dhcp
 		{"203.0.113.9:443", "tcp", false},
 		{"192.0.2.4:22", "tcp", false},   // a peer, but not an xdr port
 		{"192.0.2.4:7443", "udp", false}, // xdr is tcp
-		{"192.0.2.6:3306", "udp", false},
-		{"192.0.2.6:3307", "tcp", false},
-		{"192.0.2.1:67", "tcp", false},
-		{"192.0.2.1:53", "udp", false}, // the resolver is for the stub alone
+		{"192.0.2.6:3306", "tcp", false}, // no allowlist: an address alone is not known
+		{"192.0.2.1:53", "udp", false},
 		{"[2001:db8::1]:443", "tcp", false},
 	} {
-		if got := p.AllowedOut(ap(c.dst), c.proto); got != c.want {
-			t.Errorf("AllowedOut(%s, %s) = %v", c.dst, c.proto, got)
+		if got := p.Known(ap(c.dst), c.proto); got != c.want {
+			t.Errorf("Known(%s, %s) = %v", c.dst, c.proto, got)
 		}
-	}
-	p.Cfg.DHCP = false
-	if p.AllowedOut(ap("192.0.2.1:67"), "udp") {
-		t.Error("dhcp off: udp/67 still allowed")
 	}
 }
 

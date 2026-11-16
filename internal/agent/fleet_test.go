@@ -69,8 +69,8 @@ func TestHandle_KillProposes(t *testing.T) {
 	r, f = fleetRig(t)
 	bash := mk(301, 100, 1000, "/usr/bin/bash")
 	r.a.pol.Base = &baseline.Baseline{Files: map[string]baseline.FileEntry{pathenc.Encode("/usr/bin/bash"): {SHA256: hexSum("/usr/bin/bash")}}}
-	r.a.handle(tree(bash), []detect.Detection{egress(bash)})
-	if len(f.proposed) != 1 || f.proposed[0].Kind != "remote" {
+	r.a.handle(tree(bash), []detect.Detection{revshell(bash)})
+	if !onlyEndpointAndParent(f.proposed) {
 		t.Fatalf("baseline: %+v", f.proposed)
 	}
 
@@ -95,8 +95,8 @@ func TestHandle_BaselineJudgedBeforeKill(t *testing.T) {
 		}
 		return hexSum(p.Exe)
 	}
-	r.a.handle(tree(bash), []detect.Detection{egress(bash)})
-	if len(r.kills) != 1 || len(f.proposed) != 1 || f.proposed[0].Kind != "remote" {
+	r.a.handle(tree(bash), []detect.Detection{revshell(bash)})
+	if len(r.kills) != 1 || !onlyEndpointAndParent(f.proposed) {
 		t.Fatalf("kills %d, proposed %+v", len(r.kills), f.proposed)
 	}
 }
@@ -183,8 +183,8 @@ func TestHandle_ContainerShellNoHash(t *testing.T) {
 	r, f := fleetRig(t)
 	sh := mk(301, 100, 1000, "/bin/sh")
 	sh.Cgroup = "0::/system.slice/docker-" + strings.Repeat("ab", 32) + ".scope"
-	r.a.handle(tree(sh), []detect.Detection{egress(sh)})
-	if len(f.proposed) != 1 || f.proposed[0].Kind != "remote" {
+	r.a.handle(tree(sh), []detect.Detection{revshell(sh)})
+	if !onlyEndpointAndParent(f.proposed) {
 		t.Fatalf("%+v", f.proposed)
 	}
 }
@@ -275,4 +275,21 @@ func TestDescribe_ScoredUnitNotOrigin(t *testing.T) {
 			t.Fatalf("unit rule proposed: %+v", p)
 		}
 	}
+}
+
+// onlyEndpointAndParent: the rules proposed for the kill of a base-image
+// binary name its endpoint (and its parent), never its hash, which is the
+// image's own.
+func onlyEndpointAndParent(rs []rules.Rule) bool {
+	remote := false
+	for _, r := range rs {
+		switch r.Kind {
+		case "remote":
+			remote = true
+		case "parent":
+		default:
+			return false
+		}
+	}
+	return remote
 }
