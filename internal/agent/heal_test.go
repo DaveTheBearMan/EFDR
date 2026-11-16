@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,9 @@ func newHealRig(t *testing.T) *healRig {
 	h := &healRig{rig: r, f: f, m: m, outs: map[string]string{
 		"nft -a list ruleset": healNft, "ip route": healRoutes,
 		"ip rule": "0:\tfrom all lookup local\n", "ip -6 rule": "0:\tfrom all lookup local\n", "ip -6 route": "",
-		"ss -H -ltn":                  "LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n",
+		"ss -H -ltnp": "LISTEN 0 128 0.0.0.0:80 0.0.0.0:* users:((\"apache2\",pid=900,fd=4))\n",
+		"systemctl list-unit-files --no-legend ssh.service sshd.service": "ssh.service  enabled enabled\nsshd.service alias   -\n",
+		"systemctl show -p ActiveState --value ssh.service":              "failed\n",
 		"ip -o link show eth0":        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
 		"ip -o -4 addr show dev eth0": "2: eth0 inet 203.0.113.5/24 brd 203.0.113.255 scope global eth0\n",
 		"ip route show default":       "default via 203.0.113.1 dev eth0\n",
@@ -219,7 +222,7 @@ func TestLadder_ScoredPortAndSshdListening(t *testing.T) {
 		"\t\ttcp dport 80 drop # handle 5\n\t\ttcp dport 22 drop # handle 6\n\t\tip saddr 192.0.2.7 tcp dport 7443 drop # handle 7\n\t}\n}\n"
 	h.outs["iptables-legacy-save"] = "*filter\n-A INPUT -p tcp -m tcp --dport 22 -j DROP\nCOMMIT\n"
 	h.outs["ip route"] = "default via 203.0.113.1 dev eth0\n"
-	h.outs["ss -H -ltn"] = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
+	h.outs["ss -H -ltnp"] = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=700,fd=3))\n"
 	h.cutOff()
 	for i := 0; i < 8; i++ {
 		h.step()
@@ -342,5 +345,159 @@ func TestLadder_HostsDenyWrittenAtomically(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Dir(deny)); len(ents) != 1 {
 		t.Fatalf("temporary files left: %v", ents)
+	}
+}
+
+// sshRung runs the ladder to its fourth rung (sshd) and returns what ran.
+func (h *healRig) sshRung() []string {
+	h.outs["nft -a list ruleset"], h.outs["ip route"] = "", ""
+	h.cutOff()
+	for i := 0; i < 4; i++ {
+		h.step()
+		h.now = h.now.Add(31 * time.Second)
+	}
+	return h.ran
+}
+
+func TestLadder_SSHRestartUnitAndPort(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		outs map[string]string
+		want string // "" : no restart
+	}{
+		{"ssh.service failed, nothing on 22", nil, "systemctl restart ssh.service"},
+		{"only sshd.service", map[string]string{
+			"systemctl list-unit-files --no-legend ssh.service sshd.service": "sshd.service enabled disabled\n",
+			"systemctl show -p ActiveState --value sshd.service":             "inactive\n",
+		}, "systemctl restart sshd.service"},
+		{"no sshd unit at all", map[string]string{
+			"systemctl list-unit-files --no-legend ssh.service sshd.service": "",
+		}, ""},
+		{"sshd listens on another port", map[string]string{
+			"ss -H -ltnp": "LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=700,fd=3))\n",
+		}, ""},
+		{"active, configured for 2222", map[string]string{
+			"systemctl show -p ActiveState --value ssh.service": "active\n",
+			"sshd -T": "port 2222\npermitrootlogin prohibit-password\n",
+		}, ""},
+		{"active, configured for 22, not listening", map[string]string{
+			"systemctl show -p ActiveState --value ssh.service": "active\n",
+			"sshd -T": "port 22\npermitrootlogin prohibit-password\n",
+		}, "systemctl restart ssh.service"},
+		{"active, config unreadable", map[string]string{
+			"systemctl show -p ActiveState --value ssh.service": "active\n",
+		}, ""},
+	} {
+		h := newHealRig(t)
+		for k, v := range c.outs {
+			h.outs[k] = v
+		}
+		got := strings.Join(h.sshRung(), "|")
+		if got != c.want {
+			t.Errorf("%s: ran %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The ladder's commands run without the agent's lock: a slow nft must not
+// hold up the gate, the DNS stub or the sweep.
+func TestLadder_CommandsRunWithoutTheLock(t *testing.T) {
+	h := newHealRig(t)
+	h.cutOff()
+	h.step() // rung 1, the table
+	h.now = h.now.Add(3 * time.Second)
+	entered, release := make(chan struct{}), make(chan struct{})
+	h.a.run = func(name string, args ...string) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); h.step() }() // rung 2: removals
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removal never ran")
+	}
+	locked := make(chan struct{})
+	go func() { h.a.mu.Lock(); h.a.mu.Unlock(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("a.mu held while a ladder command ran")
+	}
+	close(release)
+	<-done
+	// What the rung did is still recorded once it finishes.
+	if n := len(h.kind("tamper")); n != 2 {
+		t.Fatalf("tamper incidents after the rung: %d %+v", n, h.got)
+	}
+}
+
+func TestLinkSnap_SavedWhenConnectedLoadedAtStart(t *testing.T) {
+	h := newHealRig(t)
+	h.f.down = false
+	path := filepath.Join(t.TempDir(), "link.json")
+	h.a.linkFile = path
+	h.outs["ip -o route show default"] = "default via 203.0.113.1 dev eth0 proto static\n"
+	h.step()
+	want := linkSnap{Link: "eth0", Addr: "203.0.113.5/24", Via: "203.0.113.1"}
+	if h.a.linkSnap != want {
+		t.Fatalf("snapshot %+v", h.a.linkSnap)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(b), "203.0.113.1") {
+		t.Fatalf("saved %q %v", b, err)
+	}
+	// Not refreshed before the slow cadence; refreshed after it.
+	h.outs["ip -o route show default"] = "default via 203.0.113.9 dev eth0\n"
+	h.now = h.now.Add(time.Minute)
+	h.step()
+	if h.a.linkSnap.Via != "203.0.113.1" {
+		t.Fatalf("refreshed too soon: %+v", h.a.linkSnap)
+	}
+	h.now = h.now.Add(linkSnapEvery)
+	h.step()
+	if h.a.linkSnap.Via != "203.0.113.9" {
+		t.Fatalf("not refreshed: %+v", h.a.linkSnap)
+	}
+	// Cut off, nothing is taken or saved: the network may be red team's.
+	h.outs["ip -o route show default"] = "default via 192.0.2.99 dev eth1\n"
+	h.f.down = true
+	saved, _ := os.ReadFile(path)
+	for i := 0; i < 6; i++ {
+		h.now = h.now.Add(linkSnapEvery)
+		h.step()
+	}
+	if h.a.linkSnap.Via != "203.0.113.9" {
+		t.Fatalf("taken while isolated: %+v", h.a.linkSnap)
+	}
+	if b, _ := os.ReadFile(path); string(b) != string(saved) {
+		t.Fatalf("saved while isolated: %s", b)
+	}
+
+	// A fresh agent on a box already cut off with the link down: the saved
+	// snapshot is what rung 3 restores.
+	h2 := newHealRig(t)
+	h2.a.linkFile = path
+	h2.a.loadLinkSnap()
+	if h2.a.linkSnap.Via != "203.0.113.9" || h2.a.linkSnap.Link != "eth0" {
+		t.Fatalf("loaded %+v", h2.a.linkSnap)
+	}
+	h2.outs["ip -o link show eth0"] = "2: eth0: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n"
+	h2.outs["ip -o -4 addr show dev eth0 scope global"] = ""
+	h2.outs["ip route show default"] = ""
+	h2.outs["nft -a list ruleset"], h2.outs["ip route"] = "", ""
+	h2.cutOff()
+	for i := 0; i < 3; i++ {
+		h2.step()
+		h2.now = h2.now.Add(31 * time.Second)
+	}
+	if !slices.Contains(h2.ran, "ip route add default via 203.0.113.9 dev eth0") || !slices.Contains(h2.ran, "ip link set eth0 up") {
+		t.Fatalf("ran %q", h2.ran)
 	}
 }

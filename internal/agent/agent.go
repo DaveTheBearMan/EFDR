@@ -119,7 +119,8 @@ type agent struct {
 
 	fleet     fleetLink // nil: a standalone agent
 	heal      ladderState
-	linkSnap  linkSnap                                          // the network as first found, for the ladder
+	linkSnap  linkSnap                                          // the network as last found connected, for the ladder
+	linkFile  string                                            // where linkSnap is kept; "": not kept
 	out       func(name string, args ...string) ([]byte, error) // command output; nil: exec
 	readFile  func(string) ([]byte, error)                      // nil: os.ReadFile
 	writeFile func(string, []byte) error                        // nil: writeAtomic
@@ -970,7 +971,8 @@ func Run(ctx context.Context, o Options) error {
 		go a.scanLoop(sctx, cfg.Scan.Interval.Duration, cfg.Scan.Full.Duration)
 	}
 
-	a.takeLinkSnap()
+	a.linkFile = filepath.Join(defaultState, "link.json")
+	a.loadLinkSnap() // the ladder takes a fresh one once the box is connected
 	a.sweep()
 	sweeps, guards := time.NewTicker(sweepEvery), time.NewTicker(guardEvery)
 	defer sweeps.Stop()
