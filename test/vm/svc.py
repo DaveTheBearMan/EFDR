@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""The scored service of the e2e-net test, on tcp/80.
+"""The scored service of the e2e-detect test, on tcp/80.
 
 GET / answers 200. GET /run starts a shell as a hijacked web server would;
 the agent must kill the shell and leave the service alone.

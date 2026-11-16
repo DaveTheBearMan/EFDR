@@ -1,6 +1,6 @@
 VERSION := $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build bpf test test-root e2e e2e-net e2e-fleet remote-check remote-reset remote-fleet remote-gate remote-block
+.PHONY: build bpf test test-root e2e e2e-fleet remote-check remote-reset remote-fleet remote-gate remote-block remote-detect
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X xdr/internal/cli.Version=$(VERSION)" -o bin/xdr ./cmd/xdr
@@ -22,9 +22,6 @@ test-root: build
 e2e: build
 	test/vm/e2e.sh
 
-e2e-net: build
-	test/vm/e2e-net.sh
-
 e2e-fleet: build
 	test/vm/e2e-fleet.sh
 
@@ -39,3 +36,5 @@ remote-gate: build
 	XDR_E2E_BACKEND=ssh test/vm/e2e-gate.sh
 remote-block: build
 	XDR_E2E_BACKEND=ssh test/vm/e2e-block.sh
+remote-detect: build
+	XDR_E2E_BACKEND=ssh test/vm/e2e-detect.sh
