@@ -48,6 +48,24 @@ func TestPath_Table(t *testing.T) {
 		{"/etc/passwd", "account-db", true},
 		{"/etc/shadow", "account-db", false},
 		{"/etc/gshadow", "account-db", false},
+		// units systemd-run and generators write under /run; a scope only
+		// adopts running processes (one per login), so it is not one
+		{"/run/systemd/transient/run-u7.service", "systemd-unit", true},
+		{"/run/systemd/transient/run-u7.timer", "systemd-unit", true},
+		{"/run/systemd/transient/run-u7.service.d/50-x.conf", "systemd-unit", true},
+		{"/run/systemd/transient/session-4.scope", "file", false},
+		{"/run/systemd/generator/x.mount", "systemd-unit", true},
+		{"/run/systemd/generator.early/x.service", "systemd-unit", true},
+		{"/run/systemd/generator.late/x.service", "systemd-unit", true},
+		{"/etc/systemd/system-environment-generators/x", "systemd-generator", true},
+		{"/etc/init.d/evil", "init-script", true},
+		{"/etc/logrotate.d/evil", "logrotate", true},
+		{"/etc/sudo.conf", "sudo", true},
+		{"/etc/pam.conf", "pam", true},
+		{"/etc/environment.d/90-x.conf", "login-hook", true},
+		{"/root/.ssh/rc", "login-hook", true},
+		{"/home/bob/.ssh/rc", "login-hook", true},
+		{"/home/bob/.bash_aliases", "login-hook", true},
 	}
 	for _, c := range cases {
 		got := Path(c.path)
