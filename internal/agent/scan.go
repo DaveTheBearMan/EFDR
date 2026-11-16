@@ -116,6 +116,9 @@ func (a *agent) scan(full bool) {
 		if err != nil || !strings.HasPrefix(path, "/") {
 			continue // an account, a group, a module
 		}
+		if a.manages(path) {
+			continue
+		}
 		seen[path] = true
 		e := live.Files[f.Subject]
 		fp := string(f.Kind) + "|" + f.Before + "|" + f.After + "|" + f.Detail + "|" + e.SHA256 + "|" + e.Link
@@ -145,4 +148,18 @@ func (a *agent) scan(full bool) {
 			delete(a.driftNew, FileID(path))
 		}
 	}
+}
+
+// manages reports whether the agent itself writes path: the gate's sshd
+// and PAM files, and the resolver files with dns.pin. A change there is the
+// agent's doing (or reported as ssh-drift / dns-files), not drift. The
+// caller holds a.mu.
+func (a *agent) manages(path string) bool {
+	switch path {
+	case "/etc/ssh/sshd_config", "/etc/pam.d/sshd":
+		return a.cfg.SSH != nil
+	case "/etc/hosts", "/etc/nsswitch.conf", "/etc/resolv.conf":
+		return a.cfg.DNS.Pin
+	}
+	return false
 }

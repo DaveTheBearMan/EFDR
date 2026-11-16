@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"xdr/internal/baseline"
+	"xdr/internal/config"
 	"xdr/internal/model"
 	"xdr/internal/pathenc"
 	"xdr/internal/testfs"
@@ -99,5 +100,45 @@ func TestScan_Bounded(t *testing.T) {
 	r.a.scan(false)
 	if len(r.a.drift) > maxDrift {
 		t.Fatalf("%d remembered", len(r.a.drift))
+	}
+}
+
+// The agent rewrites sshd_config and pam.d/sshd itself (the gate), and the
+// resolver files with dns.pin: that is not drift for an operator to look at
+// (assertSSH reports a change nobody asked for as ssh-drift).
+func TestScan_FilesTheAgentManagesAreNotDrift(t *testing.T) {
+	r := scanRig(t)
+	r.a.pol.Base.Files[pathenc.Encode("/etc/pam.d/sshd")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base pam")}
+	r.a.pol.Base.Files[pathenc.Encode("/etc/ssh/sshd_config")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base sshd")}
+	r.a.pol.Base.Files[pathenc.Encode("/etc/pam.d/login")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base login")}
+	testfs.File(t, r.root, "etc/pam.d/sshd", "rendered pam", 0o644)
+	testfs.File(t, r.root, "etc/ssh/sshd_config", "rendered sshd", 0o644)
+	testfs.File(t, r.root, "etc/pam.d/login", "tampered login", 0o644)
+	paths := func() map[string]bool {
+		m := map[string]bool{}
+		for _, in := range r.kind("file-drift") {
+			m[in.Path] = true
+		}
+		return m
+	}
+	r.a.scan(false)
+	if got := paths(); !got["/etc/pam.d/sshd"] || !got["/etc/ssh/sshd_config"] {
+		t.Fatalf("without the gate these are drift: %v", got)
+	}
+	r = scanRig(t)
+	r.a.pol.Base.Files[pathenc.Encode("/etc/pam.d/sshd")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base pam")}
+	r.a.pol.Base.Files[pathenc.Encode("/etc/ssh/sshd_config")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base sshd")}
+	r.a.pol.Base.Files[pathenc.Encode("/etc/pam.d/login")] = baseline.FileEntry{Type: baseline.TypeFile, Mode: 0o644, SHA256: sha("base login")}
+	testfs.File(t, r.root, "etc/pam.d/sshd", "rendered pam", 0o644)
+	testfs.File(t, r.root, "etc/ssh/sshd_config", "rendered sshd", 0o644)
+	testfs.File(t, r.root, "etc/pam.d/login", "tampered login", 0o644)
+	r.a.cfg.SSH = &config.SSH{Blue: []string{"alice"}}
+	r.a.scan(false)
+	got := paths()
+	if got["/etc/pam.d/sshd"] || got["/etc/ssh/sshd_config"] {
+		t.Fatalf("the gate's own files were reported: %v", got)
+	}
+	if !got["/etc/pam.d/login"] {
+		t.Fatalf("another pam file must still be reported: %v", got)
 	}
 }

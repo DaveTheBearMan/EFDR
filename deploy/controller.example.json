@@ -1,0 +1,8 @@
+{
+  "listen": "192.0.2.7:2379",
+  "protect": ["192.0.2.7"],
+  "gray_users": ["gray1"],
+  "recovery": "xdrrecover",
+  "auto": ["xdrops"],
+  "console": {"listen": "192.0.2.7:8443"}
+}

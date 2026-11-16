@@ -183,3 +183,10 @@ func TestControllerConfig_Console(t *testing.T) {
 		t.Fatalf("no console: %+v %v", c, err)
 	}
 }
+
+func TestExampleControllerConfigLoads(t *testing.T) {
+	c, err := controller.LoadConfig("../../deploy/controller.example.json")
+	if err != nil || c.Console == nil || len(c.GrayUsers) != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
