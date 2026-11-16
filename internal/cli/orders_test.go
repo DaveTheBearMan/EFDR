@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOrders_GrayRefused(t *testing.T) {
@@ -22,5 +25,13 @@ func TestOrders_GrayRefused(t *testing.T) {
 	se.Reset()
 	if code := Run([]string{"controller", "kill-session", "--dir", dir, "--host", "web01", "7;x"}, &so, &se); code == 0 || !strings.Contains(se.String(), "not a session id") {
 		t.Fatalf("bad id: %d %q", code, se.String())
+	}
+}
+
+func TestOrderValue_CarriesPutTime(t *testing.T) {
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	b, _ := json.Marshal(orderValue("approve", at))
+	if string(b) != `{"at":`+strconv.FormatInt(at.Unix(), 10)+`,"verdict":"approve"}` {
+		t.Fatal(string(b))
 	}
 }

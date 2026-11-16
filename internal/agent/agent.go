@@ -136,6 +136,8 @@ type agent struct {
 	tokenPub     ed25519.PublicKey                                     // the jump box's rule key; nil: tokens refused
 	used         map[string]time.Time                                  // break-glass token ids used, by expiry
 	state        string                                                // the state directory
+	bootID       string                                                // this boot's id
+	btime        int64                                                 // when this boot began (unix seconds); 0: unknown
 	spool        string                                                // the break-glass spool
 	disabled     map[string]bool                                       // accounts the agent locked
 	userSaid     map[string]bool                                       // new accounts already alerted on

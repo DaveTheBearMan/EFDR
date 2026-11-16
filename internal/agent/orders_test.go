@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
 	"xdr/internal/fleet"
+	"xdr/internal/testfs"
 )
 
 func order(kind, name, verdict string) fleet.Order {
@@ -46,5 +48,60 @@ func TestAgentOrders_SurviveRestart(t *testing.T) {
 	r.a.loadOrders()
 	if !r.a.approved["7"] || !r.a.okUsers["evil"] || r.a.ended["8"] {
 		t.Fatalf("approved %v ended %v users %v", r.a.approved, r.a.ended, r.a.okUsers)
+	}
+}
+
+func bootFiles(t *testing.T, r *rig, id string, btime int64) {
+	testfs.File(t, r.root, "proc/sys/kernel/random/boot_id", id+"\n", 0o644)
+	testfs.File(t, r.root, "proc/stat", "cpu  1 2 3\nbtime "+strconv.FormatInt(btime, 10)+"\nprocesses 5\n", 0o644)
+}
+
+// Session ids restart at 1 on every boot: what was approved or ordered
+// ended before a reboot must not follow the new session with that id.
+func TestAgentOrders_SessionOrdersDoNotSurviveReboot(t *testing.T) {
+	r, _ := tokenRig(t)
+	bootFiles(t, r, "boot-one", 1000)
+	r.a.loadOrders()
+	r.a.onOrder(order("session", "5", "approve"))
+	r.a.onOrder(order("session", "6", "kill"))
+	r.a.onOrder(order("user", "evil", "approve"))
+	bootFiles(t, r, "boot-two", 5000)
+	r.a.approved, r.a.ended, r.a.okUsers = nil, nil, nil
+	r.a.loadOrders()
+	if r.a.approved["5"] || r.a.ended["6"] {
+		t.Fatalf("session orders survived a reboot: %v %v", r.a.approved, r.a.ended)
+	}
+	if !r.a.okUsers["evil"] {
+		t.Fatal("a user approval is not tied to a boot")
+	}
+	// The same boot keeps them.
+	r.a.onOrder(fleet.Order{Kind: "session", Name: "5", Value: []byte(`{"verdict":"approve","at":5100}`)})
+	r.a.approved = nil
+	r.a.loadOrders()
+	if !r.a.approved["5"] {
+		t.Fatal("lost within a boot")
+	}
+}
+
+// etcd replays the orders it holds on every connect: one put before this
+// boot is stale, whatever session now has that id.
+func TestAgentOrders_ReplayedStaleSessionOrderIgnored(t *testing.T) {
+	r, _ := tokenRig(t)
+	bootFiles(t, r, "b", 5000)
+	r.a.loadOrders()
+	stale := fleet.Order{Kind: "session", Name: "5", Value: []byte(`{"verdict":"approve","at":3000}`)}
+	r.a.onOrder(stale)
+	if r.a.approved["5"] {
+		t.Fatal("a pre-boot approval applied")
+	}
+	fresh := fleet.Order{Kind: "session", Name: "5", Value: []byte(`{"verdict":"approve","at":5100}`)}
+	r.a.onOrder(fresh)
+	if !r.a.approved["5"] {
+		t.Fatal("a post-boot approval ignored")
+	}
+	none := fleet.Order{Kind: "session", Name: "6", Value: []byte(`{"verdict":"kill"}`)}
+	r.a.onOrder(none)
+	if r.a.ended["6"] {
+		t.Fatal("an order with no time applied")
 	}
 }

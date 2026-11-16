@@ -61,7 +61,7 @@ func orderCmd(sub string, rest []string, stdout, stderr io.Writer) error {
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := controller.PutOrder(ctx, c, *host, kind, arg, map[string]string{"verdict": verdict}); err != nil {
+	if err := controller.PutOrder(ctx, c, *host, kind, arg, orderValue(verdict, time.Now())); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s %s %s on %s\n", verdict, kind, arg, *host)
@@ -93,4 +93,11 @@ func enrolled(dir, host string) error {
 		return fmt.Errorf("%s is not enrolled", host)
 	}
 	return nil
+}
+
+// orderValue is an order's JSON: the verdict, and when it was put, so that
+// an agent can tell one left over from before its boot (session ids
+// restart at every boot).
+func orderValue(verdict string, at time.Time) map[string]any {
+	return map[string]any{"verdict": verdict, "at": at.Unix()}
 }
