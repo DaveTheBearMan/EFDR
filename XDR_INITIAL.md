@@ -45,7 +45,7 @@ Hardening
 SSH keys-only, password auth disabled
 Rotate all creds + replace all authorized_keys at T-0; regenerate host keys
 Bind sshd to mgmt interface if topology allows
-Default-deny firewall — inverted: scored services allowed first, approve additions
+Default-deny firewall — inverted: scored services allowed first, approve additions (superseded by plan 4b: the table is policy accept with a blocklist of endpoints the fleet found malicious)
 
 Cut / demoted
 

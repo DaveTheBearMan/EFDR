@@ -26,6 +26,8 @@
 
 ## Calls made in this plan (not in the spec — review these)
 
+> **Superseded by plan 4b (2026-11-16):** the default-deny table, the outbound allowlist, DHCP rules, the dropped outbound ping, the always-on DNS stub and "established is not a free pass" below are replaced by the policy-accept table and the fleet's blocklist (spec §7.1). They are kept here as the record of plan 2.
+
 - **Unknown listener or raw socket held by an unmodified base-image binary is alert-only, not killed.** §7.4 says kill unknown listeners, but there is no listener baseline until the console exists, and killing `systemd-networkd` (DHCP on udp/68) would cost a box its address. The firewall still blocks the port. Holders that are not baseline binaries, or are shells / interpreters / net tools, are killed. `xdr listeners` prints the current listeners as a config snippet so known ones can be silenced.
 - **The DNS stub always runs**, also with the switch off. `/etc/resolv.conf` points at it and it answers NXDOMAIN at once, so a scored service that does its own lookups (Postfix) fails fast instead of waiting out a dropped packet, and every name asked is logged with the asking process. With the switch on it forwards only allowed names. Refusal is NXDOMAIN, not REFUSED, so callers do not retry.
 - **"Only the agent may send to port 53"** is done with a socket mark (`0x58445201`) on the stub's upstream socket. Root can forge a mark; the destination is still pinned to the team resolver.

@@ -152,7 +152,7 @@ var c2 = &incident.Endpoint{Addr: "203.0.113.9", Port: 4444, Proto: "tcp"}
 
 func egress(p *proc.Proc) detect.Detection {
 	return detect.Detection{Kind: "egress", PID: p.PID, Start: p.Start, Severity: model.SevHigh, Remote: c2,
-		Detail: "connects to 203.0.113.9:4444, which is not allowed out"}
+		Detail: "tcp to 203.0.113.9:4444"}
 }
 
 // revshell is the detection of a shell whose stdio is the connection to c2:
