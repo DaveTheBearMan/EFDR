@@ -33,6 +33,10 @@ func (a *agent) onOrder(o fleet.Order) {
 		}
 		return
 	}
+	if o.Kind == "mode" {
+		a.onMode(o)
+		return
+	}
 	var v struct {
 		Verdict string `json:"verdict"`
 		At      int64  `json:"at"`     // when the controller put it (unix seconds)

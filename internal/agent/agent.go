@@ -160,6 +160,8 @@ type agent struct {
 	userPaused     map[string]bool                                       // new accounts told during a pause, not locked
 	recoverySaid   bool                                                  // recovery-missing was recorded
 	ordersDone     map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
+	mode           *killMode                                             // the operator's kill switch; nil: the config's kill
+	modeSaid       string                                                // the bad mode order last reported
 	execs          map[int]execInfo                                      // recent process starts, by pid
 	tamperSeen     map[string]time.Time                                  // pid|path of a tamper event, when last reported
 	pinnedHash     func() string                                         // the pinned binary hash
@@ -472,7 +474,7 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 			in.Action = "killed" // with its process, by an earlier detection
 		case decided != "kill":
 			in.Action = decided
-		case !a.cfg.Kill || a.paused():
+		case !a.killOn() || a.paused():
 			in.Action = "would-kill"
 		default:
 			pids, err := a.kill(d.PID, d.Start, protect)
@@ -866,6 +868,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	a.state, a.spool = defaultState, breakglass.Spool
 	a.loadOrders()
+	a.loadMode()
 	if err := makeSpool(a.spool); err != nil {
 		logf("breakglass: spool %s: %v", a.spool, err)
 	}
