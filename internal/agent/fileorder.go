@@ -106,7 +106,7 @@ func (a *agent) removeFile(id string) string {
 	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return "gone: " + err.Error()
 	}
-	m := qmeta{Path: e.Path, Mode: st.Mode & 0o777, // setuid and setgid are not kept UID: st.Uid, GID: st.Gid, SHA256: e.SHA256, At: a.now()}
+	m := qmeta{Path: e.Path, Mode: st.Mode & 0o777, UID: st.Uid, GID: st.Gid, SHA256: e.SHA256, At: a.now()}
 	qdir := a.qdir(id)
 	if err := os.MkdirAll(qdir, 0o700); err != nil {
 		return err.Error()
