@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,8 +45,18 @@ const (
 
 // beat is what the controller knows of one host's heartbeat.
 type beat struct {
-	seen   bool // a heartbeat was put since the controller started
-	silent bool // agent-silent was reported and agent-back not yet
+	seen   bool      // a heartbeat was put since the controller started
+	silent bool      // agent-silent was reported and agent-back not yet
+	last   time.Time // the last heartbeat put
+}
+
+// HostStatus is what the controller knows of one enrolled host's agent.
+type HostStatus struct {
+	Name     string
+	Seen     bool // a heartbeat since the controller started
+	Silent   bool // its heartbeat lease expired
+	Disabled bool // its writes were taken away
+	Last     time.Time
 }
 
 // Controller promotes proposed rules to the signed set, takes in the
@@ -63,6 +74,7 @@ type Controller struct {
 	maxSet            int // the most bytes of a published envelope
 	floodLimit        int // writes by one host in floodWindow before it is disabled
 	mu                sync.Mutex
+	bmu               sync.Mutex // beats and disabled, read by Hosts from other goroutines
 	set               *rules.Set
 	rev               int64 // ModRevision of the rules key; 0: absent
 	beats             map[string]*beat
@@ -469,6 +481,8 @@ func (ctl *Controller) summarize(h *openHunt) {
 }
 
 func (ctl *Controller) heartbeat(host string, put bool) {
+	ctl.bmu.Lock()
+	defer ctl.bmu.Unlock()
 	b := ctl.beats[host]
 	if b == nil {
 		b = &beat{}
@@ -476,7 +490,7 @@ func (ctl *Controller) heartbeat(host string, put bool) {
 	}
 	switch {
 	case put:
-		b.seen = true
+		b.seen, b.last = true, ctl.now()
 		if b.silent {
 			b.silent = false
 			ctl.record(incident.Incident{Kind: "agent-back", Action: "alert", Severity: model.SevMedium, Host: host, Detail: "heartbeat again"})
@@ -523,6 +537,8 @@ func (ctl *Controller) checkSilent() {
 	if err != nil {
 		return
 	}
+	ctl.bmu.Lock()
+	defer ctl.bmu.Unlock()
 	for _, h := range hosts {
 		b := ctl.beats[h]
 		if b == nil {
@@ -670,4 +686,27 @@ func (ctl *Controller) Run(ctx context.Context) error {
 			ctl.checkHunts(true)
 		}
 	}
+}
+
+// Hosts is every enrolled host and what is known of its agent, by name.
+func (ctl *Controller) Hosts() []HostStatus {
+	names, err := pki.Hosts(ctl.dir)
+	if err != nil {
+		return nil
+	}
+	slices.Sort(names)
+	ctl.mu.Lock()
+	off := maps.Clone(ctl.disabled)
+	ctl.mu.Unlock()
+	ctl.bmu.Lock()
+	defer ctl.bmu.Unlock()
+	out := make([]HostStatus, 0, len(names))
+	for _, n := range names {
+		h := HostStatus{Name: n, Disabled: off[n]}
+		if b := ctl.beats[n]; b != nil {
+			h.Seen, h.Silent, h.Last = b.seen, b.silent, b.last
+		}
+		out = append(out, h)
+	}
+	return out
 }

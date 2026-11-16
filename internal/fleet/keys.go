@@ -2,7 +2,11 @@
 // the client that watches signed rules and reports to the controller.
 package fleet
 
-import "strings"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+)
 
 // The etcd keys. A host writes only under its own Proposed, Incidents,
 // Heartbeat and Hunt keys; only the controller writes RulesKey, and only it reads
@@ -43,4 +47,11 @@ func HostOf(key, prefix string) (host, rest string, ok bool) {
 	}
 	host, rest, _ = strings.Cut(tail, "/")
 	return host, rest, host != ""
+}
+
+// FileID is the name of a path in a `file` order: the first 16 hex digits
+// of the SHA-256 of the path. The agent and the console both use it.
+func FileID(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:8])
 }

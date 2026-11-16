@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -13,6 +11,7 @@ import (
 	"xdr/internal/classify"
 	"xdr/internal/collect"
 	"xdr/internal/diff"
+	"xdr/internal/fleet"
 	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/pathenc"
@@ -33,12 +32,8 @@ type driftEntry struct {
 	Type               baseline.FileType
 }
 
-// FileID is the name of a path in the file order: the first 16 hex digits
-// of the SHA-256 of the path.
-func FileID(path string) string {
-	sum := sha256.Sum256([]byte(path))
-	return hex.EncodeToString(sum[:8])
-}
+// FileID is the name of a path in the file order (see fleet.FileID).
+func FileID(path string) string { return fleet.FileID(path) }
 
 func underRoots(path string) bool {
 	for _, r := range scanRoots {
