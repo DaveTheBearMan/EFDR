@@ -205,3 +205,75 @@ func TestDiff_UnifiedNoPhantomTrailingLine(t *testing.T) {
 		}
 	}
 }
+
+// setgid on a directory only makes new entries inherit its group; it is
+// not privilege.
+func TestDiff_SetgidNewDirIsNotPrivilege(t *testing.T) {
+	d := baseline.FileEntry{Type: baseline.TypeDir, Mode: uint32(os.ModeDir | os.ModeSetgid | 0o2775)}
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{}), bl(map[string]baseline.FileEntry{"/var/www/up": d})))
+	if f.Category == "privilege" || f.Severity == model.SevCritical {
+		t.Fatalf("%+v", f)
+	}
+	old := baseline.FileEntry{Type: baseline.TypeDir, Mode: uint32(os.ModeDir | 0o775)}
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{"/var/www/up": old}), bl(map[string]baseline.FileEntry{"/var/www/up": d})))
+	if f.Category == "privilege" || f.Severity == model.SevCritical {
+		t.Fatalf("%+v", f)
+	}
+}
+
+// New content in a setuid or capable binary runs with its privilege.
+func TestDiff_SetuidContentChangeIsCritical(t *testing.T) {
+	p := "/usr/bin/passwd"
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: reg("1", 0o755|os.ModeSetuid, "")}), bl(map[string]baseline.FileEntry{p: reg("2", 0o755|os.ModeSetuid, "")})))
+	if f.Category != "privilege" || f.Severity != model.SevCritical {
+		t.Fatalf("%+v", f)
+	}
+	pkg := reg("1", 0o755|os.ModeSetuid, "")
+	pkg.HashOnly = true
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{p: pkg}), bl(map[string]baseline.FileEntry{p: reg("2", 0o755|os.ModeSetuid, "")})))
+	if f.Severity != model.SevCritical {
+		t.Fatalf("package entry: %+v", f)
+	}
+}
+
+// A mode or owner change on the account databases (a world-writable
+// passwd, a readable shadow) is Critical; a content change stays with the
+// account diff.
+func TestDiff_AccountDBModeOrOwnerIsCritical(t *testing.T) {
+	for _, p := range []string{"/etc/passwd", "/etc/shadow"} {
+		b := reg("1", 0o640, "")
+		l := reg("1", 0o666, "")
+		f := one(t, Diff(bl(map[string]baseline.FileEntry{p: b}), bl(map[string]baseline.FileEntry{p: l})))
+		if f.Severity != model.SevCritical {
+			t.Fatalf("%s mode: %+v", p, f)
+		}
+		l = reg("1", 0o640, "")
+		l.UID = 1000
+		f = one(t, Diff(bl(map[string]baseline.FileEntry{p: b}), bl(map[string]baseline.FileEntry{p: l})))
+		if f.Severity != model.SevCritical {
+			t.Fatalf("%s owner: %+v", p, f)
+		}
+	}
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{"/etc/passwd": reg("1", 0o644, "a\n")}), bl(map[string]baseline.FileEntry{"/etc/passwd": reg("2", 0o644, "b\n")})))
+	if f.Severity != model.SevMedium {
+		t.Fatalf("content: %+v", f)
+	}
+}
+
+// A file whose content was too large to keep still says how its size
+// changed, since no diff can be shown.
+func TestDiff_OverLimitContentCarriesSize(t *testing.T) {
+	p := "/etc/crontab"
+	b := reg("1", 0o644, "")
+	b.Size = 70000
+	l := reg("2", 0o644, "")
+	l.Size = 80000
+	f := one(t, Diff(bl(map[string]baseline.FileEntry{p: b}), bl(map[string]baseline.FileEntry{p: l})))
+	if !strings.Contains(f.Detail, "size 70000→80000") {
+		t.Fatalf("%+v", f)
+	}
+	f = one(t, Diff(bl(map[string]baseline.FileEntry{}), bl(map[string]baseline.FileEntry{"/etc/cron.d/big": l})))
+	if !strings.Contains(f.Detail, "80000 bytes") {
+		t.Fatalf("added: %+v", f)
+	}
+}

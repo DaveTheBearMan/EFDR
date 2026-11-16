@@ -59,6 +59,9 @@ func diffFiles(base, live map[string]baseline.FileEntry) []model.Finding {
 				f.Category, f.Severity = "privilege", model.SevCritical
 				f.Detail += ", " + privDetail(l)
 			}
+			if cls.KeepContent && l.Type == baseline.TypeFile && l.Content == nil {
+				f.Detail += fmt.Sprintf(", %d bytes", l.Size) // too large to keep, so no content to read
+			}
 			out = append(out, f)
 		default:
 			changed := changes(b, l)
@@ -70,12 +73,23 @@ func diffFiles(base, live map[string]baseline.FileEntry) []model.Finding {
 			if gainedPriv(b, l) {
 				f.Category, f.Severity = "privilege", model.SevCritical
 			}
+			// New code in a binary that runs with privilege.
+			if privileged(b) && b.SHA256 != l.SHA256 {
+				f.Category, f.Severity = "privilege", model.SevCritical
+			}
+			// Loosened or re-owned account databases hand out every account.
+			if cls.Category == "account-db" && !b.HashOnly && (b.Mode != l.Mode || b.UID != l.UID || b.GID != l.GID) {
+				f.Severity = model.SevCritical
+			}
 			// A directory swapped for anything else redirects all it held.
 			if b.Type == baseline.TypeDir && l.Type != baseline.TypeDir {
 				f.Severity = max(f.Severity, model.SevHigh)
 			}
 			if b.Content != nil && l.Content != nil {
 				f.Diff = unified(b.Content, l.Content)
+			} else if cls.KeepContent && !b.HashOnly && b.Type == baseline.TypeFile && l.Type == baseline.TypeFile && b.SHA256 != l.SHA256 {
+				// Over the content limit: no diff, so say how the size moved.
+				f.Detail += fmt.Sprintf(", size %d→%d", b.Size, l.Size)
 			}
 			out = append(out, f)
 		}
@@ -155,14 +169,21 @@ func changes(b, l baseline.FileEntry) []string {
 
 const privBits = uint32(os.ModeSetuid | os.ModeSetgid)
 
-func privileged(e baseline.FileEntry) bool { return e.Mode&privBits != 0 || e.Caps != "" }
+// privileged reports setuid, setgid or capabilities. On a directory the
+// bits only steer group inheritance, so a directory is never privileged.
+func privileged(e baseline.FileEntry) bool {
+	if e.Type == baseline.TypeDir {
+		return false
+	}
+	return e.Mode&privBits != 0 || e.Caps != ""
+}
 
 func gainedPriv(b, l baseline.FileEntry) bool { return privileged(gained(b, l)) }
 
 // gained returns l reduced to the setuid/setgid bits and capabilities it
 // has beyond b.
 func gained(b, l baseline.FileEntry) baseline.FileEntry {
-	g := baseline.FileEntry{}
+	g := baseline.FileEntry{Type: l.Type}
 	if b.HashOnly && l.Type != baseline.TypeFile {
 		return g // packages do not record what their scripts chmod on directories
 	}
