@@ -195,3 +195,18 @@ func TestProtected_NoAllowlist(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestLoad_Scan(t *testing.T) {
+	c, err := load(t, `{"jump":["192.0.2.7"]}`)
+	if err != nil || c.Scan.Interval.Duration != 30*time.Second || c.Scan.Full.Duration != 10*time.Minute || c.Scan.Off {
+		t.Fatalf("defaults: %+v %v", c.Scan, err)
+	}
+	if c, err = load(t, `{"jump":["192.0.2.7"],"scan":{"off":true}}`); err != nil || !c.Scan.Off {
+		t.Fatalf("off: %+v %v", c.Scan, err)
+	}
+	for _, frag := range []string{`"scan":{"interval":"1s"}`, `"scan":{"full":"10s"}`, `"scan":{"interval":"soon"}`} {
+		if _, err := load(t, `{"jump":["192.0.2.7"],`+frag+`}`); err == nil {
+			t.Errorf("%s accepted", frag)
+		}
+	}
+}

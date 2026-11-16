@@ -146,6 +146,8 @@ type agent struct {
 	userSaid     map[string]bool                                       // new accounts already alerted on
 	recoverySaid bool                                                  // recovery-missing was recorded
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
+	drift        map[string]string                                     // path → what was last reported for it
+	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
 	runIn        func(stdin []byte, name string, args ...string) error // chpasswd
 
 	unitMu sync.Mutex
@@ -917,6 +919,12 @@ func Run(ctx context.Context, o Options) error {
 	if src != nil {
 		defer src.Close()
 		events = src.Events()
+	}
+
+	if !cfg.Scan.Off {
+		sctx, stopScan := context.WithCancel(ctx)
+		defer stopScan()
+		go a.scanLoop(sctx, cfg.Scan.Interval.Duration, cfg.Scan.Full.Duration)
 	}
 
 	a.sweep()

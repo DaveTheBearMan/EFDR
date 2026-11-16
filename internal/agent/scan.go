@@ -1,0 +1,153 @@
+package agent
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"xdr/internal/baseline"
+	"xdr/internal/classify"
+	"xdr/internal/collect"
+	"xdr/internal/diff"
+	"xdr/internal/incident"
+	"xdr/internal/model"
+	"xdr/internal/pathenc"
+)
+
+// maxDrift is how many findings the agent remembers having reported.
+const maxDrift = 4096
+
+// scanRoots are the directories the fast scan walks: where persistence and
+// drop sites live. The whole disk is walked by the full scan.
+var scanRoots = []string{"/etc", "/usr/lib/systemd", "/usr/local", "/opt", "/root", "/home", "/var/spool", "/tmp", "/var/tmp", "/dev/shm", "/srv"}
+
+// driftEntry is a new file the agent reported, as it was reported: the
+// file order acts only on what is here, and only while it is still so.
+type driftEntry struct {
+	Path, SHA256, Link string
+	Size               int64
+	Type               baseline.FileType
+}
+
+// FileID is the name of a path in the file order: the first 16 hex digits
+// of the SHA-256 of the path.
+func FileID(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:8])
+}
+
+func underRoots(path string) bool {
+	for _, r := range scanRoots {
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// scanLoop runs the fast scan every Scan.Interval and the full scan every
+// Scan.Full, one at a time: a scan still running skips the next tick.
+func (a *agent) scanLoop(ctx context.Context, fast, full time.Duration) {
+	var running atomic.Bool
+	run := func(isFull bool) {
+		if !running.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer running.Store(false)
+			a.scan(isFull)
+		}()
+	}
+	run(false)
+	f, l := time.NewTicker(fast), time.NewTicker(full)
+	defer f.Stop()
+	defer l.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-f.C:
+			run(false)
+		case <-l.C:
+			run(true)
+		}
+	}
+}
+
+// scan compares the box with its baseline, the persistence directories
+// only or the whole disk, and reports each finding not already reported
+// with the same content as a file-drift incident. A fast scan compares
+// against the baseline restricted to the directories it walked, so nothing
+// outside them reads as removed. The walk holds no lock.
+func (a *agent) scan(full bool) {
+	a.mu.Lock()
+	base, root := a.pol.Base, a.root
+	a.mu.Unlock()
+	if base == nil {
+		return
+	}
+	var live, ref *baseline.Baseline
+	if full {
+		var err error
+		if live, err = collect.Snapshot(root); err != nil {
+			a.logf("scan: %v", err)
+			return
+		}
+		ref = base
+	} else {
+		files, _ := collect.WalkDirs(root, scanRoots)
+		live = &baseline.Baseline{Files: files, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
+		ref = &baseline.Baseline{Files: map[string]baseline.FileEntry{}, Accounts: base.Accounts, Groups: base.Groups, Modules: base.Modules}
+		for key, e := range base.Files {
+			if p, err := pathenc.Decode(key); err == nil && underRoots(p) {
+				ref.Files[key] = e
+			}
+		}
+	}
+	findings := diff.Diff(ref, live)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.drift == nil {
+		a.drift, a.driftNew = map[string]string{}, map[string]driftEntry{}
+	}
+	seen := map[string]bool{}
+	for _, f := range findings {
+		path, err := pathenc.Decode(f.Subject)
+		if err != nil || !strings.HasPrefix(path, "/") {
+			continue // an account, a group, a module
+		}
+		seen[path] = true
+		e := live.Files[f.Subject]
+		fp := string(f.Kind) + "|" + f.Before + "|" + f.After + "|" + f.Detail + "|" + e.SHA256 + "|" + e.Link
+		if a.drift[path] == fp {
+			continue
+		}
+		if _, known := a.drift[path]; !known && len(a.drift) >= maxDrift {
+			continue
+		}
+		a.drift[path] = fp
+		detail := fmt.Sprintf("%s %s: %s", f.Category, f.Kind, f.Detail)
+		if len(e.SHA256) >= 12 {
+			detail += " (sha256 " + e.SHA256[:12] + ")" // the log folds identical lines: a changed file is a new one
+		}
+		a.record(incident.Incident{Kind: "file-drift", Action: "alert", Severity: f.Severity, Path: path, SHA256: e.SHA256, Size: e.Size, Detail: detail})
+		id := FileID(path)
+		if f.Kind == model.KindAdded && (e.Type == baseline.TypeFile || e.Type == baseline.TypeLink) && f.Category != classify.Fallback {
+			link, _ := pathenc.Decode(e.Link)
+			a.driftNew[id] = driftEntry{Path: path, SHA256: e.SHA256, Link: link, Size: e.Size, Type: e.Type}
+		} else {
+			delete(a.driftNew, id)
+		}
+	}
+	for path := range a.drift {
+		if !seen[path] && (full || underRoots(path)) {
+			delete(a.drift, path)
+			delete(a.driftNew, FileID(path))
+		}
+	}
+}

@@ -114,3 +114,30 @@ func TestRelPath(t *testing.T) {
 		}
 	}
 }
+
+func TestWalkDirs_OnlyThoseDirs(t *testing.T) {
+	root := testfs.Root(t)
+	testfs.File(t, root, "etc/cron.d/job", "* * * * * root x\n", 0o644)
+	testfs.File(t, root, "home/bob/.ssh/authorized_keys", "ssh-ed25519 AAAA bob\n", 0o600)
+	testfs.File(t, root, "usr/bin/tool", "bin", 0o755)
+	files, errs := WalkDirs(root, []string{"/etc", "/home", "/srv/not-there"})
+	if len(errs) != 0 {
+		t.Fatalf("errs: %v", errs)
+	}
+	for _, want := range []string{"/etc/cron.d/job", "/home/bob/.ssh/authorized_keys"} {
+		if _, ok := files[want]; !ok {
+			t.Errorf("%s missing: %v", want, keys(files))
+		}
+	}
+	if _, ok := files["/usr/bin/tool"]; ok {
+		t.Error("walked a directory it was not given")
+	}
+}
+
+func keys(m map[string]baseline.FileEntry) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

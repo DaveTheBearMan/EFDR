@@ -44,7 +44,19 @@ func matchAny(patterns []string, p string) bool {
 // Ignored for what is left out). It never follows symlinks and opens only
 // regular files. An object it could not read is still recorded, with Err
 // set; the same errors are returned as text.
-func Walk(root string) (map[string]baseline.FileEntry, []string) {
+func Walk(root string) (map[string]baseline.FileEntry, []string) { return walk(root, nil) }
+
+// WalkDirs is Walk limited to the directories dirs (paths from root, such
+// as "/etc"); one that does not exist is skipped. Parents of those
+// directories are not recorded.
+func WalkDirs(root string, dirs []string) (map[string]baseline.FileEntry, []string) {
+	if len(dirs) == 0 {
+		return map[string]baseline.FileEntry{}, nil
+	}
+	return walk(root, dirs)
+}
+
+func walk(root string, starts []string) (map[string]baseline.FileEntry, []string) {
 	root = filepath.Clean(root)
 	files := map[string]baseline.FileEntry{}
 	var errs []string
@@ -60,7 +72,7 @@ func Walk(root string) (map[string]baseline.FileEntry, []string) {
 		return nil
 	}
 
-	filepath.WalkDir(root, func(full string, d fs.DirEntry, err error) error {
+	walkFn := func(full string, d fs.DirEntry, err error) error {
 		rel := relPath(root, full)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -122,7 +134,13 @@ func Walk(root string) (map[string]baseline.FileEntry, []string) {
 		}
 		files[pathenc.Encode(rel)] = e
 		return nil
-	})
+	}
+	if starts == nil {
+		filepath.WalkDir(root, walkFn)
+	}
+	for _, d := range starts {
+		filepath.WalkDir(filepath.Join(root, d), walkFn)
+	}
 	return files, errs
 }
 

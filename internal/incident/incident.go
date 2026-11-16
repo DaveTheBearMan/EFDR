@@ -59,6 +59,7 @@ type Incident struct {
 	OriginSHA256 string    `json:"origin_sha256,omitempty"`
 	Cron         string    `json:"cron,omitempty"` // the command cron ran
 	Hunt         string    `json:"hunt,omitempty"` // the hunt this answers
+	Path         string    `json:"path,omitempty"` // the file a drift finding names
 	Size         int64     `json:"size,omitempty"` // of the exe
 	Chain        []ProcRef `json:"chain,omitempty"`
 	Remote       *Endpoint `json:"remote,omitempty"`

@@ -78,6 +78,15 @@ type Config struct {
 	Mesh       *Mesh      `json:"mesh"`        // nil: no peer links
 	RulesCache string     `json:"rules_cache"` // the last verified rule set
 	SSH        *SSH       `json:"ssh"`         // nil: no SSH gate
+	Scan       Scan       `json:"scan"`        // the baseline-drift scans
+}
+
+// Scan is how often the agent compares the box with its baseline: a fast
+// walk of the persistence directories, and the whole disk.
+type Scan struct {
+	Interval Duration `json:"interval"` // default 30s
+	Full     Duration `json:"full"`     // default 10m
+	Off      bool     `json:"off"`
 }
 
 // SSH is the SSH gate: who may log in, and how long an unapproved session
@@ -138,6 +147,12 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if c.Fleet != nil && c.Fleet.Dir == "" {
 		c.Fleet.Dir = DefaultFleetDir
+	}
+	if c.Scan.Interval.Duration == 0 {
+		c.Scan.Interval.Duration = 30 * time.Second
+	}
+	if c.Scan.Full.Duration == 0 {
+		c.Scan.Full.Duration = 10 * time.Minute
 	}
 	if c.SSH != nil && c.SSH.Grace.Duration == 0 {
 		c.SSH.Grace.Duration = 90 * time.Second
@@ -225,6 +240,12 @@ func (c *Config) Validate() error {
 		if !Hostname(n) || !a.IsValid() {
 			return fmt.Errorf("dns.hosts: bad entry %q", n)
 		}
+	}
+	if c.Scan.Interval.Duration < 5*time.Second {
+		return fmt.Errorf("scan.interval: %s is under 5s", c.Scan.Interval.Duration)
+	}
+	if c.Scan.Full.Duration < time.Minute {
+		return fmt.Errorf("scan.full: %s is under 1m", c.Scan.Full.Duration)
 	}
 	if c.SSH != nil {
 		if err := c.validateSSH(); err != nil {
