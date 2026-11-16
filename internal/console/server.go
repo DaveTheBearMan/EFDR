@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,6 +136,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/creds", s.api(false, s.credsList))
 	mux.HandleFunc("POST /api/rotate", s.api(true, s.rotate))
 	mux.HandleFunc("POST /api/breakglass", s.api(true, s.breakglass))
+	mux.HandleFunc("POST /api/mode", s.api(true, s.mode))
 	return headers(mux)
 }
 
@@ -399,4 +401,28 @@ func (s *Server) breakglass(w http.ResponseWriter, r *http.Request) {
 	s.log.Printf("minted a %s token for %s", in.Action, in.Host)
 	s.audit(r, in.Host, fmt.Sprintf("minted a %s token for %d minutes", in.Action, in.Minutes))
 	writeJSON(w, map[string]string{"token": tok})
+}
+
+func (s *Server) mode(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Host string
+		Kill *bool
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || in.Kill == nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	hosts, err := s.act.Mode(r.Context(), in.Host, *in.Kill, "console, from "+source(r))
+	if err != nil {
+		fail400(w, err)
+		return
+	}
+	word := map[bool]string{true: "on", false: "off"}[*in.Kill]
+	host, what := in.Host, "kill "+word
+	if in.Host == AllHosts {
+		host, what = "", fmt.Sprintf("kill %s for every host (%s)", word, strings.Join(hosts, ", "))
+	}
+	s.log.Printf("%s on %s", what, strings.Join(hosts, ", "))
+	s.audit(r, host, what)
+	w.WriteHeader(http.StatusNoContent)
 }

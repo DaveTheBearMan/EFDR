@@ -146,7 +146,43 @@ function renderSessions() {
   p.append(wrap);
 }
 
+// killWord is how the page names an agent's kill switch.
+function killWord(k) { return k === 'on' ? 'on' : k === 'off' ? 'off' : 'from config'; }
+
+// setKill turns kill on or off for host, or for every host with '*', after
+// the operator says yes.
+async function setKill(host, kill, msg) {
+  const who = host === '*' ? 'every enabled host' : host;
+  const what = kill
+    ? 'Turn kill ON for ' + who + '? Its agent will kill what it decides to kill. Scored services, gray accounts and a pause stay protected.'
+    : 'Turn kill OFF for ' + who + '? Its agent will only report what it would have killed.';
+  if (!window.confirm(what)) return;
+  try { await api('POST', '/api/mode', {host, kill}); say(''); await refresh(); }
+  catch (e) { if (msg) msg.textContent = e.message; else say(e.message); }
+}
+
+function killButton(host, kill, label, cls) {
+  const b = h('button', 'btn' + (cls ? ' ' + cls : ''), label); b.type = 'button';
+  b.addEventListener('click', () => setKill(host, kill));
+  return b;
+}
+
+function renderKillAll() {
+  const p = $('p-killall');
+  clear(p);
+  const ks = view.Hosts.map((x) => killWord(x.Kill));
+  const now = !ks.length ? 'no hosts' : ks.every((k) => k === ks[0]) ? ks[0] : 'mixed';
+  const card = h('article', 'item info');
+  const row = h('div', 'row');
+  row.append(pill('kill, all hosts', 'warn'), h('span', 'host', now));
+  const btns = h('div', 'btns');
+  btns.append(killButton('*', true, 'Turn on for all', 'danger'), killButton('*', false, 'Turn off for all'));
+  card.append(row, h('div', 'why', 'Whether agents kill what they detect. Off: they only report it ("would-kill"). A disabled host is left out.'), btns);
+  p.append(card);
+}
+
 function renderHosts() {
+  renderKillAll();
   const p = $('p-hosts');
   clear(p);
   const body = h('tbody');
@@ -155,17 +191,23 @@ function renderHosts() {
     const name = h('td', 'm'), dot = h('span', 'dot d-' + (x.Status === 'up' ? 'ok' : x.Status === 'never' ? 'warn' : 'crit'));
     name.append(dot, document.createTextNode(x.Name));
     const state = h('td'); state.append(pill(x.Status, x.Status === 'up' ? 'ok' : 'crit'));
+    const k = killWord(x.Kill);
+    const kill = h('td', 'kill'); const kb = h('div', 'btns');
+    kb.append(pill(k, k === 'on' ? 'ok' : k === 'off' ? 'warn' : 'info'));
+    if (k !== 'on') kb.append(killButton(x.Name, true, 'Turn on', 'danger'));
+    if (k !== 'off') kb.append(killButton(x.Name, false, 'Turn off'));
+    kill.append(kb);
     const act = h('td'); const b = h('button', 'btn danger', 'Break-glass…'); b.type = 'button';
     b.addEventListener('click', () => breakglass(x.Name));
     act.append(b);
-    tr.append(name, state, h('td', 'm', ago(x.Last)), h('td', 'm', String(x.Drift)), h('td', 'm', String(x.Alerts)), act);
+    tr.append(name, state, kill, h('td', 'm', ago(x.Last)), h('td', 'm', String(x.Drift)), h('td', 'm', String(x.Alerts)), act);
     body.append(tr);
   }
   const t = h('table'), head = h('thead'), hr = h('tr');
-  for (const c of ['Host', 'Agent', 'Last beat', 'Drift', 'Alerts (1h)', '']) hr.append(h('th', '', c));
+  for (const c of ['Host', 'Agent', 'Kill', 'Last beat', 'Drift', 'Alerts (1h)', '']) hr.append(h('th', '', c));
   head.append(hr); t.append(head, body);
   const wrap = h('div', 'tbl'); wrap.append(t);
-  p.append(wrap, h('div', 'why', 'Break-glass mints a token for one host that you can paste into `xdr breakglass` on it.'), h('div', '', ''));
+  p.append(wrap, h('div', 'why', 'Kill "from config" is the kill of the host\'s agent.json until you turn it on or off here. Break-glass mints a token for one host that you can paste into `xdr breakglass` on it.'), h('div', '', ''));
   p.lastChild.id = 'bgOut';
 }
 

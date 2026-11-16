@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -12,9 +13,11 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"xdr/internal/breakglass"
+	"xdr/internal/config"
 	"xdr/internal/controller"
 	"xdr/internal/creds"
 	"xdr/internal/fleet"
+	"xdr/internal/pki"
 )
 
 // Actions are what the operator can do from the console: each is an order
@@ -27,6 +30,59 @@ type Actions struct {
 	Key    ed25519.PrivateKey
 	State  *State
 	Now    func() time.Time
+	// Hosts is what the controller knows of each enrolled host (which are
+	// disabled); nil: every enrolled host counts as enabled.
+	Hosts func() []controller.HostStatus
+}
+
+// AllHosts, as Mode's host, is every enrolled host that is not disabled.
+const AllHosts = "*"
+
+// Mode puts the kill switch order (kill on or off) for host, or for every
+// enabled host with AllHosts, and says which hosts it was put for. A name
+// that is not a host name, not enrolled or disabled is refused. It changes
+// only whether an agent's own kills are carried out: scored services, gray
+// accounts and a pause stay as they are on the box.
+func (a *Actions) Mode(ctx context.Context, host string, kill bool, by string) ([]string, error) {
+	disabled := map[string]bool{}
+	if a.Hosts != nil {
+		for _, h := range a.Hosts() {
+			disabled[h.Name] = h.Disabled
+		}
+	}
+	var hosts []string
+	if host == AllHosts {
+		enrolled, err := pki.Hosts(a.Dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range enrolled {
+			if !disabled[h] {
+				hosts = append(hosts, h)
+			}
+		}
+		if len(hosts) == 0 {
+			return nil, errors.New("no enabled host is enrolled")
+		}
+	} else {
+		if !config.Hostname(host) {
+			return nil, fmt.Errorf("%q is not a host name", host)
+		}
+		if err := controller.Enrolled(a.Dir, host); err != nil {
+			return nil, err
+		}
+		if disabled[host] {
+			return nil, fmt.Errorf("%s is disabled", host)
+		}
+		hosts = []string{host}
+	}
+	c, err := a.Client()
+	if err != nil {
+		return nil, err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return controller.PutMode(cctx, c, a.Dir, hosts, controller.Mode{Kill: kill, At: a.Now().UTC(), By: by})
 }
 
 // Decide carries out action on the approval with that id. It is marked

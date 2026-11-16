@@ -75,8 +75,9 @@ type SessionRow struct {
 type HostRow struct {
 	Name, Status string // up, silent, never, disabled
 	Last         time.Time
-	Drift        int // files that differ from the baseline and are not dealt with
-	Alerts       int // incidents in the last hour
+	Kill         string // the kill switch as its agent last reported it: on, off, or "" (the config decides)
+	Drift        int    // files that differ from the baseline and are not dealt with
+	Alerts       int    // incidents in the last hour
 }
 
 // View is everything the page shows.
@@ -106,6 +107,7 @@ type State struct {
 	ring    []incident.Incident
 	handled map[string]handledEntry
 	order   []string
+	modes   map[string]string // host → the kill switch its agent last reported (on, off)
 }
 
 // NewState reads dir's console-state.json.
@@ -155,6 +157,14 @@ func (s *State) Feed(in incident.Incident) {
 	defer s.mu.Unlock()
 	if in.Time.IsZero() {
 		in.Time = s.now()
+	}
+	if in.Kind == "mode" && (in.Action == "kill-on" || in.Action == "kill-off") {
+		if s.modes == nil {
+			s.modes = map[string]string{}
+		}
+		if _, ok := s.modes[in.Host]; ok || len(s.modes) < 4*maxHosts {
+			s.modes[in.Host] = strings.TrimPrefix(in.Action, "kill-")
+		}
 	}
 	s.ring = append(s.ring, in)
 	if len(s.ring) > maxIncidents {
@@ -513,7 +523,7 @@ func (s *State) View(hosts []controller.HostStatus, set *rules.Set) View {
 		}
 	}
 	for _, h := range hosts {
-		r := HostRow{Name: h.Name, Last: h.Last, Drift: d.drift[h.Name], Alerts: recent[h.Name]}
+		r := HostRow{Name: h.Name, Last: h.Last, Kill: s.modes[h.Name], Drift: d.drift[h.Name], Alerts: recent[h.Name]}
 		switch {
 		case h.Disabled:
 			r.Status = "disabled"

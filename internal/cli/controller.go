@@ -370,7 +370,7 @@ func startConsole(ctx context.Context, dir string, cfg *controller.Config, c *cl
 		fmt.Fprintf(stdout, "console: not started: %v\n", err)
 		return
 	}
-	act := &console.Actions{Dir: dir, Client: func() (*clientv3.Client, error) { return c, nil }, Cfg: cfg, Key: key, State: view, Now: time.Now}
+	act := &console.Actions{Dir: dir, Client: func() (*clientv3.Client, error) { return c, nil }, Cfg: cfg, Key: key, State: view, Now: time.Now, Hosts: ctl.Hosts}
 	srv := console.NewServer(dir, func() console.View { return view.View(ctl.Hosts(), ctl.Current()) }, act, time.Now, os.Stderr)
 	srv.Audit = ctl.Record
 	fmt.Fprintf(stdout, "console: https://%s\n", l.Addr())

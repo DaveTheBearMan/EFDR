@@ -90,3 +90,17 @@ func TestPage_Phone(t *testing.T) {
 		t.Error("no dark mode")
 	}
 }
+
+// The kill switch is on the Hosts panel: one per host and one for all, each
+// asking first.
+func TestPage_KillToggle(t *testing.T) {
+	if !strings.Contains(asset(t, "index.html"), `id="p-killall" data-panel="hosts"`) {
+		t.Error("index.html has no all-hosts kill control")
+	}
+	js := asset(t, "app.js")
+	for _, want := range []string{"'/api/mode'", "window.confirm(what)", "killWord(x.Kill)", "'from config'"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js lacks %s", want)
+		}
+	}
+}
