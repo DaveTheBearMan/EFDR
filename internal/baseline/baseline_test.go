@@ -3,8 +3,8 @@ package baseline
 import (
 	"bytes"
 	"compress/gzip"
-	"strings"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
