@@ -25,6 +25,8 @@ Written for one known OS (Ubuntu 24.04) and one competition, so it hard-codes wh
 
 ## Quick start
 
+Guided: on the jump box, as root, `deploy/setup.sh` asks for what it needs and does the steps below (see [`deploy/README.md`](deploy/README.md#guided-setup)).
+
 The day-1 runbook is [`deploy/README.md`](deploy/README.md). In short:
 
     # jump box
@@ -45,7 +47,7 @@ Then open `https://JUMP_IP:8443`. Kill starts **off**; switch it on per host in 
 
 ## Tests
 
-Unit tests run anywhere. End-to-end suites run on real boxes through an `inventory.ini` (a controller host and targets, reached over SSH): `make remote-check`, then `remote-protect`, `remote-gate`, `remote-console`, `remote-block`, `remote-detect`, `remote-fleet`, `remote-deploy`. Pick the ones that cover the area you changed. `make test-root` covers the kernel-facing code (nftables, fanotify) and needs sudo.
+Unit tests run anywhere. End-to-end suites run on real boxes through an `inventory.ini` (a controller host and targets, reached over SSH): `make remote-check`, then `remote-protect`, `remote-gate`, `remote-console`, `remote-block`, `remote-detect`, `remote-fleet`, `remote-deploy`, `remote-setup`. Pick the ones that cover the area you changed. `make test-root` covers the kernel-facing code (nftables, fanotify) and needs sudo.
 
 ## Scope
 

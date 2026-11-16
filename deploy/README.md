@@ -4,6 +4,43 @@ One controller on the jump box, then each target in turn. Everything as
 root. `JUMP` is the jump box's IP address as the targets reach it; `web01`
 stands for the target's name (lower case).
 
+## Guided setup
+
+`deploy/setup.sh` does steps 1 to 4 below for you. Copy the repo's
+`deploy/` and `bin/xdr` to the jump box and run it there as root:
+
+    ssh root@JUMP mkdir -p /root/xdr-repo && scp -r deploy bin root@JUMP:/root/xdr-repo/
+    ssh root@JUMP
+    cd /root/xdr-repo && deploy/setup.sh
+
+A menu: (1) the controller on this box, (2) add a target, (3) status.
+It asks for everything with defaults in brackets and asks again on a bad
+answer; the console password is read twice with the echo off and goes to
+`xdr` on stdin only. For a target it reaches the box over SSH
+(`-i KEY`, default `~/.ssh/deploykey`), runs prep-target.sh, lists the
+box's accounts and listening ports to pick blue, gray and scored from,
+can create the recovery account and generate its key pair (in
+`/root/xdr-recovery/NAME`: copy the private key off the jump box), and
+prints a summary to confirm before it changes anything there. Then
+add-target, the bundle onto the box and install-target.sh, streamed.
+
+- Rerun it any time: a host that is installed already is left alone (it
+  says how to install again); an enrolled host or an existing bundle is
+  rebuilt (`--force`) only if you say so.
+- If the SSH user is not an auto or blue account, the gate holds or ends
+  that session once the agent runs. The script warns; it sets no dead-man
+  for you. Keep `root` in auto (the default) or have the console ready.
+- `--answers FILE` runs it without questions, for scripts and tests:
+  `KEY=VALUE` lines, every answer the run needs (a missing one is an
+  error): `ACTION=controller|target|status`, `CONTROLLER_DIR`, `JUMP_IP`,
+  `CONSOLE_PASSWORD_FILE` (a file holding the password, never the password
+  itself), `GRAY`, `AUTO`, `RECOVERY`, `TARGET_NAME`, `TARGET_ADDR`,
+  `SSH_USER`, `SSH_KEY`, `BLUE`, `SCORED`, `KILL`, `BASELINE`,
+  `RECOVERY_KEY_MODE=generate|FILE.pub`, `CREATE_RECOVERY`, `REBUILD`,
+  `CONFIRM` (yes/no). Lists are comma-separated names, `none` for none.
+
+The manual steps follow.
+
 ## 0. Build (on your laptop)
 
     make build                       # bin/xdr, one static binary for every box
