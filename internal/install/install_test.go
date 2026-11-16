@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -349,11 +350,12 @@ func TestUninstall_AgentStopLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	guards := "systemctl disable --now xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer"
-	if f.cmds[0] != guards || f.cmds[1] != "systemctl disable xdr-agent.service" || removed[guards] || removed[f.cmds[1]] {
+	g := slices.Index(f.cmds, guards) // after the pinned hash went (TestUninstall_PinnedGoesFirst...)
+	if g < 0 || g+1 >= len(f.cmds) || f.cmds[g+1] != "systemctl disable xdr-agent.service" || removed[guards] || removed[f.cmds[g+1]] {
 		t.Fatalf("guards, then the agent's disable (no --now), before any removal: %v", f.cmds)
 	}
 	n := len(f.cmds)
-	if f.cmds[n-1] != "systemctl stop xdr-agent.service" || f.cmds[n-2] != "systemctl daemon-reload" || f.count("nft delete table inet xdr") != 1 {
+	if f.cmds[n-1] != "systemctl stop xdr-agent.service" || f.cmds[n-3] != "systemctl daemon-reload" || f.count("nft delete table inet xdr") != 1 {
 		t.Fatalf("stop is not last: %v", f.cmds)
 	}
 	if f.count("systemctl disable --now xdr-agent") != 0 || f.count("systemctl stop") != 1 {
@@ -435,5 +437,53 @@ func TestEnsure_StartsWithoutWaiting(t *testing.T) {
 		if strings.HasPrefix(c, "systemctl start") && !strings.Contains(c, "--no-block") {
 			t.Fatalf("a start that waits: %q", c)
 		}
+	}
+}
+
+// A guard mid-tick while the uninstall stops it queues a start of the
+// other; with the pinned hash gone first, that start finds no good copy and
+// ensure restores nothing. What failed so is cleared, so no unit is left.
+func TestUninstall_PinnedGoesFirstAndNothingIsLeftFailed(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{}
+	pinnedAt := map[string]bool{}
+	run := func(name string, args ...string) ([]byte, error) {
+		_, err := os.Lstat(l.p(l.Pinned))
+		_, berr := os.Lstat(l.p(l.Backup + "/pinned.sha256"))
+		pinnedAt[name+" "+strings.Join(args, " ")] = err == nil || berr == nil
+		return f.run(name, args...)
+	}
+	if err := Uninstall(l, run); err != nil {
+		t.Fatal(err)
+	}
+	for c, there := range pinnedAt {
+		if strings.HasPrefix(c, "systemctl disable") && there {
+			t.Errorf("%q ran with a pinned hash still there", c)
+		}
+	}
+	reset := -1
+	for i, c := range f.cmds {
+		if strings.HasPrefix(c, "systemctl reset-failed") {
+			reset = i
+			for _, u := range Units {
+				if !strings.Contains(c, u) {
+					t.Errorf("reset-failed misses %s: %q", u, c)
+				}
+			}
+		}
+	}
+	n := len(f.cmds)
+	if reset < 0 || reset != n-2 || f.cmds[n-1] != "systemctl stop xdr-agent.service" {
+		t.Fatalf("no reset-failed just before the agent's stop: %v", f.cmds)
+	}
+}
+
+func TestEnsure_NotInstalledIsItsOwnError(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Ensure(l, (&fake{}).run); !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("%v", err)
 	}
 }

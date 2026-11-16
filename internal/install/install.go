@@ -155,12 +155,27 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 	return rep, nil
 }
 
-// Uninstall stops the guards and the timer, makes everything of the manifest
+// Uninstall removes the pinned hash (so nothing can be restored or launched
+// while it works), stops the guards and the timer, makes everything of the manifest
 // mutable again, removes it and the manifest, deletes the firewall table,
 // reloads systemd and last stops the agent's unit: the agent may be the
 // caller, and stopping it ends the process. Every step runs whatever the
 // others did; nothing installed is a success.
 func Uninstall(l Layout, run Runner) error {
+	// The pinned hash first: from here no launch point finds a good copy
+	// and ensure restores and starts nothing, so a guard caught mid-look
+	// by the stop below cannot bring anything back.
+	var errs []string
+	for _, p := range []string{l.Pinned, l.Backup + "/pinned.sha256"} {
+		full := l.p(p)
+		if _, err := os.Lstat(full); err != nil {
+			continue
+		}
+		run("chattr", "-i", full)
+		if err := os.Remove(full); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
 	var others []string
 	for _, u := range Units {
 		if u != agentUnit {
@@ -179,7 +194,6 @@ func Uninstall(l Layout, run Runner) error {
 	for _, e := range m.Entries {
 		paths = append(paths, e.Path)
 	}
-	var errs []string
 	for _, p := range paths {
 		full := l.p(p)
 		if _, err := os.Lstat(full); err != nil {
@@ -209,6 +223,9 @@ func Uninstall(l Layout, run Runner) error {
 	// Last, and only when all else worked: a loaded unit can be stopped after
 	// its file is gone, and stopping it ends the agent if it is the caller. A
 	// failed removal leaves the agent running so the token can be used again.
+	// A guard restarted by a start queued as it stopped failed on the
+	// missing copy: cleared, so no unit is left behind.
+	run("systemctl", append([]string{"reset-failed"}, Units...)...)
 	run("systemctl", "stop", agentUnit)
 	return nil
 }

@@ -144,3 +144,15 @@ func TestGuard_StartsTheOtherWithoutWaiting(t *testing.T) {
 		t.Fatalf("%v", f.cmds)
 	}
 }
+
+// With no install (the uninstall took the pinned hash first) a guard starts
+// nothing, not even the other guard.
+func TestGuard_NotInstalledStartsNothing(t *testing.T) {
+	l := install.DefaultLayout()
+	l.Root = t.TempDir()
+	f := &fake{active: map[string]string{"xdr-guard-b.service": "inactive"}}
+	Tick(l, f.run, "xdr-guard-b.service", func(string) {})
+	if f.count("systemctl start") != 0 {
+		t.Fatalf("%v", f.cmds)
+	}
+}

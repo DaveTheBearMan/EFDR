@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// ErrNotInstalled is Ensure's error on a box with no pinned hash: never
+// installed, or uninstalled (which takes the pinned hash first).
+var ErrNotInstalled = errors.New("not installed")
+
 // Ensure puts back whatever of the manifest is missing or differs, from a
 // copy of the binary that matches the pinned hash (binary copies), from the
 // backup (the config, its signature and the bundle, and the backup from
@@ -21,7 +25,7 @@ import (
 func Ensure(l Layout, run Runner) (Report, error) {
 	pinned, err := pinnedHash(l)
 	if err != nil {
-		return Report{}, fmt.Errorf("not installed (%w)", err)
+		return Report{}, fmt.Errorf("%w (%w)", ErrNotInstalled, err)
 	}
 	rep, err := ensure(l, run, pinned)
 	if len(rep.Restored)+len(rep.Started) > 0 || err != nil {

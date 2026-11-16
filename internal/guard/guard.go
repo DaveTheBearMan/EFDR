@@ -4,6 +4,7 @@ package guard
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -21,6 +22,9 @@ func Tick(l install.Layout, run install.Runner, watch string, report func(string
 	}
 	for _, u := range rep.Started {
 		report("started " + u)
+	}
+	if errors.Is(err, install.ErrNotInstalled) {
+		return // nothing to keep: an uninstall is under way, or was never done
 	}
 	if err != nil {
 		report("ensure: " + err.Error())
