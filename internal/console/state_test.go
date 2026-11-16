@@ -250,3 +250,65 @@ func TestState_LoadLog(t *testing.T) {
 		t.Fatalf("len %d, %+v", s.Len(), v.Summary)
 	}
 }
+
+// Session ids restart at every boot and a removed file can come back: a
+// handled id covers what was pending when it was handled, not what the same
+// id names later.
+func TestState_HandledIdIsReusedByLaterEvents(t *testing.T) {
+	s, c, _ := newState(t)
+	pending := func(at time.Duration) incident.Incident {
+		return inc("web01", "session-pending", "alert", at, func(i *incident.Incident) {
+			i.User, i.Detail = "alice", "session 5 from 192.0.2.7 (ends in 1m30s)"
+		})
+	}
+	s.Feed(pending(0))
+	c.t = t0.Add(time.Minute)
+	if _, err := s.Handle("s:web01:5", "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if approval(s.View(nil, nil), "s:web01:5") != nil {
+		t.Fatal("handled, yet pending")
+	}
+	// After a reboot: a new session with the same number.
+	s.Feed(pending(3 * time.Minute))
+	c.t = t0.Add(3*time.Minute + 5*time.Second)
+	if approval(s.View(nil, nil), "s:web01:5") == nil {
+		t.Fatalf("a new session with a handled id is hidden: %+v", s.View(nil, nil).Sessions)
+	}
+	if got := s.View(nil, nil).Sessions[0].Status; got != "pending" {
+		t.Fatalf("the row says %q", got)
+	}
+	// A file that comes back.
+	evil := func(at time.Duration) incident.Incident {
+		return inc("web01", "file-drift", "alert", at, func(i *incident.Incident) {
+			i.Path, i.Detail = "/etc/cron.d/evil", "cron added: new file (sha256 0123456789ab)"
+		})
+	}
+	fid := "f:web01:" + fleet.FileID("/etc/cron.d/evil")
+	s.Feed(evil(4 * time.Minute))
+	c.t = t0.Add(5 * time.Minute)
+	if _, err := s.Handle(fid, "keep"); err != nil {
+		t.Fatal(err)
+	}
+	s.Feed(evil(6 * time.Minute))
+	c.t = t0.Add(7 * time.Minute)
+	if approval(s.View(nil, nil), fid) == nil {
+		t.Fatal("a file that came back after it was kept is not offered again")
+	}
+}
+
+// Only a classified new file can be removed: the agent refuses the rest,
+// and the console must not offer what always fails.
+func TestState_NoRemoveForUnclassifiedFiles(t *testing.T) {
+	s, _, _ := newState(t)
+	s.Feed(inc("web01", "file-drift", "alert", 0, func(i *incident.Incident) {
+		i.Path, i.Detail = "/tmp/junk", "file added: new file (sha256 0123456789ab)"
+	}))
+	s.Feed(inc("web01", "file-drift", "alert", time.Second, func(i *incident.Incident) {
+		i.Path, i.Detail = "/etc/cron.d/evil", "cron added: new file (sha256 0123456789ab)"
+	}))
+	v := s.View(nil, nil)
+	if approval(v, "f:web01:"+fleet.FileID("/tmp/junk")) != nil || approval(v, "f:web01:"+fleet.FileID("/etc/cron.d/evil")) == nil {
+		t.Fatalf("approvals: %+v", v.Approvals)
+	}
+}

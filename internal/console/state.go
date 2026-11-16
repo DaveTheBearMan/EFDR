@@ -235,9 +235,6 @@ func (s *State) save() error {
 func (s *State) Handle(id, action string) (Approval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, done := s.handled[id]; done {
-		return Approval{}, ErrHandled
-	}
 	var found *Approval
 	d := s.derive()
 	for i := range d.approvals {
@@ -246,17 +243,30 @@ func (s *State) Handle(id, action string) (Approval, error) {
 		}
 	}
 	if found == nil {
+		if _, done := s.handled[id]; done {
+			return Approval{}, ErrHandled
+		}
 		return Approval{}, ErrUnknown
 	}
 	s.handled[id] = handledEntry{ID: id, Action: action, At: s.now()}
+	s.order = slices.DeleteFunc(s.order, func(x string) bool { return x == id })
 	s.order = append(s.order, id)
 	s.trimHandled()
 	if err := s.save(); err != nil {
 		delete(s.handled, id)
-		s.order = s.order[:len(s.order)-1]
+		s.order = slices.DeleteFunc(s.order, func(x string) bool { return x == id })
 		return Approval{}, err
 	}
 	return *found, nil
+}
+
+// covered says whether an incident at `at` is one the handled entry for aid
+// covers: only what was pending when it was handled. The same id can name
+// something new later (session numbers restart at every boot, a removed
+// file can return).
+func (s *State) covered(aid string, at time.Time) (handledEntry, bool) {
+	h, ok := s.handled[aid]
+	return h, ok && !at.After(h.At)
 }
 
 // Unhandle takes an approval back to pending, for an order that could not be put.
@@ -275,9 +285,6 @@ func (s *State) Unhandle(id string) {
 func (s *State) Peek(id string) (Approval, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, done := s.handled[id]; done {
-		return Approval{}, false
-	}
 	for _, a := range s.derive().approvals {
 		if a.ID == id {
 			return a, true
@@ -310,8 +317,15 @@ func sid(detail string) (id, from string) {
 	return m[1], strings.TrimSuffix(m[2], ":")
 }
 
+// newFile reports whether a drift detail ("<category> added: new file ...")
+// is a new file or symlink in a persistence category: the only kind the
+// agent will remove. A new file nothing classifies ("file") is not.
 func newFile(detail string) bool {
-	return strings.Contains(detail, " added: new file") || strings.Contains(detail, " added: new symlink")
+	f := strings.Fields(detail)
+	if len(f) < 4 || f[0] == "file" || f[1] != "added:" || f[2] != "new" {
+		return false
+	}
+	return f[3] == "file" || f[3] == "symlink"
 }
 
 // derive reads the ring from oldest to newest and keeps what is still true.
@@ -348,7 +362,7 @@ func (s *State) derive() derived {
 			aid := "s:" + in.Host + ":" + id
 			r := row(in.Host, id)
 			r.User, r.From, r.Time, r.Status = in.User, from, in.Time, "pending"
-			if h, done := s.handled[aid]; done {
+			if h, done := s.covered(aid, in.Time); done {
 				r.Status = map[string]string{"approve": "approved", "kill": "ended"}[h.Action]
 				if r.Status == "" {
 					r.Status = h.Action
@@ -382,7 +396,7 @@ func (s *State) derive() derived {
 			}
 		case "user-disabled", "user-new":
 			aid := "u:" + in.Host + ":" + in.User
-			if _, done := s.handled[aid]; done || in.User == "" {
+			if _, done := s.covered(aid, in.Time); done || in.User == "" {
 				continue
 			}
 			why := "Not in the baseline."
@@ -406,7 +420,7 @@ func (s *State) derive() derived {
 				del(aid)
 				continue
 			}
-			if _, done := s.handled[aid]; done {
+			if _, done := s.covered(aid, in.Time); done {
 				continue
 			}
 			put(Approval{ID: aid, Host: in.Host, Kind: "file", Title: "New file " + in.Path, Why: in.Detail,
@@ -416,7 +430,7 @@ func (s *State) derive() derived {
 			del("f:" + in.Host + ":" + fid)
 			delete(driftPaths[in.Host], in.Path)
 			if aid := "fu:" + in.Host + ":" + fid; in.Time.Add(undoWindow).After(now) {
-				if _, done := s.handled[aid]; !done {
+				if _, done := s.covered(aid, in.Time); !done {
 					put(Approval{ID: aid, Host: in.Host, Kind: "file", Title: "Removed " + in.Path, Why: "Kept in quarantine; it can be put back until the deadline.",
 						Params: map[string]string{"path": in.Path}, Actions: []string{"undo"}, Deadline: in.Time.Add(undoWindow), Time: in.Time})
 				}
@@ -441,7 +455,7 @@ func (s *State) derive() derived {
 		}
 		if in.Action == "held" && in.PID > 0 && len(in.SHA256) >= 12 {
 			aid := "p:" + in.Host + ":" + strconv.Itoa(in.PID) + ":" + in.SHA256[:12]
-			if _, done := s.handled[aid]; !done {
+			if _, done := s.covered(aid, in.Time); !done {
 				put(Approval{ID: aid, Host: in.Host, Kind: "proc", Title: fmt.Sprintf("%s (pid %d) held: %s", in.Kind, in.PID, in.Exe),
 					Why:    "Held because it is a scored service. Killing it takes the service offline until it is restarted. " + in.Detail,
 					Params: map[string]string{"pid": strconv.Itoa(in.PID), "sha256": in.SHA256, "exe": in.Exe}, Actions: []string{"kill", "ignore"}, Time: in.Time})
