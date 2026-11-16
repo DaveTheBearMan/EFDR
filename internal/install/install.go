@@ -189,7 +189,12 @@ func manifestOf(items []item, copyHash string) Manifest {
 // reloads systemd and last stops the agent's unit: the agent may be the
 // caller, and stopping it ends the process. Every step runs whatever the
 // others did; nothing installed is a success.
-func Uninstall(l Layout, run Runner) error {
+func Uninstall(l Layout, run Runner) error { return UninstallThen(l, run, nil) }
+
+// UninstallThen is Uninstall with last run just before the agent's unit is
+// stopped, once all else worked: what the agent must do while it still
+// can (it may be the caller, and the stop ends it).
+func UninstallThen(l Layout, run Runner, last func()) error {
 	// The pinned hash first: from here no launch point finds a good copy
 	// and ensure restores and starts nothing, so a guard caught mid-look
 	// by the stop below cannot bring anything back.
@@ -261,6 +266,9 @@ func Uninstall(l Layout, run Runner) error {
 	// A guard restarted by a start queued as it stopped failed on the
 	// missing copy: cleared, so no unit is left behind.
 	run("systemctl", append([]string{"reset-failed"}, Units...)...)
+	if last != nil {
+		last()
+	}
 	run("systemctl", "stop", agentUnit)
 	return nil
 }

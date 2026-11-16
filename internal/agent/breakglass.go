@@ -88,13 +88,13 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 	// a.mu is held, so a second use cannot start while this runs. The id is
 	// spent only once the removal worked: a failed one may be retried.
+	if a.runner == nil {
+		return sshgate.Reply{Why: "no install to remove"} // nothing said, nothing spent
+	}
 	a.record(incident.Incident{Kind: "uninstall", Action: "uninstalled", Severity: model.SevCritical,
 		Detail: fmt.Sprintf("a signed break-glass token (%s) removed the XDR install from %s", t.ID, t.Host)})
 	if a.settle != nil {
 		a.settle()
-	}
-	if a.runner == nil {
-		return sshgate.Reply{Why: "no install to remove"}
 	}
 	// The gate's binary is about to go: a gate that cannot run would refuse
 	// every session, so it leaves PAM first.
@@ -110,13 +110,18 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 	}
 	a.uninstalled = true // no table, no gate from here on
 	a.uninstTried = true
-	if err := install.Uninstall(a.layout, a.runner); err != nil {
+	// The last step stops the agent's unit, which ends this process: the
+	// token is spent, and its spool files go, just before it.
+	spend := func() {
+		a.used[t.ID] = t.Expires
+		a.saveUsed()
+		a.unspool(t.ID)
+	}
+	if err := install.UninstallThen(a.layout, a.runner, spend); err != nil {
 		a.uninstalled = false
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: " + err.Error()})
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}
-	a.used[t.ID] = t.Expires
-	a.saveUsed()
 	if a.exit != nil {
 		a.exit()
 	}
@@ -127,6 +132,8 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 // agent was down take effect, and deletes the files that can never be
 // valid here (not a token, not the rule key's, another host's, expired):
 // anyone may put files in the spool, and they must not pile up.
+// An uninstall token already spent goes too: it can never act again, and
+// a spool that keeps it is a spool a replay is read from.
 func (a *agent) scanSpool() {
 	for _, f := range breakglass.ReadSpoolFiles(a.spool) {
 		e := breakglass.ParseEntry(f.Content)
@@ -136,8 +143,28 @@ func (a *agent) scanSpool() {
 				os.Remove(filepath.Join(a.spool, f.Name))
 				continue
 			}
+			if t.Action == "uninstall" {
+				a.loadUsed()
+				if _, spent := a.used[t.ID]; spent {
+					os.Remove(filepath.Join(a.spool, f.Name))
+					continue
+				}
+			}
 		}
 		a.useToken(e.Token, e.Session, false)
+	}
+}
+
+// unspool removes the spool files that hold the token with id: the one
+// `xdr breakglass` left beside its socket use, and any copy.
+func (a *agent) unspool(id string) {
+	if a.tokenPub == nil {
+		return
+	}
+	for _, f := range breakglass.ReadSpoolFiles(a.spool) {
+		if t, err := breakglass.Parse(breakglass.ParseEntry(f.Content).Token, a.tokenPub); err == nil && t.ID == id {
+			os.Remove(filepath.Join(a.spool, f.Name))
+		}
 	}
 }
 

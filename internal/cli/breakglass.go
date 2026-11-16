@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -71,11 +73,22 @@ func breakglassCmd(args []string, stdout, stderr io.Writer) error {
 	}
 	sum := sha256.Sum256([]byte(tok))
 	name := filepath.Join(spoolDir, hex.EncodeToString(sum[:8])+".tok")
+	spooled := true
 	if err := os.WriteFile(name, []byte(tok+"\n"+sess+"\n"), 0o600); err != nil {
+		spooled = false
 		fmt.Fprintf(stderr, "xdr breakglass: not spooled: %v\n", err)
 	}
+	_, serr := os.Lstat(gateSocket)
+	listening := serr == nil
 	r, err := sshgate.Send(gateSocket, sshgate.Msg{Token: tok, Session: sess})
 	if err != nil {
+		// An agent acting on an uninstall token removes the install and
+		// itself: the connection ends with no reply. Its spool file going,
+		// or its socket, says that is what happened.
+		if listening && breakglass.PeekAction(tok) == "uninstall" && uninstallSeen(name, spooled) {
+			fmt.Fprintln(stdout, "uninstall sent; the agent is removing the install")
+			return nil
+		}
 		fmt.Fprintln(stdout, "agent down: token spooled")
 		return nil
 	}
@@ -88,6 +101,27 @@ func breakglassCmd(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, r.Why)
 	}
 	return nil
+}
+
+// uninstallWait is how long `xdr breakglass` looks for the signs of an
+// uninstall at work.
+var uninstallWait = 10 * time.Second
+
+// uninstallSeen waits, up to uninstallWait, for the agent to take the
+// token's spool file (when one was written) or for its socket to go.
+func uninstallSeen(spoolFile string, spooled bool) bool {
+	for end := time.Now().Add(uninstallWait); ; {
+		if _, err := os.Lstat(spoolFile); spooled && errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		if _, err := os.Lstat(gateSocket); errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // mintCmd is `xdr controller mint-breakglass`: a file per host per window,

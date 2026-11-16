@@ -363,3 +363,73 @@ func TestBreakglass_UninstallRestoresDNS(t *testing.T) {
 		t.Fatal("the backup is still there")
 	}
 }
+
+// The install's last step stops the agent's own unit, which ends this
+// process: the token is spent, and its spool files removed, before that
+// step, so neither a restart nor a reinstall finds it unused. A replay
+// through the spool afterwards is refused, and the file pruned.
+func TestBreakglass_UninstallSpentBeforeTheStop(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	tok := mint(r, key, "00000000000000e1", "uninstall")
+	os.MkdirAll(r.a.spool, 0o700)
+	spooled := filepath.Join(r.a.spool, "cli.tok") // as `xdr breakglass` leaves it
+	os.WriteFile(spooled, []byte(tok+"\n\n"), 0o600)
+	other := filepath.Join(r.a.spool, "pause.tok")
+	os.WriteFile(other, []byte(mint(r, key, "00000000000000e2", "pause")+"\n"), 0o600)
+	run := r.a.runner
+	spent, unspooled := false, false
+	r.a.runner = func(name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && strings.Join(args, " ") == "stop xdr-agent.service" {
+			b, _ := os.ReadFile(r.a.usedPath())
+			spent = strings.Contains(string(b), "00000000000000e1")
+			_, err := os.Stat(spooled)
+			unspooled = os.IsNotExist(err)
+		}
+		return run(name, args...)
+	}
+	if rep := r.a.onGate(sshgate.Msg{Token: tok}); !rep.OK {
+		t.Fatalf("%+v", rep)
+	}
+	if !spent || !unspooled {
+		t.Fatalf("at the stop: spent %v, removed from the spool %v", spent, unspooled)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("another token's spool file was removed")
+	}
+	// A new agent on the box (a reinstall keeps the state directory), the
+	// token spooled again: refused, nothing runs, the file goes.
+	n := len(order)
+	r.a.used, r.a.uninstalled, r.a.uninstTried = nil, false, false
+	os.WriteFile(spooled, []byte(tok+"\n\n"), 0o600)
+	r.a.scanSpool()
+	if len(order) != n {
+		t.Fatalf("a spent token replayed through the spool ran: %v", order[n:])
+	}
+	if _, err := os.Stat(spooled); !os.IsNotExist(err) {
+		t.Fatal("a spent uninstall token was left in the spool")
+	}
+}
+
+// With no install to remove nothing is said or spent: no "uninstalled"
+// incident, no settle, the token still good.
+func TestBreakglass_UninstallWithoutInstallSpendsNothing(t *testing.T) {
+	r, key := tokenRig(t)
+	settled := false
+	r.a.settle = func() { settled = true }
+	r.a.runner = nil
+	tok := mint(r, key, "00000000000000e3", "uninstall")
+	rep := r.a.onGate(sshgate.Msg{Token: tok})
+	if rep.OK || !strings.Contains(rep.Why, "no install") {
+		t.Fatalf("%+v", rep)
+	}
+	if got := r.kind("uninstall"); len(got) != 0 || settled {
+		t.Fatalf("said %+v, settled %v", got, settled)
+	}
+	r.a.used = nil
+	r.a.loadUsed()
+	if _, ok := r.a.used["00000000000000e3"]; ok {
+		t.Fatal("the token was spent")
+	}
+}

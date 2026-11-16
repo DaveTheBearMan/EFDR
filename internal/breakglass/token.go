@@ -60,6 +60,22 @@ func Parse(s string, pub ed25519.PublicKey) (Token, error) {
 	return t, nil
 }
 
+// PeekAction is the action s claims, its signature unchecked: for what
+// `xdr breakglass` prints, never for what anything does. "" when s is not
+// a token's form.
+func PeekAction(s string) string {
+	payload, _, ok := strings.Cut(strings.TrimSpace(s), ".")
+	b, err := base64.RawURLEncoding.DecodeString(payload)
+	if !ok || err != nil || len(b) > 1024 {
+		return ""
+	}
+	var t struct{ Action string }
+	if json.Unmarshal(b, &t) != nil || !Action(t.Action) {
+		return ""
+	}
+	return t.Action
+}
+
 // Action reports whether a is one of the actions a token can carry.
 func Action(a string) bool { return a == "approve-session" || a == "pause" || a == "uninstall" }
 

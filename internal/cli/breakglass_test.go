@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/ed25519"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,5 +79,61 @@ func TestBreakglassCmd_CallersSession(t *testing.T) {
 	}
 	if len(breakglass.ReadSpool(spoolDir)) != 2 {
 		t.Fatal("not spooled")
+	}
+}
+
+// An uninstall token the agent acts on ends the agent: the connection
+// closes with no reply. That is said as what it is, not as an agent down.
+func TestBreakglassCmd_UninstallSent(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(nil)
+	mintTok := func(action string) string {
+		return breakglass.Mint(breakglass.Token{V: 1, ID: "00000000000000f1", Host: "web01", Action: action,
+			NotBefore: time.Now().Add(-time.Minute), Expires: time.Now().Add(time.Hour)}, key)
+	}
+	// agent is a gate socket whose agent, on a message, removes the spool
+	// (as it does for a spent uninstall token) and exits without a reply.
+	agent := func(t *testing.T, spool string) string {
+		sock := filepath.Join(t.TempDir(), "gate.sock")
+		l, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		go func() {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			bufio.NewReader(c).ReadString('\n')
+			ents, _ := os.ReadDir(spool)
+			for _, e := range ents {
+				os.Remove(filepath.Join(spool, e.Name()))
+			}
+			c.Close()
+			l.Close() // the socket goes with the agent
+		}()
+		return sock
+	}
+	old, oldSpool := gateSocket, spoolDir
+	t.Cleanup(func() { gateSocket, spoolDir = old, oldSpool })
+	spoolDir = t.TempDir()
+	gateSocket = agent(t, spoolDir)
+	var so, se bytes.Buffer
+	if code := Run([]string{"breakglass", mintTok("uninstall")}, &so, &se); code != 0 || !strings.Contains(so.String(), "uninstall sent; the agent is removing the install") {
+		t.Fatalf("uninstall: %d %q %q", code, so.String(), se.String())
+	}
+	// A pause token to the same kind of exit is still an agent down.
+	spoolDir = t.TempDir()
+	gateSocket = agent(t, spoolDir)
+	so.Reset()
+	if code := Run([]string{"breakglass", mintTok("pause")}, &so, &se); code != 0 || !strings.Contains(so.String(), "agent down: token spooled") {
+		t.Fatalf("pause: %d %q %q", code, so.String(), se.String())
+	}
+	// No agent at all: an uninstall token is spooled, and said so.
+	spoolDir = t.TempDir()
+	gateSocket = filepath.Join(t.TempDir(), "none.sock")
+	so.Reset()
+	if code := Run([]string{"breakglass", mintTok("uninstall")}, &so, &se); code != 0 || !strings.Contains(so.String(), "agent down: token spooled") {
+		t.Fatalf("no agent: %d %q %q", code, so.String(), se.String())
 	}
 }
