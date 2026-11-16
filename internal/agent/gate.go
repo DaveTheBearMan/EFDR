@@ -3,9 +3,13 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,4 +194,88 @@ func (a *agent) checkGrayUIDs() {
 		a.record(incident.Incident{Kind: "account-uid", Action: "alert", Severity: model.SevCritical, UID: acc.UID, User: acc.Name,
 			Detail: fmt.Sprintf("protected account %s has uid %d (baseline %d)", acc.Name, acc.UID, was)})
 	}
+}
+
+// listenGate listens on the gate socket: a directory only root writes, a
+// socket anyone may connect to.
+func listenGate(sock string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		return nil, err
+	}
+	os.Remove(sock)
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(sock, 0o666); err != nil {
+		l.Close()
+		return nil, err
+	}
+	return l, nil
+}
+
+// scopeSession is the session id in a cgroup path's session-N.scope.
+var scopeSession = regexp.MustCompile(`/session-(c?[0-9]{1,10})\.scope$`)
+
+// onGate answers the gate socket: a session opening is registered (its
+// grace starts now) and refused at once when the judge would end it; a
+// token message is a break-glass use.
+func (a *agent) onGate(m sshgate.Msg) sshgate.Reply {
+	if m.Token != "" {
+		return a.onToken(m)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.gateOn() {
+		return sshgate.Reply{OK: true}
+	}
+	ls, ok := a.lookupSession(m)
+	if !ok {
+		return sshgate.Reply{Why: "session unknown to logind"}
+	}
+	if a.sess == nil {
+		a.sess = map[string]*session{}
+	}
+	st := a.sess[ls.ID]
+	if st == nil {
+		st = &session{first: a.now()}
+		a.sess[ls.ID] = st
+	}
+	p := sshgate.Policy{Cfg: a.cfg, BaseUsers: a.baseUsers(), Users: a.okUsers, Approved: a.approved, Killed: a.ended, Paused: a.paused(), Now: a.now()}
+	if v, why := sshgate.Judge(ls, st.first, p); v == sshgate.End {
+		st.ended = true
+		a.record(incident.Incident{Kind: "session-refused", Action: "killed", Severity: model.SevHigh, UID: ls.UID, User: ls.User,
+			Detail: fmt.Sprintf("session %s from %s: %s", ls.ID, ls.RemoteHost, why)})
+		return sshgate.Reply{Why: why}
+	}
+	return sshgate.Reply{OK: true}
+}
+
+// lookupSession finds m's session: by its id, else by the cgroup of the
+// process that ran the gate.
+func (a *agent) lookupSession(m sshgate.Msg) (sshgate.Session, bool) {
+	list, err := sshgate.Sessions(a.root)
+	if err != nil {
+		return sshgate.Session{}, false
+	}
+	id := m.Session
+	if id == "" && m.PPID > 0 {
+		cg, _ := collect.ReadFile(filepath.Join(a.root, "proc", strconv.Itoa(m.PPID), "cgroup"), 4096)
+		for _, l := range strings.Split(string(cg), "\n") {
+			if sm := scopeSession.FindStringSubmatch(l); sm != nil {
+				id = sm[1]
+			}
+		}
+	}
+	for _, ls := range list {
+		if id != "" && ls.ID == id {
+			return ls, true
+		}
+	}
+	return sshgate.Session{}, false
+}
+
+// onToken is a break-glass use; tokens come with the break-glass plan.
+func (a *agent) onToken(m sshgate.Msg) sshgate.Reply {
+	return sshgate.Reply{Why: "tokens are not accepted yet"}
 }

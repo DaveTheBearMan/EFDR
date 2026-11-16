@@ -126,3 +126,30 @@ func TestAgentSessions_GrayUIDChanged(t *testing.T) {
 		t.Fatalf("account-uid: %+v", got)
 	}
 }
+
+func TestAgentGate_RegistersAndRefuses(t *testing.T) {
+	r, _ := gateOn(t)
+	sessionFile(t, r.root, "7", "alice", "192.0.2.7", 4242)
+	testfs.File(t, r.root, "run/systemd/sessions/9", "USER=evil\nUID=1500\nSERVICE=sshd\nREMOTE_HOST=192.0.2.7\nLEADER=4300\n", 0o644)
+	testfs.File(t, r.root, "proc/4250/cgroup", "0::/user.slice/user-1001.slice/session-7.scope\n", 0o644)
+	if rep := r.a.onGate(sshgate.Msg{Session: "7", User: "alice"}); !rep.OK {
+		t.Fatalf("alice: %+v", rep)
+	}
+	if st := r.a.sess["7"]; st == nil || !st.first.Equal(r.now) {
+		t.Fatalf("not registered: %+v", st)
+	}
+	r.now = r.now.Add(time.Minute)
+	delete(r.a.sess, "7")
+	if rep := r.a.onGate(sshgate.Msg{PPID: 4250, User: "alice"}); !rep.OK || r.a.sess["7"] == nil || !r.a.sess["7"].first.Equal(r.now) {
+		t.Fatalf("by ppid: %+v %+v", rep, r.a.sess["7"])
+	}
+	if rep := r.a.onGate(sshgate.Msg{Session: "9", User: "evil"}); rep.OK || !strings.Contains(rep.Why, "user not in baseline") {
+		t.Fatalf("evil: %+v", rep)
+	}
+	if got := r.kind("session-refused"); len(got) != 1 || got[0].User != "evil" {
+		t.Fatalf("refused: %+v", got)
+	}
+	if rep := r.a.onGate(sshgate.Msg{Session: "404"}); rep.OK {
+		t.Fatal("a session logind does not know let in")
+	}
+}

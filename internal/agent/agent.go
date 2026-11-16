@@ -860,6 +860,17 @@ func Run(ctx context.Context, o Options) error {
 		}()
 	}
 
+	if a.ssh != nil {
+		gctx, stopGate := context.WithCancel(ctx)
+		defer stopGate()
+		if l, err := listenGate(sshgate.Socket); err != nil {
+			a.recordLocked(incident.Incident{Kind: "ssh-config", Action: "alert", Severity: model.SevCritical,
+				Detail: "gate socket: " + err.Error() + "; sessions through the gate are refused"})
+		} else {
+			go sshgate.Serve(gctx, l, a.onGate)
+		}
+	}
+
 	var events <-chan sensor.Event
 	src := openSensor(o.Sensor,
 		func() (sensor.Source, error) { return sensor.NewEBPF(cgroupRoot) },
