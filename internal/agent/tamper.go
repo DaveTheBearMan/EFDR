@@ -146,7 +146,7 @@ func (a *agent) onTamper(ev tamper.Event) {
 		in.Action = "held"
 	default:
 		session = sshgate.CgroupSession([]byte(actor.Cgroup))
-		protect := func(p *proc.Proc) bool { return p.PID == a.pol.Self }
+		protect := func(p *proc.Proc) bool { return p.PID == a.pol.Self || a.pol.Guarded(snap, p) }
 		if _, err := a.kill(pid, actor.Start, protect); err != nil {
 			in.Action, in.Detail = "kill-failed", in.Detail+": "+err.Error()
 		} else {

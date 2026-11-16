@@ -195,3 +195,21 @@ func TestTamper_EnsureNotesAreReported(t *testing.T) {
 		t.Fatalf("reported again: %d", n)
 	}
 }
+
+// The kill spares a scored service anywhere under the writer's tree, as
+// every other kill does.
+func TestTamper_KillSparesGuardedChild(t *testing.T) {
+	evil := inSession(mk(800, 1, 1000, "/tmp/evil"), "12")
+	web := mk(801, 800, 33, "/usr/sbin/apache2")
+	r, _ := tamperRig(t, evil, web)
+	r.a.onTamper(hit(800))
+	if len(r.kills) != 1 {
+		t.Fatalf("kills %+v", r.kills)
+	}
+	if !r.kills[0].protect(r.snap.Procs[801]) {
+		t.Fatal("a guarded scored daemon under the writer is not protected")
+	}
+	if r.kills[0].protect(evil) {
+		t.Fatal("the writer itself is protected")
+	}
+}
