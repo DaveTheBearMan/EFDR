@@ -1,10 +1,17 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"slices"
+	"strings"
+	"syscall"
+	"time"
 
+	"xdr/internal/guard"
 	"xdr/internal/install"
 )
 
@@ -60,3 +67,24 @@ func ensureCmd(stdout, stderr io.Writer) (int, error) {
 	return 0, nil
 }
 
+// guardCmd is `xdr guard --watch UNIT [--every 1s]`: a watcher that keeps the
+// agent, the launch points and the other guard alive.
+func guardCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("guard", stderr)
+	watch := fs.String("watch", "", "the other guard's unit (xdr-guard-a.service or xdr-guard-b.service)")
+	every := fs.Duration("every", time.Second, "how often to look")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if !slices.Contains(install.Units, *watch) || !strings.HasPrefix(*watch, "xdr-guard-") {
+		fmt.Fprint(stderr, "xdr guard: --watch must be xdr-guard-a.service or xdr-guard-b.service\n")
+		return errUsage
+	}
+	if *every < 100*time.Millisecond {
+		return fmt.Errorf("--every %s is under 100ms", *every)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	guard.Run(ctx, layout, runner, *watch, *every, func(s string) { fmt.Fprintln(stderr, "guard:", s) })
+	return nil
+}
