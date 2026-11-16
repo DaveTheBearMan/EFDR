@@ -125,6 +125,7 @@ func (a *agent) sessions(s *proc.Snapshot) {
 		case sshgate.Pending:
 			if !st.said {
 				in.Kind, in.Action, in.Severity = "session-pending", "alert", model.SevMedium
+				in.Detail += fmt.Sprintf(" (ends in %s)", (a.cfg.SSH.Grace.Duration - now.Sub(st.first)).Round(time.Second))
 				a.record(in)
 				st.said = true
 			}

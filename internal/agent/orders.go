@@ -33,7 +33,8 @@ func (a *agent) onOrder(o fleet.Order) {
 	}
 	var v struct {
 		Verdict string `json:"verdict"`
-		At      int64  `json:"at"` // when the controller put it (unix seconds)
+		At      int64  `json:"at"`     // when the controller put it (unix seconds)
+		SHA256  string `json:"sha256"` // proc: the exe hash the process must have
 	}
 	if !o.Deleted && json.Unmarshal(o.Value, &v) != nil {
 		a.logf("order %s/%s: bad value", o.Kind, o.Name)
@@ -44,6 +45,11 @@ func (a *agent) onOrder(o fleet.Order) {
 	case "file":
 		if !o.Deleted {
 			a.fileOrder(o.Name, v.Verdict)
+		}
+		return
+	case "proc":
+		if !o.Deleted && v.Verdict == "kill" {
+			a.procOrder(o.Name, v.SHA256)
 		}
 		return
 	case "session":

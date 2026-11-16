@@ -96,7 +96,7 @@ func TestAgentSessions_TerminateAfterGrace(t *testing.T) {
 	sessionFile(t, r.root, "7", "alice", "192.0.2.7", 4242)
 	start := r.now
 	r.a.sessions(r.snap)
-	if got := r.kind("session-pending"); len(got) != 1 || got[0].User != "alice" || !strings.Contains(got[0].Detail, "7") {
+	if got := r.kind("session-pending"); len(got) != 1 || got[0].User != "alice" || !strings.Contains(got[0].Detail, "7") || !strings.Contains(got[0].Detail, "(ends in 1m30s)") {
 		t.Fatalf("pending: %+v", got)
 	}
 	r.now = start.Add(89 * time.Second)
