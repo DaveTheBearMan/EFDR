@@ -22,9 +22,16 @@ scan() {
 }
 has() { grep -qF -- "$1" "$2"; }
 
+# Never touch a VM this run did not create: the trap deletes only after
+# our own launch succeeded.
+if lxc info "$VM" >/dev/null 2>&1; then
+  echo "VM $VM already exists; delete it or set XDR_E2E_VM" >&2
+  exit 1
+fi
 OUT=$(mktemp -d)
-trap 'lxc delete --force "$VM" >/dev/null 2>&1 || true; rm -rf "$OUT"' EXIT
+trap 'rm -rf "$OUT"' EXIT
 lxc launch "$IMAGE" "$VM" --vm
+trap 'lxc delete --force "$VM" >/dev/null 2>&1 || true; rm -rf "$OUT"' EXIT
 for _ in $(seq 120); do x true >/dev/null 2>&1 && break; sleep 2; done
 x systemctl is-system-running --wait || true   # "degraded" is fine here
 
@@ -35,6 +42,9 @@ BASE=/var/cache/xdr-e2e/base.json.gz
 PKG=/var/cache/xdr-e2e/pkg.json.gz
 TRIAGE=/var/cache/xdr-e2e/triage.json.gz
 x mkdir -p /var/cache/xdr-e2e/debs
+# plant.sh appends to these two; making sure they exist before the
+# capture makes their finding "altered" on every image.
+x sh -c 'mkdir -p /root/.ssh && touch /root/.ssh/authorized_keys /etc/aliases'
 x xdr capture --root / --out "$BASE"
 
 echo "== clean-rescan (waiting 60s for background activity)"
