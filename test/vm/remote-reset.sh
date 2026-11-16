@@ -13,9 +13,34 @@ if [ ! -s "$SAVED" ]; then
   tar -C / -cpf "$SAVED.new" $FILES && mv "$SAVED.new" "$SAVED" || { echo "xdr-e2e-reset: cannot save $SAVED" >&2; exit 1; }
 fi
 
+# What `xdr install` put down (e2e-protect). The pinned hash goes first: with
+# it gone no launch point finds a good copy and ensure restores nothing, so
+# the guards, the timer and cron cannot bring back what is removed next.
+INSTALLED="/etc/xdr /var/lib/xdr /usr/lib/xdr /usr/local/sbin/xdr /etc/cron.d/xdr-ensure
+  /usr/lib/systemd/system-generators/xdr-generator /etc/apt/apt.conf.d/99xdr
+  /etc/systemd/system/xdr-agent.service /etc/systemd/system/xdr-agent.service.d
+  /etc/systemd/system/xdr-guard-a.service /etc/systemd/system/xdr-guard-b.service
+  /etc/systemd/system/xdr-ensure.service /etc/systemd/system/xdr-ensure.timer"
+# shellcheck disable=SC2086
+for p in $INSTALLED; do [ -e "$p" ] && chattr -R -i "$p" 2>/dev/null; done
+rm -f /etc/xdr/pinned.sha256 /var/lib/xdr/backup/pinned.sha256 /etc/cron.d/xdr-ensure \
+  /usr/lib/systemd/system-generators/xdr-generator /etc/apt/apt.conf.d/99xdr
+systemctl disable --now xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer xdr-ensure.service xdr-agent.service >/dev/null 2>&1
+rm -rf /etc/systemd/system/xdr-agent.service /etc/systemd/system/xdr-agent.service.d \
+  /etc/systemd/system/xdr-guard-a.service /etc/systemd/system/xdr-guard-b.service \
+  /etc/systemd/system/xdr-ensure.service /etc/systemd/system/xdr-ensure.timer \
+  /etc/systemd/system/*.wants/xdr-* /usr/lib/xdr
+
 for u in $(systemctl list-units --all --plain --no-legend 'xdr-*' | awk '{print $1}'); do
   case $u in xdr-e2e-deadman.*) ;; *) systemctl stop "$u"; systemctl reset-failed "$u" 2>/dev/null ;; esac
 done
+# e2e-protect's isolation: its foreign table, blackhole routes, its actors.
+nft delete table inet e2e_evil 2>/dev/null
+ip route show type blackhole | while read -r r; do
+  # shellcheck disable=SC2086
+  ip route del $r
+done
+pkill -f '^/tmp/xdr-e2e-' ; rm -f /tmp/xdr-e2e-*
 pkill -f '^/opt/beacon/' ; pkill -f '/usr/local/bin/helperd' ; pkill -f '/var/tmp/.cache-helper'
 nft delete table inet xdr 2>/dev/null
 
@@ -37,6 +62,8 @@ for d in /home/*; do
   [ -d "$d" ] && [ "$(stat -c %U "$d")" = UNKNOWN ] && rm -rf "$d"
 done
 
+# shellcheck disable=SC2086
+for p in $INSTALLED; do [ -e "$p" ] && chattr -R -i "$p" 2>/dev/null; done
 rm -rf /etc/xdr /var/lib/xdr /run/xdr /var/cache/xdr-e2e /opt/beacon /usr/local/bin/helperd /var/tmp/.cache-helper \
   /etc/systemd/system/xdr-e2e-*.service /usr/local/sbin/xdr /var/log/xdr-agent.*
 systemctl daemon-reload
