@@ -38,6 +38,7 @@ import (
 	"xdr/internal/respond"
 	"xdr/internal/rules"
 	"xdr/internal/sensor"
+	"xdr/internal/sshgate"
 )
 
 const (
@@ -51,9 +52,10 @@ const (
 	burstWindow = 10 * time.Second
 	askerTimes  = 32 // query times kept per asker; a burst is more than 20
 
-	procRoot   = "/proc"
-	cgroupRoot = "/sys/fs/cgroup"
-	defaultLog = "/var/lib/xdr/incidents.jsonl"
+	procRoot     = "/proc"
+	cgroupRoot   = "/sys/fs/cgroup"
+	defaultLog   = "/var/lib/xdr/incidents.jsonl"
+	defaultState = "/var/lib/xdr"
 )
 
 // Options configures Run.
@@ -118,6 +120,11 @@ type agent struct {
 	exeSize  func(*proc.Proc) int64 // nil: unknown
 	snap     *proc.Snapshot
 	snapAt   time.Time
+
+	ssh         *sshgate.Asserter // nil: no SSH gate
+	gateExe     string            // what pam_exec runs: this binary
+	gateOffSaid bool              // the gate-off alert was recorded
+	run         sshgate.Runner    // loginctl, usermod, systemctl
 
 	unitMu sync.Mutex
 	units  map[string]string // unit → unit file hash, this sweep
@@ -472,6 +479,9 @@ func (a *agent) assert(report bool) {
 	if err != nil {
 		a.record(incident.Incident{Kind: "dns-files", Action: "alert", Severity: model.SevMedium, Detail: err.Error()})
 	}
+	if a.cfg.SSH != nil && a.ssh != nil {
+		a.assertSSH(report)
+	}
 	a.checkForeign()
 }
 
@@ -764,6 +774,13 @@ func Run(ctx context.Context, o Options) error {
 		root:  "/",
 		netns: netns,
 		logf:  logf,
+	}
+	a.run = runCmd
+	if exe, err := os.Executable(); err != nil {
+		logf("ssh gate: cannot find this binary (%v); the gate stays off", err)
+	} else {
+		a.gateExe = exe
+		a.ssh = &sshgate.Asserter{Root: a.root, State: defaultState, Run: runCmd, Output: outputCmd}
 	}
 	a.exeSize = func(p *proc.Proc) int64 {
 		st, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(p.PID), "exe"))
