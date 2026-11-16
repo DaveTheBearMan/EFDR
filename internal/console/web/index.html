@@ -1,1 +1,44 @@
-placeholder
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>XDR Control Plane</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main id="login" class="wrap narrow" hidden>
+  <h1>XDR Control Plane</h1>
+  <form id="loginForm" class="card">
+    <label for="password">Operator password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <button class="btn primary" type="submit">Log in</button>
+    <p id="loginMsg" class="why"></p>
+  </form>
+</main>
+
+<main id="app" class="wrap" hidden>
+  <header>
+    <h1>XDR Control Plane</h1>
+    <div class="clock" id="clock"></div>
+    <button class="btn" id="logout" type="button">Log out</button>
+  </header>
+  <section class="strip" id="strip" aria-label="Summary"></section>
+  <nav role="tablist" id="tabs">
+    <button role="tab" aria-selected="true" data-tab="alerts">Alerts</button>
+    <button role="tab" aria-selected="false" data-tab="approvals">Approvals <span class="n" id="n-approvals"></span></button>
+    <button role="tab" aria-selected="false" data-tab="sessions">SSH sessions <span class="n" id="n-sessions"></span></button>
+    <button role="tab" aria-selected="false" data-tab="hosts">Hosts</button>
+    <button role="tab" aria-selected="false" data-tab="creds">Credentials</button>
+  </nav>
+  <section class="list" id="p-alerts" data-panel="alerts"></section>
+  <section class="list" id="p-approvals" data-panel="approvals" hidden></section>
+  <section class="list" id="p-sessions" data-panel="sessions" hidden></section>
+  <section class="list" id="p-hosts" data-panel="hosts" hidden></section>
+  <section class="list" id="p-creds" data-panel="creds" hidden></section>
+  <p class="why" id="msg" role="status"></p>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
