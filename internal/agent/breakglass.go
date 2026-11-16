@@ -102,6 +102,14 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: the ssh gate stays in PAM: " + err.Error()})
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}
+	// sshd_config goes back to the baseline's, checked and reloaded. A
+	// failure is reported and the render stays: sshd still works with it,
+	// and the uninstall goes on.
+	if changed, err := sshgate.ReleaseSSHD(a.root, a.runner); err != nil {
+		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevHigh, Path: "/etc/ssh/sshd_config", Detail: "uninstall: " + err.Error()})
+	} else if changed {
+		a.record(incident.Incident{Kind: "ssh-config", Action: "repaired", Severity: model.SevMedium, Path: "/etc/ssh/sshd_config", Detail: "/etc/ssh/sshd_config restored to the baseline's: uninstall"})
+	}
 	// The resolver files the pin replaced go back while the agent lives:
 	// once it (and its stub) are gone the box must still resolve.
 	if err := a.restoreDNS(); err != nil {

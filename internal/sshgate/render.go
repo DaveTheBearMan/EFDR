@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"xdr/internal/config"
@@ -27,6 +28,11 @@ func netString(n config.Net) string {
 	return n.Prefix.String()
 }
 
+const (
+	sshdHeader  = "# Written by xdr from the signed config and the baseline; edits are undone.\n"
+	sshdTrailer = "\n# xdr: per-account rules.\nMatch all\n"
+)
+
 // RenderSSHD is sshd_config: a header, the baseline's file unchanged, a
 // trailer. sshd keeps the first value it reads for a keyword, so the
 // header overrides the base and every drop-in it includes. The trailer
@@ -35,7 +41,7 @@ func netString(n config.Net) string {
 func RenderSSHD(base []byte, cfg *config.Config, t0 T0) []byte {
 	s := cfg.SSH
 	var b bytes.Buffer
-	b.WriteString("# Written by xdr from the signed config and the baseline; edits are undone.\n")
+	b.WriteString(sshdHeader)
 	b.WriteString("PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nPubkeyAuthentication yes\nUsePAM yes\n")
 	pinned := append(append([]string{"root"}, s.Blue...), s.Auto...)
 	if s.Recovery != "" {
@@ -55,7 +61,7 @@ func RenderSSHD(base []byte, cfg *config.Config, t0 T0) []byte {
 	if len(base) > 0 && base[len(base)-1] != '\n' {
 		b.WriteByte('\n')
 	}
-	b.WriteString("\n# xdr: per-account rules.\nMatch all\n")
+	b.WriteString(sshdTrailer)
 	if len(cfg.GrayUsers) > 0 {
 		fmt.Fprintf(&b, "Match User %s\n", strings.Join(cfg.GrayUsers, ","))
 		for _, kv := range [][2]string{{"PasswordAuthentication", t0.Password}, {"KbdInteractiveAuthentication", t0.KbdInteractive}, {"PubkeyAuthentication", t0.Pubkey}} {
@@ -147,6 +153,73 @@ func ReleasePAM(root string) (changed bool, err error) {
 	}
 	if err := writeFile(path, []byte(strings.Join(keep, "")), mode); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// UnitName reads `systemctl list-unit-files --no-legend ssh.service
+// sshd.service` and returns the unit that runs sshd: ssh.service (Debian,
+// Ubuntu) or sshd.service (most others), whichever is a unit of its own
+// and not an alias. "" when neither is installed.
+func UnitName(listing []byte) string {
+	var units []string
+	for _, line := range strings.Split(string(listing), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && (f[0] == "ssh.service" || f[0] == "sshd.service") && f[1] != "alias" {
+			units = append(units, f[0])
+		}
+	}
+	if slices.Contains(units, "ssh.service") {
+		return "ssh.service"
+	}
+	if len(units) > 0 {
+		return units[0]
+	}
+	return ""
+}
+
+// ReleaseSSHD puts root's sshd_config back to the baseline file RenderSSHD
+// made it from (the header and the trailer taken off), for an uninstall.
+// sshd -t must accept the result, else the render is put back and the
+// error says so: the box never loses its way in. Then sshd's unit is
+// reloaded, never restarted, so no session drops. changed is false when
+// the file is not xdr's render (or there is none); a failed reload is an
+// error with changed true.
+func ReleaseSSHD(root string, run func(name string, args ...string) ([]byte, error)) (changed bool, err error) {
+	path := filepath.Join(root, sshdConfig)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	s := string(b)
+	start := strings.Index(s, "\n\n")
+	end := strings.LastIndex(s, sshdTrailer)
+	if !strings.HasPrefix(s, sshdHeader) || start < 0 || end < start+2 {
+		return false, nil
+	}
+	mode := fs.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	if err := writeFile(path, b[start+2:end], mode); err != nil {
+		return false, err
+	}
+	if out, err := run("sshd", "-t", "-f", path); err != nil {
+		if werr := writeFile(path, b, mode); werr != nil {
+			return true, fmt.Errorf("sshd -t refused the baseline sshd_config (%v: %s), and putting the render back failed: %w", err, strings.TrimSpace(string(out)), werr)
+		}
+		return false, fmt.Errorf("sshd -t refused the baseline sshd_config, the render stays: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	list, _ := run("systemctl", "list-unit-files", "--no-legend", "ssh.service", "sshd.service")
+	unit := UnitName(list)
+	if unit == "" {
+		unit = "ssh.service"
+	}
+	if out, err := run("systemctl", "reload", unit); err != nil {
+		return true, fmt.Errorf("sshd_config restored, but reloading %s failed: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	return true, nil
 }

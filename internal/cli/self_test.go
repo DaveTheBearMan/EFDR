@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -208,5 +209,30 @@ func TestUninstallCLI_RestoresDNS(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(resolv); string(b) != "nameserver 192.0.2.53\n" || len(f.cmds) == 0 {
 		t.Fatalf("resolv.conf %q", b)
+	}
+}
+
+// With the agent dead, the CLI's uninstall also puts sshd_config back to
+// the baseline's, checks it and reloads sshd before the install goes.
+func TestUninstallCLI_RestoresSSHDConfig(t *testing.T) {
+	root, f, mint := uninstallRig(t)
+	conf := filepath.Join(root, "etc/ssh/sshd_config")
+	os.MkdirAll(filepath.Dir(conf), 0o755)
+	base := "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n"
+	rendered := "# Written by xdr from the signed config and the baseline; edits are undone.\nPasswordAuthentication no\nAllowUsers root@192.0.2.7\n\n" +
+		base + "\n# xdr: per-account rules.\nMatch all\n"
+	os.WriteFile(conf, []byte(rendered), 0o644)
+	now := time.Now()
+	var so, se bytes.Buffer
+	if code := Run([]string{"uninstall", "--token", mint("web01", "uninstall", now.Add(-time.Minute), now.Add(time.Hour))}, &so, &se); code != 0 {
+		t.Fatalf("%d %s", code, se.String())
+	}
+	if b, _ := os.ReadFile(conf); string(b) != base {
+		t.Fatalf("sshd_config:\n%s", b)
+	}
+	check, reload := slices.Index(f.cmds, "sshd -t -f "+conf), slices.Index(f.cmds, "systemctl reload ssh.service")
+	disable := slices.IndexFunc(f.cmds, func(c string) bool { return strings.HasPrefix(c, "systemctl disable") })
+	if check < 0 || reload < check || disable < reload {
+		t.Fatalf("cmds %q", f.cmds)
 	}
 }

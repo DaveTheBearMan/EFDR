@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -431,5 +432,37 @@ func TestBreakglass_UninstallWithoutInstallSpendsNothing(t *testing.T) {
 	r.a.loadUsed()
 	if _, ok := r.a.used["00000000000000e3"]; ok {
 		t.Fatal("the token was spent")
+	}
+}
+
+// The uninstall also puts sshd_config back to the baseline's file, checked
+// by sshd -t, and reloads sshd: never a restart, so no session drops.
+func TestBreakglass_UninstallRestoresSSHDConfig(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	testfs.File(t, r.root, "etc/ssh/sshd_config", "UsePAM yes\n", 0o644)
+	testfs.File(t, r.root, "etc/pam.d/sshd", pamBase, 0o644)
+	r.a.assert(false)
+	conf := filepath.Join(r.root, "etc/ssh/sshd_config")
+	if b, _ := os.ReadFile(conf); !strings.HasPrefix(string(b), "# Written by xdr") {
+		t.Fatalf("the rig has no render: %s", b)
+	}
+	if rep := r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000da", "uninstall")}); !rep.OK {
+		t.Fatalf("%+v", rep)
+	}
+	b, _ := os.ReadFile(conf)
+	if strings.Contains(string(b), "xdr") || !strings.Contains(string(b), "UsePAM yes") {
+		t.Fatalf("sshd_config after the uninstall:\n%s", b)
+	}
+	at := func(c string) int { return slices.Index(order, c) }
+	check, reload, disable := at("sshd -t -f "+conf), at("systemctl reload ssh.service"), slices.IndexFunc(order, func(c string) bool { return strings.HasPrefix(c, "systemctl disable") })
+	if check < 0 || reload < check || disable < reload {
+		t.Fatalf("order: %q", order)
+	}
+	for _, c := range order {
+		if strings.Contains(c, "restart") && strings.Contains(c, "ssh") {
+			t.Fatalf("sshd restarted: %q", order)
+		}
 	}
 }

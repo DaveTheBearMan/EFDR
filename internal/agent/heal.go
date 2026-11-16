@@ -422,28 +422,14 @@ func (a *agent) restoreLink(run sshgate.Runner, env rungEnv) []healNote {
 	return notes
 }
 
-// sshUnit is the unit that runs sshd here: ssh.service (Debian, Ubuntu) or
-// sshd.service (most others), whichever is a unit of its own rather than
-// an alias. "" when neither is installed.
+// sshUnit is the unit that runs sshd here (sshgate.UnitName); "" when
+// none is installed.
 func (a *agent) sshUnit() string {
 	b, err := a.output("systemctl", "list-unit-files", "--no-legend", "ssh.service", "sshd.service")
 	if err != nil {
 		return ""
 	}
-	var units []string
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) >= 2 && (f[0] == "ssh.service" || f[0] == "sshd.service") && f[1] != "alias" {
-			units = append(units, f[0])
-		}
-	}
-	if slices.Contains(units, "ssh.service") {
-		return "ssh.service"
-	}
-	if len(units) > 0 {
-		return units[0]
-	}
-	return ""
+	return sshgate.UnitName(b)
 }
 
 // sshdPorts is the ports sshd -T says sshd is configured for; nil when it

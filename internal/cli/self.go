@@ -159,6 +159,13 @@ func uninstallCmd(args []string, stdout, stderr io.Writer) error {
 	if _, err := sshgate.ReleasePAM(root); err != nil {
 		return fmt.Errorf("the ssh gate stays in PAM: %w", err)
 	}
+	// sshd_config back to the baseline's, checked and reloaded; on a
+	// failure the render stays (sshd works with it) and the uninstall goes on.
+	if changed, err := sshgate.ReleaseSSHD(root, runner); err != nil {
+		fmt.Fprintln(stderr, "xdr uninstall:", err)
+	} else if changed {
+		fmt.Fprintln(stdout, "restored /etc/ssh/sshd_config")
+	}
 	// The resolver files the agent's DNS pin replaced go back first: with
 	// the agent and its stub gone the box must still resolve.
 	restored, err := dnsguard.Restore(root, filepath.Join(root, dnsBackup))

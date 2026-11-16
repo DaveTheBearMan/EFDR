@@ -1,6 +1,7 @@
 package sshgate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,101 @@ func TestReleasePAM_TakesTheGateOut(t *testing.T) {
 	os.Remove(p)
 	if changed, err := ReleasePAM(root); err != nil || changed {
 		t.Fatalf("no file: %v, %v", changed, err)
+	}
+}
+
+// fakeOut records commands; fail names one that fails.
+type fakeOut struct {
+	ran  []string
+	fail string
+	outs map[string]string
+}
+
+func (f *fakeOut) run(name string, args ...string) ([]byte, error) {
+	c := strings.Join(append([]string{name}, args...), " ")
+	f.ran = append(f.ran, c)
+	if f.fail != "" && strings.HasPrefix(c, f.fail) {
+		return []byte("bad config"), errors.New("exit status 255")
+	}
+	return []byte(f.outs[c]), nil
+}
+
+const unitFiles = "systemctl list-unit-files --no-legend ssh.service sshd.service"
+
+// The uninstall puts sshd_config back to the baseline's file it was
+// rendered from, checks it with sshd -t and reloads sshd's own unit.
+func TestReleaseSSHD_PutsTheBaseBack(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "etc/ssh/sshd_config")
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	rendered := RenderSSHD([]byte(baseSSHD), gateConfig(t, gateBody), T0{Password: "yes", Methods: "any"})
+	os.WriteFile(p, rendered, 0o600)
+	f := &fakeOut{outs: map[string]string{unitFiles: "sshd.service enabled disabled\n"}}
+	changed, err := ReleaseSSHD(root, f.run)
+	if err != nil || !changed {
+		t.Fatalf("changed %v err %v", changed, err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != baseSSHD {
+		t.Fatalf("sshd_config:\n%s", b)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode())
+	}
+	want := []string{"sshd -t -f " + p, unitFiles, "systemctl reload sshd.service"}
+	if strings.Join(f.ran, "|") != strings.Join(want, "|") {
+		t.Fatalf("ran %q, want %q", f.ran, want)
+	}
+	// Again: nothing of xdr's is left, nothing runs.
+	f.ran = nil
+	if changed, err := ReleaseSSHD(root, f.run); changed || err != nil || len(f.ran) != 0 {
+		t.Fatalf("second: %v %v %q", changed, err, f.ran)
+	}
+	// No file: nothing.
+	if changed, err := ReleaseSSHD(t.TempDir(), f.run); changed || err != nil {
+		t.Fatalf("no file: %v %v", changed, err)
+	}
+}
+
+// When sshd -t refuses the base the render stays: the box keeps its way
+// in, and nothing is reloaded.
+func TestReleaseSSHD_RefusedBaseKeepsTheRender(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "etc/ssh/sshd_config")
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	rendered := RenderSSHD([]byte(baseSSHD), gateConfig(t, gateBody), T0{})
+	os.WriteFile(p, rendered, 0o644)
+	f := &fakeOut{fail: "sshd -t"}
+	if _, err := ReleaseSSHD(root, f.run); err == nil {
+		t.Fatal("no error")
+	}
+	if b, _ := os.ReadFile(p); string(b) != string(rendered) {
+		t.Fatalf("not put back:\n%s", b)
+	}
+	for _, c := range f.ran {
+		if strings.HasPrefix(c, "systemctl") {
+			t.Fatalf("ran %q", f.ran)
+		}
+	}
+	// A reload that fails is reported; the file stays restored.
+	f = &fakeOut{fail: "systemctl reload", outs: map[string]string{unitFiles: "ssh.service enabled enabled\nsshd.service alias -\n"}}
+	if changed, err := ReleaseSSHD(root, f.run); !changed || err == nil || !strings.Contains(strings.Join(f.ran, "|"), "systemctl reload ssh.service") {
+		t.Fatalf("reload failure: %v %v %q", changed, err, f.ran)
+	}
+	if b, _ := os.ReadFile(p); string(b) != baseSSHD {
+		t.Fatalf("not restored:\n%s", b)
+	}
+}
+
+func TestUnitName(t *testing.T) {
+	for in, want := range map[string]string{
+		"ssh.service  enabled enabled\nsshd.service alias   -\n": "ssh.service",
+		"sshd.service enabled disabled\n":                        "sshd.service",
+		"":                                                       "",
+		"sshd.service alias -\n":                                 "",
+	} {
+		if got := UnitName([]byte(in)); got != want {
+			t.Errorf("UnitName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
