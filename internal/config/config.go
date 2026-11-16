@@ -79,6 +79,12 @@ type Config struct {
 	RulesCache string     `json:"rules_cache"` // the last verified rule set
 	SSH        *SSH       `json:"ssh"`         // nil: no SSH gate
 	Scan       Scan       `json:"scan"`        // the baseline-drift scans
+	Self       Self       `json:"self"`        // self-protection
+}
+
+// Self is the agent's protection of its own install.
+type Self struct {
+	Off bool `json:"off"` // do not watch the installed files
 }
 
 // Scan is how often the agent compares the box with its baseline: a fast

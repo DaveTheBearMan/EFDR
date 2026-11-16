@@ -34,6 +34,7 @@ import (
 	"xdr/internal/fw"
 	"xdr/internal/hunt"
 	"xdr/internal/incident"
+	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/persist"
 	"xdr/internal/proc"
@@ -146,6 +147,10 @@ type agent struct {
 	userSaid     map[string]bool                                       // new accounts already alerted on
 	recoverySaid bool                                                  // recovery-missing was recorded
 	ordersDone   map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
+	execs        map[int]execInfo                                      // recent process starts, by pid
+	tamperSeen   map[string]time.Time                                  // pid|path of a tamper event, when last reported
+	pinnedHash   func() string                                         // the pinned binary hash
+	copies       []string                                              // the installed copies of the binary
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
@@ -926,6 +931,10 @@ func Run(ctx context.Context, o Options) error {
 		events = src.Events()
 	}
 
+	a.pinnedHash, a.copies = readPinned, install.DefaultLayout().Copies
+	if !cfg.Self.Off {
+		a.startTamper(ctx)
+	}
 	if !cfg.Scan.Off {
 		sctx, stopScan := context.WithCancel(ctx)
 		defer stopScan()
@@ -966,6 +975,7 @@ func Run(ctx context.Context, o Options) error {
 				logf("sensor: %s stopped; sweeping only", src.Name())
 				continue
 			}
+			a.noteExec(ev)
 			if !a.wanted(ev) || len(pending) >= maxPending {
 				continue
 			}
