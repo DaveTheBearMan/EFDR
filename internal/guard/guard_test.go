@@ -119,3 +119,28 @@ func TestGuard_StopsWithTheContext(t *testing.T) {
 		t.Fatal("still running after the context ended")
 	}
 }
+
+func TestGuard_StartsTheOtherWithoutWaiting(t *testing.T) {
+	l := installed(t)
+	f := &fake{active: map[string]string{"xdr-guard-b.service": "inactive"}}
+	Tick(l, func(name string, args ...string) ([]byte, error) {
+		// ensure sees b as active; only the guard's own look sees it down
+		if name == "systemctl" && len(args) == 2 && args[0] == "is-active" && args[1] == "xdr-guard-b.service" && f.count("systemctl is-active xdr-guard-b.service") == 0 {
+			f.run(name, args...)
+			return []byte("active\n"), nil
+		}
+		return f.run(name, args...)
+	}, "xdr-guard-b.service", func(string) {})
+	n := 0
+	for _, c := range f.cmds {
+		if strings.HasPrefix(c, "systemctl start") {
+			n++
+			if !strings.Contains(c, "--no-block") {
+				t.Fatalf("a start that waits: %q", c)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%v", f.cmds)
+	}
+}

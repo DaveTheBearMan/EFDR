@@ -29,7 +29,7 @@ func Tick(l install.Layout, run install.Runner, watch string, report func(string
 		return
 	}
 	if out, _ := run("systemctl", "is-active", watch); strings.TrimSpace(string(out)) != "active" {
-		if _, err := run("systemctl", "start", watch); err == nil {
+		if _, err := run("systemctl", "start", watch, "--no-block"); err == nil {
 			report("started " + watch)
 		}
 	}

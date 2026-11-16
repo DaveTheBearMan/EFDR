@@ -111,7 +111,9 @@ func ensure(l Layout, run Runner, pinned string) (Report, error) {
 		if out, _ := run("systemctl", "is-active", u); strings.TrimSpace(string(out)) == "active" {
 			continue
 		}
-		if _, err := run("systemctl", "start", u); err != nil {
+		// Queued, not waited for: a guard stopping runs this too, and a
+		// waiting start of its own unit would hold that stop until it times out.
+		if _, err := run("systemctl", "start", u, "--no-block"); err != nil {
 			errs = append(errs, "starting "+u+": "+err.Error())
 			continue
 		}

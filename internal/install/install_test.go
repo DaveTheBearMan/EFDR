@@ -416,3 +416,24 @@ func TestEnsure_LeavesANoteOfWhatItDid(t *testing.T) {
 		t.Fatalf("notes %+v", n)
 	}
 }
+
+// A guard runs ensure; while systemd stops that guard, a waiting
+// `systemctl start` of its own unit (not active: deactivating) would hold
+// the stop until it times out, and every other start behind it. Starts are
+// queued, never waited for.
+func TestEnsure_StartsWithoutWaiting(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{active: map[string]string{"xdr-guard-a.service": "deactivating", "xdr-agent.service": "inactive"}}
+	rep, err := Ensure(l, f.run)
+	if err != nil || len(rep.Started) != 2 {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	for _, c := range f.cmds {
+		if strings.HasPrefix(c, "systemctl start") && !strings.Contains(c, "--no-block") {
+			t.Fatalf("a start that waits: %q", c)
+		}
+	}
+}
