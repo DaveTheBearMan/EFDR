@@ -226,3 +226,23 @@ func TestAgent_RefusedRenderToldOnce(t *testing.T) {
 		t.Fatalf("after a good render: told %d times", len(got))
 	}
 }
+
+// A gate with no recovery account leaves break-glass no way in past it:
+// said once, at the first assert.
+func TestAgent_NoRecoveryAccountTold(t *testing.T) {
+	r, _ := gateRig(t, &baseline.Baseline{Files: map[string]baseline.FileEntry{
+		"/etc/ssh/sshd_config": {Content: []byte("UsePAM yes\n")}, "/etc/pam.d/sshd": {Content: []byte(pamBase)}}})
+	testfs.File(t, r.root, "etc/pam.d/sshd", pamBase, 0o644)
+	r.a.cfg.SSH.Recovery, r.a.cfg.SSH.RecoveryKey = "", ""
+	r.a.assert(false)
+	r.a.guard()
+	var n int
+	for _, in := range r.kind("ssh-config") {
+		if strings.Contains(in.Detail, "recovery") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("told %d times: %+v", n, r.got)
+	}
+}

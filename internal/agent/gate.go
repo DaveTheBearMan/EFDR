@@ -24,6 +24,11 @@ import (
 // false, files it had to write are logged, not incidents. A baseline
 // without either file keeps the gate off, said once.
 func (a *agent) assertSSH(report bool) {
+	if a.cfg.SSH.Recovery == "" && !a.noRecoverySaid {
+		a.record(incident.Incident{Kind: "ssh-config", Action: "alert", Severity: model.SevHigh,
+			Detail: "ssh.recovery is not set: AllowUsers lets no recovery account in, so a break-glass token cannot be delivered past the gate"})
+		a.noRecoverySaid = true
+	}
 	changed, err := a.ssh.Assert(a.cfg, a.pol.Base, a.gateExe)
 	for _, p := range changed {
 		if report {

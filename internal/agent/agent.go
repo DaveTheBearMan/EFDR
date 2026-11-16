@@ -134,49 +134,50 @@ type agent struct {
 	snap      *proc.Snapshot
 	snapAt    time.Time
 
-	ssh           *sshgate.Asserter                                     // nil: no SSH gate
-	gateExe       string                                                // what pam_exec runs: this binary
-	gateOffSaid   bool                                                  // the gate-off alert was recorded
-	sshErrSaid    string                                                // the ssh-config error last told; "" when the render took
-	run           sshgate.Runner                                        // loginctl, usermod, systemctl
-	sess          map[string]*session                                   // live sessions by id
-	approved      map[string]bool                                       // session ids approved (orders, break-glass)
-	ended         map[string]bool                                       // session ids ordered ended
-	okUsers       map[string]bool                                       // new accounts approved
-	pausedUntil   time.Time                                             // a pause token holds until then
-	uidSaid       map[string]uint32                                     // gray accounts whose bad uid was reported
-	tokenPub      ed25519.PublicKey                                     // the jump box's rule key; nil: tokens refused
-	used          map[string]time.Time                                  // break-glass token ids used, by expiry
-	state         string                                                // the state directory
-	bootID        string                                                // this boot's id
-	btime         int64                                                 // when this boot began (unix seconds); 0: unknown
-	spool         string                                                // the break-glass spool
-	disabled      map[string]bool                                       // accounts the agent locked
-	userSaid      map[string]bool                                       // new accounts already alerted on
-	userPaused    map[string]bool                                       // new accounts told during a pause, not locked
-	recoverySaid  bool                                                  // recovery-missing was recorded
-	ordersDone    map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
-	execs         map[int]execInfo                                      // recent process starts, by pid
-	tamperSeen    map[string]time.Time                                  // pid|path of a tamper event, when last reported
-	pinnedHash    func() string                                         // the pinned binary hash
-	copies        []string                                              // the installed copies of the binary
-	layout        install.Layout                                        // what a signed uninstall removes
-	runner        install.Runner                                        // runs systemctl and chattr for it
-	exit          func()                                                // stops the agent for good
-	settle        func()                                                // lets the last report leave; nil: no wait
-	uninstalled   bool                                                  // a signed uninstall removed the install: assert nothing more
-	uninstTried   bool                                                  // this agent ran an uninstall (it may have failed): its marker is its own
-	manifest      []byte                                                // the manifest as last read, to put back if both copies go
-	markerSaid    bool                                                  // the uninstalled marker of another's making was reported
-	tamperRead    time.Time                                             // the last full /proc read for a tamper event
-	tamperDropped func() uint64                                         // the tamper watcher's lost events so far; nil: no watcher
-	dropsSeen     uint64                                                // of those, already reported
-	dropsSaid     time.Time                                             // when last reported
-	pinSaid       bool                                                  // the pinned-with-no-backup alert was recorded
-	drift         map[string]string                                     // path → what was last reported for it
-	driftNew      map[string]driftEntry                                 // the new files reported, by FileID
-	driftNoise    map[string]bool                                       // the remembered paths nothing classifies
-	runIn         func(stdin []byte, name string, args ...string) error // chpasswd
+	ssh            *sshgate.Asserter                                     // nil: no SSH gate
+	gateExe        string                                                // what pam_exec runs: this binary
+	gateOffSaid    bool                                                  // the gate-off alert was recorded
+	sshErrSaid     string                                                // the ssh-config error last told; "" when the render took
+	noRecoverySaid bool                                                  // the missing ssh.recovery was told
+	run            sshgate.Runner                                        // loginctl, usermod, systemctl
+	sess           map[string]*session                                   // live sessions by id
+	approved       map[string]bool                                       // session ids approved (orders, break-glass)
+	ended          map[string]bool                                       // session ids ordered ended
+	okUsers        map[string]bool                                       // new accounts approved
+	pausedUntil    time.Time                                             // a pause token holds until then
+	uidSaid        map[string]uint32                                     // gray accounts whose bad uid was reported
+	tokenPub       ed25519.PublicKey                                     // the jump box's rule key; nil: tokens refused
+	used           map[string]time.Time                                  // break-glass token ids used, by expiry
+	state          string                                                // the state directory
+	bootID         string                                                // this boot's id
+	btime          int64                                                 // when this boot began (unix seconds); 0: unknown
+	spool          string                                                // the break-glass spool
+	disabled       map[string]bool                                       // accounts the agent locked
+	userSaid       map[string]bool                                       // new accounts already alerted on
+	userPaused     map[string]bool                                       // new accounts told during a pause, not locked
+	recoverySaid   bool                                                  // recovery-missing was recorded
+	ordersDone     map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
+	execs          map[int]execInfo                                      // recent process starts, by pid
+	tamperSeen     map[string]time.Time                                  // pid|path of a tamper event, when last reported
+	pinnedHash     func() string                                         // the pinned binary hash
+	copies         []string                                              // the installed copies of the binary
+	layout         install.Layout                                        // what a signed uninstall removes
+	runner         install.Runner                                        // runs systemctl and chattr for it
+	exit           func()                                                // stops the agent for good
+	settle         func()                                                // lets the last report leave; nil: no wait
+	uninstalled    bool                                                  // a signed uninstall removed the install: assert nothing more
+	uninstTried    bool                                                  // this agent ran an uninstall (it may have failed): its marker is its own
+	manifest       []byte                                                // the manifest as last read, to put back if both copies go
+	markerSaid     bool                                                  // the uninstalled marker of another's making was reported
+	tamperRead     time.Time                                             // the last full /proc read for a tamper event
+	tamperDropped  func() uint64                                         // the tamper watcher's lost events so far; nil: no watcher
+	dropsSeen      uint64                                                // of those, already reported
+	dropsSaid      time.Time                                             // when last reported
+	pinSaid        bool                                                  // the pinned-with-no-backup alert was recorded
+	drift          map[string]string                                     // path → what was last reported for it
+	driftNew       map[string]driftEntry                                 // the new files reported, by FileID
+	driftNoise     map[string]bool                                       // the remembered paths nothing classifies
+	runIn          func(stdin []byte, name string, args ...string) error // chpasswd
 
 	unitMu sync.Mutex
 	units  map[string]string // unit → unit file hash, this sweep
