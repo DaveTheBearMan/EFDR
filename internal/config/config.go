@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -84,7 +85,34 @@ type Config struct {
 	Fleet      *Fleet     `json:"fleet"`       // nil: a standalone agent
 	Mesh       *Mesh      `json:"mesh"`        // nil: no peer links
 	RulesCache string     `json:"rules_cache"` // the last verified rule set
+	SSH        *SSH       `json:"ssh"`         // nil: no SSH gate
 }
+
+// SSH is the SSH gate: who may log in, and how long an unapproved session
+// lives.
+type SSH struct {
+	Blue        []string `json:"blue_users"`   // blue-team accounts: keys only, from the jump box
+	Recovery    string   `json:"recovery"`     // the recovery account: key only, skips the gate
+	RecoveryKey string   `json:"recovery_key"` // its one authorized_keys line
+	Auto        []string `json:"auto"`         // platform accounts: approved when from the jump box
+	Grace       Duration `json:"grace"`        // an unapproved session's life; default 90s
+}
+
+// Duration is a time.Duration written as "90s".
+type Duration struct{ time.Duration }
+
+// UnmarshalText accepts what time.ParseDuration does.
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return err
+	}
+	d.Duration = v
+	return nil
+}
+
+// MarshalText is the inverse of UnmarshalText.
+func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
 
 // Fleet is how the agent reaches the controller's etcd.
 type Fleet struct {
@@ -104,6 +132,11 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(data)
+}
+
+// Parse decodes and validates a config's bytes.
+func Parse(data []byte) (*Config, error) {
 	c := &Config{SSHPort: 22, XDRPorts: []uint16{7443}, DHCP: true, Kill: true, DNS: DNS{Listen: "127.0.0.1:53"},
 		RulesCache: "/var/lib/xdr/rules.json"}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -112,7 +145,10 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if c.Fleet != nil && c.Fleet.Dir == "" {
-		c.Fleet.Dir = "/etc/xdr/fleet"
+		c.Fleet.Dir = DefaultFleetDir
+	}
+	if c.SSH != nil && c.SSH.Grace.Duration == 0 {
+		c.SSH.Grace.Duration = 90 * time.Second
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -206,6 +242,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("dns.hosts: bad entry %q", n)
 		}
 	}
+	if c.SSH != nil {
+		if err := c.validateSSH(); err != nil {
+			return err
+		}
+	}
 	if c.Mesh != nil {
 		if err := c.validateMesh(); err != nil {
 			return err
@@ -213,6 +254,40 @@ func (c *Config) Validate() error {
 	}
 	if c.Fleet != nil {
 		return c.validateFleet()
+	}
+	return nil
+}
+
+// userName is what useradd accepts by default.
+var userName = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// validateSSH refuses a gate that would touch a gray account or that the
+// recovery account could not get through. An empty jump is refused before
+// this: the gate pins every other account to it.
+func (c *Config) validateSSH() error {
+	s := c.SSH
+	if s.Recovery != "" && strings.TrimSpace(s.RecoveryKey) == "" {
+		return fmt.Errorf("ssh.recovery_key: the recovery account %s needs its key", s.Recovery)
+	}
+	if strings.ContainsAny(strings.TrimSpace(s.RecoveryKey), "\n\r") {
+		return fmt.Errorf("ssh.recovery_key: one line only")
+	}
+	if s.Grace.Duration < 10*time.Second {
+		return fmt.Errorf("ssh.grace: %s is under 10s", s.Grace.Duration)
+	}
+	names := append(append(slices.Clone(s.Blue), s.Auto...), c.GrayUsers...)
+	if s.Recovery != "" {
+		names = append(names, s.Recovery)
+	}
+	for _, u := range names {
+		if !userName.MatchString(u) {
+			return fmt.Errorf("ssh: bad user %q", u)
+		}
+	}
+	for _, u := range append(append(slices.Clone(s.Blue), s.Auto...), s.Recovery) {
+		if slices.Contains(c.GrayUsers, u) {
+			return fmt.Errorf("ssh: %s is both a gray account and one the gate manages", u)
+		}
 	}
 	return nil
 }

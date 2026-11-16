@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	"xdr/internal/config"
 	"xdr/internal/controller"
 	"xdr/internal/incident"
 	"xdr/internal/pki"
@@ -23,7 +25,7 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host\n")
+		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
@@ -112,6 +114,33 @@ func controllerCmd(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "disabled %s: it can no longer propose, report or send heartbeats\n", *host)
+	case "sign-config":
+		fs := flags("controller sign-config", stderr)
+		dir := fs.String("dir", "", "controller directory")
+		if err := parse(fs, rest); err != nil {
+			return err
+		}
+		if *dir == "" || fs.NArg() != 1 {
+			fmt.Fprint(stderr, "xdr controller sign-config: --dir and one agent config are required\n")
+			return errUsage
+		}
+		path := fs.Arg(0)
+		// The bytes signed are the bytes validated.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if _, err := config.Parse(data); err != nil {
+			return fmt.Errorf("%s: %w; not signed", path, err)
+		}
+		key, err := rules.LoadPrivate(filepath.Join(*dir, "rules.key"))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path+".sig", config.Signature(data, key), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "signed %s: copy %s.sig next to it\n", path, path)
 	default:
 		fmt.Fprintf(stderr, "xdr controller: unknown subcommand %q\n", sub)
 		return errUsage

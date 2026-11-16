@@ -682,6 +682,31 @@ func localAddrs() map[netip.Addr]bool {
 	return out
 }
 
+// defaultFleetPub is the rule key of a box enrolled at the default place.
+var defaultFleetPub = filepath.Join(config.DefaultFleetDir, "rules.pub")
+
+// loadConfig loads the agent's config, which must carry the jump box's
+// signature when the box is in a fleet: when its config has a fleet
+// section, or when the default bundle holds a rule key, so that deleting
+// the section does not escape the check.
+func loadConfig(path string) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	pubPath := defaultFleetPub
+	if cfg.Fleet != nil {
+		pubPath = filepath.Join(cfg.Fleet.Dir, "rules.pub")
+	} else if _, err := os.Lstat(pubPath); err != nil {
+		return cfg, nil
+	}
+	pub, err := rules.LoadPublic(pubPath)
+	if err != nil {
+		return nil, err
+	}
+	return config.LoadSigned(path, pub)
+}
+
 // Run is the agent: it loads the firewall, pins name resolution, serves
 // the DNS stub, and watches and judges processes until ctx is done or it
 // is told to stop (SIGTERM, SIGINT). SIGHUP reloads the config. The
@@ -694,7 +719,7 @@ func Run(ctx context.Context, o Options) error {
 		o.LogPath = defaultLog
 	}
 	logf := func(format string, args ...any) { fmt.Fprintf(o.Stderr, format+"\n", args...) }
-	cfg, err := config.Load(o.ConfigPath)
+	cfg, err := loadConfig(o.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -831,7 +856,7 @@ func Run(ctx context.Context, o Options) error {
 		case <-ctx.Done():
 			return nil
 		case <-hup:
-			cfg, err := config.Load(o.ConfigPath)
+			cfg, err := loadConfig(o.ConfigPath)
 			if err != nil {
 				logf("reload: %v; the old config stays", err)
 				continue

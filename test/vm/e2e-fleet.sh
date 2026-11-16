@@ -48,6 +48,8 @@ bin/xdr controller enroll --dir "$CTL" --host e2e --out "$OUT/bundle" >/dev/null
 bin/xdr controller enroll --dir "$CTL" --host e2e2 --out "$OUT/bundle2" >/dev/null || exit 1
 printf '{"listen": "%s:2379", "protect": ["%s"]}\n' "$HOST" "$HOST" > "$CTL/controller.json"
 jsync "$CTL" || exit 1
+# Fleet agents run only a config signed with the controller's rule key.
+SIGN_DIR=$CTL
 jx() { jb "$JXDR" "$@"; }
 starts_ctl=0
 start_ctl() {
@@ -96,7 +98,7 @@ print(json.dumps({
     "mesh": {"port": 7443},
 }, indent=2))
 PY
-  push "$OUT/$name.json" $CONF 0600 || return 1
+  push_conf "$OUT/$name.json" || return 1
   echo "== capture baseline on $name"
   x xdr capture --root / --out "$BASE" || return 1
   x xdr listeners --config "$CONF" > "$OUT/$name.listeners.json" || return 1
@@ -106,7 +108,7 @@ c = json.load(open(sys.argv[1]))
 c["listeners"] = json.load(open(sys.argv[2])) + [{"proto": "tcp", "port": 22, "exe": "/usr/sbin/sshd"}]
 json.dump(c, open(sys.argv[1], "w"), indent=2)
 PY
-  push "$OUT/$name.json" $CONF 0600 || return 1
+  push_conf "$OUT/$name.json" || return 1
   # After the capture: the beacon and the unit are in no baseline. The
   # unit is the same file on both boxes.
   push "$OUT/beacon" /opt/beacon/beacon 0755 || return 1

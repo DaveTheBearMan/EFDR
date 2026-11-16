@@ -12,8 +12,26 @@ fails=0
 ok() { echo "ok $1"; }
 fail() { echo "FAIL $1: $2"; fails=$((fails + 1)); }
 # conf PYTHON: edit the agent's config in the VM (c is the dict).
+# With SIGN_DIR set (a controller directory here), the config is signed
+# with its rule key, as a fleet agent requires.
 conf() {
-  x python3 -c "import json; c = json.load(open('$CONF')); $1; json.dump(c, open('$CONF', 'w'))"
+  if [ -z "${SIGN_DIR:-}" ]; then
+    x python3 -c "import json; c = json.load(open('$CONF')); $1; json.dump(c, open('$CONF', 'w'))"
+    return
+  fi
+  local f
+  f=$(mktemp)
+  x cat "$CONF" | python3 -c "import json, sys; c = json.load(sys.stdin); $1; json.dump(c, open('$f', 'w'))" &&
+    push_conf "$f"
+  local rc=$?
+  rm -f "$f" "$f.sig"
+  return $rc
+}
+# push_conf FILE: FILE as the box's config, signed when SIGN_DIR is set.
+push_conf() {
+  push "$1" "$CONF" 0600 || return 1
+  [ -z "${SIGN_DIR:-}" ] && return 0
+  bin/xdr controller sign-config --dir "$SIGN_DIR" "$1" >/dev/null && push "$1.sig" "$CONF.sig" 0644
 }
 starts=0
 # start_agent ARGS...: start the agent; wait for its sensor line.
