@@ -377,3 +377,34 @@ func TestReachable(t *testing.T) {
 		t.Fatalf("reachable %d, want 1", n)
 	}
 }
+
+// A hunt already relayed (heard first over the mesh) is not relayed again
+// when it later arrives over etcd.
+func TestMesh_PushHuntRelaysOnce(t *testing.T) {
+	m := New(Config{Peers: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.2:7443")}})
+	r := req("curl x | sh")
+	m.PushHunt(r, netip.Addr{})
+	m.PushHunt(r, netip.Addr{})
+	if n := len(m.peers[netip.MustParseAddr("192.0.2.2")].hunts); n != 1 {
+		t.Fatalf("queued %d times", n)
+	}
+}
+
+// A full queue to a peer is told once until that queue takes a hunt again.
+func TestMesh_QueueFullToldOnce(t *testing.T) {
+	var alerts []incident.Incident
+	m := New(Config{Peers: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.2:7443")},
+		OnIncident: func(in incident.Incident) { alerts = append(alerts, in) }})
+	for i := 0; i < huntQueue+10; i++ {
+		m.PushHunt(req(fmt.Sprintf("cmd %d", i)), netip.Addr{})
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("%d alerts", len(alerts))
+	}
+	<-m.peers[netip.MustParseAddr("192.0.2.2")].hunts
+	m.PushHunt(req("one more"), netip.Addr{})
+	m.PushHunt(req("and full again"), netip.Addr{})
+	if len(alerts) != 2 {
+		t.Fatalf("%d alerts after the queue drained and filled", len(alerts))
+	}
+}

@@ -64,6 +64,7 @@ type peer struct {
 	addr  netip.AddrPort
 	kick  chan struct{} // send it the rule set now
 	hunts chan *hunt.Request
+	full  atomic.Bool // a drop to a full queue was told
 
 	mu     sync.Mutex
 	last   time.Time // last inbound beat
@@ -211,10 +212,12 @@ func (m *Mesh) pushRules(except netip.Addr) {
 }
 
 // PushHunt sends r to every peer but except, and marks it seen so it is
-// not taken again when it comes back.
+// not taken again when it comes back. A hunt already seen (relayed when it
+// came over the mesh) is not sent again.
 func (m *Mesh) PushHunt(r *hunt.Request, except netip.Addr) {
-	m.remember(r.ID)
-	m.relay(r, except.Unmap())
+	if m.remember(r.ID) {
+		m.relay(r, except.Unmap())
+	}
 }
 
 func (m *Mesh) relay(r *hunt.Request, except netip.Addr) {
@@ -224,8 +227,12 @@ func (m *Mesh) relay(r *hunt.Request, except netip.Addr) {
 		}
 		select {
 		case p.hunts <- r:
+			p.full.Store(false)
 		default:
-			m.alert("hunt-dropped", model.SevMedium, fmt.Sprintf("hunt %s: queue to %s full", r.ID, p.addr))
+			// Told once until the queue takes a hunt again.
+			if !p.full.Swap(true) {
+				m.alert("hunt-dropped", model.SevMedium, fmt.Sprintf("hunt %s: queue to %s full", r.ID, p.addr))
+			}
 		}
 	}
 }
