@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -17,6 +16,7 @@ import (
 
 	"xdr/internal/config"
 	"xdr/internal/incident"
+	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/pki"
 	"xdr/internal/rules"
@@ -92,22 +92,55 @@ type SSH interface {
 
 // ExecSSH is the real SSH: the local ssh client, with the key as its -i.
 // The key is read by that process alone; nothing of it crosses the wire.
-type ExecSSH struct{ Key, User string }
+// Bin is the client, "" for ssh from the system directories.
+type ExecSSH struct{ Key, User, Bin string }
+
+// tailKeep is how much of what ssh printed is kept for the error.
+const tailKeep = 512
+
+// tailWriter keeps the last tailKeep bytes written to it, in a buffer of
+// fixed size: a box that prints without end costs nothing.
+type tailWriter struct{ buf []byte }
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= tailKeep {
+		w.buf = append(w.buf[:0], p[len(p)-tailKeep:]...)
+		return n, nil
+	}
+	if over := len(w.buf) + len(p) - tailKeep; over > 0 {
+		w.buf = append(w.buf[:0], w.buf[over:]...)
+	}
+	w.buf = append(w.buf, p...)
+	return n, nil
+}
 
 // Run implements SSH.
 func (e ExecSSH) Run(ctx context.Context, addr, command string, stdin io.Reader) error {
 	if !filepath.IsAbs(e.Key) || !sshUser.MatchString(e.User) || !validAddr(addr) {
 		return errors.New("ssh: refusing an unchecked key, user or address")
 	}
-	cmd := exec.CommandContext(ctx, "ssh", "-i", e.Key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", e.User+"@"+addr, command)
+	bin := e.Bin
+	if bin == "" {
+		bin = "ssh"
+	}
+	cmd := install.CommandContext(ctx, bin, "-i", e.Key,
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+		"-o", "IdentitiesOnly=yes", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes",
+		e.User+"@"+addr, command)
 	cmd.Stdin = stdin
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ssh %s: %w: %s", addr, err, bytes.TrimSpace(out[max(0, len(out)-512):]))
+	out := &tailWriter{buf: make([]byte, 0, tailKeep)}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh %s: %w: %s", addr, err, bytes.TrimSpace(out.buf))
 	}
 	return nil
 }
 
-// script is the whole of what runs on the box. It holds no value from the
+// script is the whole of what runs on the box. Its `xdr install` over an
+// agent that is still alive (a box silent to the controller, not dead)
+// rewrites the installed files under that agent's tamper watch: it is
+// reported, and its process tree killed, unless a pause token is active. It holds no value from the
 // controller's side, and no single quote (sudo's sh -c wraps it in two):
 // the host's files arrive as a tar on stdin.
 const script = `set -e

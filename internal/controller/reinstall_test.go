@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -309,5 +311,38 @@ func TestConfig_Reinstall(t *testing.T) {
 func TestReinstall_ScriptFixedPath(t *testing.T) {
 	if !strings.HasPrefix(script, "set -e\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\nunset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT\n") {
 		t.Fatalf("the script does not fix PATH first:\n%s", script)
+	}
+}
+
+// The local ssh keeps only the tail of what it prints, never the whole of
+// it, and is told to forward nothing and offer only the key.
+func TestExecSSH_CappedOutputAndOptions(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "ssh")
+	args := filepath.Join(dir, "args")
+	// Over 10 MB of output, then fail so the tail is reported.
+	body := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + args + "\nhead -c 12000000 /dev/zero | tr '\\0' x\necho THE-END\nexit 3\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := ExecSSH{Key: "/k", User: "root", Bin: fake}
+	err := e.Run(context.Background(), "192.0.2.5", "true", strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "THE-END") || len(err.Error()) > 1024 {
+		t.Fatalf("err (%d bytes): %.200v", len(fmt.Sprint(err)), err)
+	}
+	b, _ := os.ReadFile(args)
+	got := strings.Fields(string(b))
+	for _, o := range []string{"ForwardAgent=no", "IdentitiesOnly=yes", "ClearAllForwardings=yes", "BatchMode=yes", "StrictHostKeyChecking=accept-new"} {
+		if !slices.Contains(got, o) {
+			t.Errorf("ssh args lack %s: %v", o, got)
+		}
+	}
+	tw := &tailWriter{}
+	for i := 0; i < 20000; i++ {
+		tw.Write(make([]byte, 1000))
+	}
+	tw.Write([]byte("tail"))
+	if cap(tw.buf) > 4096 || !strings.HasSuffix(string(tw.buf), "tail") || len(tw.buf) != tailKeep {
+		t.Fatalf("kept %d (cap %d)", len(tw.buf), cap(tw.buf))
 	}
 }

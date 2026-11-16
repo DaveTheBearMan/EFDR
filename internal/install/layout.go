@@ -4,6 +4,7 @@
 package install
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -103,6 +104,19 @@ func commandIn(dirs []string, name string, args ...string) *exec.Cmd {
 // fixed minimal environment.
 func Command(name string, args ...string) *exec.Cmd {
 	return commandIn(filepath.SplitList(SafePath), name, args...)
+}
+
+// CommandContext is Command, killed when ctx is done.
+func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	path, err := lookTool(filepath.SplitList(SafePath), name)
+	if err != nil {
+		c := commandIn(nil, name, args...)
+		c.Err = err
+		return c
+	}
+	c := exec.CommandContext(ctx, path, args...)
+	c.Args[0], c.Env = name, safeEnv
+	return c
 }
 
 func runnerIn(dirs []string) Runner {
