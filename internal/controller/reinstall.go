@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"xdr/internal/config"
 	"xdr/internal/incident"
@@ -133,9 +135,22 @@ func (e ExecSSH) Run(ctx context.Context, addr, command string, stdin io.Reader)
 	out := &tailWriter{buf: make([]byte, 0, tailKeep)}
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ssh %s: %w: %s", addr, err, bytes.TrimSpace(out.buf))
+		return fmt.Errorf("ssh %s: %w: %s", addr, err, printable(out.buf))
 	}
 	return nil
+}
+
+// printable is what a box printed, fit for an incident: each control
+// character (C0, DEL, C1: escapes, bells, line breaks) and each invalid
+// byte a space, the runs of spaces one, the ends trimmed.
+func printable(b []byte) string {
+	s := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f || r == utf8.RuneError {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(string(b), " "))
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // script is the whole of what runs on the box. Its `xdr install` over an
@@ -163,10 +178,20 @@ chmod 700 /etc/xdr/fleet
 chmod 700 "$d/xdr"
 "$d/xdr" install --config /etc/xdr/agent.json`
 
+// errBack is a reinstall called off: the host beat again, or was disabled,
+// after the trigger chose it.
+var errBack = errors.New("the host is no longer silent, or was disabled")
+
 // Reinstall puts the agent back on host: its binary, a fresh enrolment
 // bundle, its signed config, then `xdr install` there. One SSH session
 // carries it all, as a tar on stdin into a mktemp -d directory.
 func Reinstall(ctx context.Context, dir string, cfg *Config, host string, ssh SSH, binary string) error {
+	return reinstall(ctx, dir, cfg, host, ssh, binary, nil)
+}
+
+// reinstall is Reinstall; still, when not nil, is asked right before the ssh
+// session starts and a false calls it off with errBack.
+func reinstall(ctx context.Context, dir string, cfg *Config, host string, ssh SSH, binary string, still func() bool) error {
 	if cfg == nil || cfg.Reinstall == nil {
 		return errors.New("reinstall is not configured")
 	}
@@ -243,6 +268,9 @@ func Reinstall(ctx context.Context, dir string, cfg *Config, host string, ssh SS
 	if rc.User != "root" {
 		cmd = "sudo -n sh -c '" + script + "'" // the script holds no single quote, which this wrapper needs
 	}
+	if still != nil && !still() {
+		return errBack
+	}
 	return ssh.Run(ctx, h.Addr, cmd, &buf)
 }
 
@@ -303,10 +331,29 @@ func (ctl *Controller) reinstallHost(host string) {
 	ctl.record(incident.Incident{Kind: "reinstall", Action: "alert", Severity: model.SevHigh, Host: host,
 		Detail: "silent: reinstalling over ssh"})
 	cfg := &Config{Reinstall: ctl.rcfg}
-	if err := Reinstall(ctx, ctl.dir, cfg, host, ctl.rssh, ctl.rbinary); err != nil {
+	err := reinstall(ctx, ctl.dir, cfg, host, ctl.rssh, ctl.rbinary, func() bool { return ctl.stillSilent(host) })
+	if errors.Is(err, errBack) {
+		ctl.record(incident.Incident{Kind: "reinstall", Action: "cancelled", Severity: model.SevLow, Host: host,
+			Detail: "not reinstalled: the agent beat again (or the host was disabled) before ssh started"})
+		return
+	}
+	if err != nil {
 		ctl.record(incident.Incident{Kind: "reinstall", Action: "failed", Severity: model.SevHigh, Host: host, Detail: err.Error()})
 		return
 	}
 	ctl.record(incident.Incident{Kind: "reinstall", Action: "repaired", Severity: model.SevMedium, Host: host,
 		Detail: "agent reinstalled over ssh"})
+}
+
+// stillSilent reports whether host is still silent and not disabled: the
+// check right before a reinstall's ssh session starts, so a beat in the
+// gap since the trigger calls it off.
+func (ctl *Controller) stillSilent(host string) bool {
+	ctl.mu.Lock() // before bmu, as Hosts takes them
+	off := ctl.disabled[host]
+	ctl.mu.Unlock()
+	ctl.bmu.Lock()
+	defer ctl.bmu.Unlock()
+	b := ctl.beats[host]
+	return !off && b != nil && b.silent
 }

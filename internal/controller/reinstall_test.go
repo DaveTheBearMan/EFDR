@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"xdr/internal/incident"
 	"xdr/internal/pki"
 	"xdr/internal/rules"
 	"xdr/internal/sign"
@@ -234,11 +235,46 @@ func TestReinstall_Refusals(t *testing.T) {
 	}
 }
 
+// logged gives ctl an incident log and returns what it records of kind.
+func logged(t *testing.T, ctl *Controller) func(kind string) []incident.Incident {
+	t.Helper()
+	log, err := incident.Open(filepath.Join(t.TempDir(), "incidents.jsonl"), time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	var mu sync.Mutex
+	var got []incident.Incident
+	log.OnWrite = func(in incident.Incident) { mu.Lock(); got = append(got, in); mu.Unlock() }
+	ctl.log = log
+	return func(kind string) []incident.Incident {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []incident.Incident
+		for _, in := range got {
+			if in.Kind == kind {
+				out = append(out, in)
+			}
+		}
+		return out
+	}
+}
+
+// actions is the Action of each incident, in order.
+func actions(ins []incident.Incident) string {
+	var a []string
+	for _, in := range ins {
+		a = append(a, in.Action)
+	}
+	return strings.Join(a, ",")
+}
+
 func TestTrigger_AfterSilenceOncePerEpisode(t *testing.T) {
 	dir, cfg, bin, _ := reinstallRig(t)
 	cfg.Reinstall.After.Duration = time.Minute
 	now := time.Unix(1_000_000, 0)
 	ctl := &Controller{dir: dir, beats: map[string]*beat{}, now: func() time.Time { return now }}
+	kind := logged(t, ctl)
 	f := &fakeSSH{}
 	ctl.EnableReinstall(cfg, f, bin)
 	step := func(d time.Duration) {
@@ -256,6 +292,9 @@ func TestTrigger_AfterSilenceOncePerEpisode(t *testing.T) {
 	if f.n() != 1 {
 		t.Fatalf("at After: %d", f.n())
 	}
+	if got := kind("reinstall"); actions(got) != "alert,repaired" || got[0].Host != "web01" || got[1].Host != "web01" {
+		t.Fatalf("reinstall incidents: %+v", got)
+	}
 	step(2 * time.Minute)
 	if f.n() != 1 {
 		t.Fatalf("a second in the same episode: %d", f.n())
@@ -266,9 +305,13 @@ func TestTrigger_AfterSilenceOncePerEpisode(t *testing.T) {
 	if f.n() != 1 {
 		t.Fatalf("rate limit broken: %d", f.n())
 	}
+	f.err = errors.New("ssh 192.0.2.5: exit status 255: Connection refused")
 	step(5 * time.Minute)
 	if f.n() != 2 {
 		t.Fatalf("new episode after 5 min: %d", f.n())
+	}
+	if got := kind("reinstall"); actions(got) != "alert,repaired,alert,failed" || !strings.Contains(got[3].Detail, "Connection refused") {
+		t.Fatalf("reinstall incidents: %+v", got)
 	}
 	// a silent host not listed is left alone
 	ctl.heartbeat("db01", false)
@@ -382,5 +425,109 @@ func TestReinstall_DoesNotMutateTheSharedConfig(t *testing.T) {
 	}
 	if cfg.Reinstall.User != "" || cfg.Reinstall.After.Duration != 0 {
 		t.Fatalf("mutated: %+v", cfg.Reinstall)
+	}
+}
+
+// A heartbeat between the trigger and the ssh call cancels the reinstall:
+// the agent is back, and its install is left as it is.
+func TestTrigger_BeatInTheGapCancels(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	cfg.Reinstall.After.Duration = time.Minute
+	now := time.Unix(1_000_000, 0)
+	ctl := &Controller{dir: dir, beats: map[string]*beat{}, now: func() time.Time { return now }}
+	kind := logged(t, ctl)
+	f := &fakeSSH{}
+	ctl.EnableReinstall(cfg, f, bin)
+	ctl.heartbeat("web01", true)
+	ctl.heartbeat("web01", false)
+	now = now.Add(2 * time.Minute)
+	// The trigger picked web01; before its goroutine reaches ssh, a beat.
+	ctl.bmu.Lock()
+	ctl.beats["web01"].reinstalled = true
+	ctl.bmu.Unlock()
+	ctl.heartbeat("web01", true)
+	ctl.rwg.Add(1)
+	ctl.reinstallHost("web01")
+	if f.n() != 0 {
+		t.Fatalf("reinstalled a host that was back: %d", f.n())
+	}
+	if got := kind("reinstall"); actions(got) != "alert,cancelled" {
+		t.Fatalf("reinstall incidents: %+v", got)
+	}
+	// Disabled in the gap: the same.
+	ctl.heartbeat("web01", false)
+	ctl.mu.Lock()
+	ctl.disabled = map[string]bool{"web01": true}
+	ctl.mu.Unlock()
+	ctl.rwg.Add(1)
+	ctl.reinstallHost("web01")
+	if f.n() != 0 {
+		t.Fatalf("reinstalled a disabled host: %d", f.n())
+	}
+}
+
+// What the box printed reaches the incident without control characters:
+// no terminal escapes, bells or line breaks of its making.
+func TestExecSSH_StripsControlCharacters(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "ssh")
+	body := "#!/bin/sh\nprintf 'ok \\033[31mred\\033[0m\\a\\r\\nline2\\t\\0010\\302\\233x\\n'\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := ExecSSH{Key: "/k", User: "root", Bin: fake}.Run(context.Background(), "192.0.2.5", "true", strings.NewReader(""))
+	if err == nil {
+		t.Fatal("no error")
+	}
+	msg := err.Error()
+	for _, r := range msg {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f {
+			t.Fatalf("control character %U in %q", r, msg)
+		}
+	}
+	if !strings.Contains(msg, "red") || !strings.Contains(msg, "line2") {
+		t.Fatalf("text lost: %q", msg)
+	}
+}
+
+// The trap is run for real: the script, as sent (and inside the sudo
+// wrapper), stages the payload in its mktemp directory and removes it when
+// a later step fails. Only its fixed directories are pointed into a temp
+// directory, and the step after the staging made to fail.
+func TestReinstall_TrapRemovesTheStagingDir(t *testing.T) {
+	dir, cfg, bin, _ := reinstallRig(t)
+	for _, user := range []string{"root", "ops"} {
+		cfg.Reinstall.User = user
+		f := &fakeSSH{}
+		if err := Reinstall(context.Background(), dir, cfg, "web01", f, bin); err != nil {
+			t.Fatal(err)
+		}
+		tmp := t.TempDir()
+		state, listing := filepath.Join(tmp, "state"), filepath.Join(tmp, "listing")
+		cmd := f.calls[0].cmd
+		for _, s := range []string{"/var/lib/xdr", "mkdir -p /etc/xdr"} {
+			if !strings.Contains(cmd, s) {
+				t.Fatalf("%s: the script has no %q:\n%s", user, s, cmd)
+			}
+		}
+		cmd = strings.ReplaceAll(cmd, "/var/lib/xdr", state)
+		cmd = strings.Replace(cmd, "mkdir -p /etc/xdr", "ls \"$d\" > "+listing+"; false", 1)
+		cmd = strings.TrimPrefix(cmd, "sudo -n ") // the wrapper's sh -c stays
+		c := exec.Command("sh", "-c", cmd)
+		c.Stdin = bytes.NewReader(f.calls[0].stdin)
+		out, err := c.CombinedOutput()
+		if err == nil {
+			t.Fatalf("%s: the failing step did not fail the script: %s", user, out)
+		}
+		staged, _ := os.ReadFile(listing)
+		for _, n := range []string{"xdr", "agent.json", "agent.json.sig", "fleet"} {
+			if !slices.Contains(strings.Fields(string(staged)), n) {
+				t.Fatalf("%s: staging lacked %s: %q (%s)", user, n, staged, out)
+			}
+		}
+		ents, err := os.ReadDir(state)
+		if err != nil || len(ents) != 0 {
+			t.Fatalf("%s: the trap left %v (%v): %s", user, ents, err, out)
+		}
 	}
 }
