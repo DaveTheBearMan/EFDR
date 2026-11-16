@@ -6,11 +6,23 @@
 # dead-man timer if the test never comes back.
 set -u
 SAVED=/var/backups/xdr-e2e-pristine.tar
+HOMES=/var/backups/xdr-e2e-homes # the homes there were at the first save
+ARMED=/var/lib/xdr-e2e-armed     # a test is running: reset at boot
 FILES="etc/ssh etc/pam.d etc/passwd etc/shadow etc/group etc/gshadow etc/hosts etc/nsswitch.conf etc/resolv.conf root/.ssh"
 
 if [ ! -s "$SAVED" ]; then
   # shellcheck disable=SC2086
   tar -C / -cpf "$SAVED.new" $FILES && mv "$SAVED.new" "$SAVED" || { echo "xdr-e2e-reset: cannot save $SAVED" >&2; exit 1; }
+  ls -A /home > "$HOMES"
+fi
+
+# The dead-man timer is transient: a reboot loses it, while the rendered
+# PAM refuses root with the agent down. This unit resets an armed box at
+# boot. Its name is not xdr-*, which the steps below remove.
+BOOT=/etc/systemd/system/e2e-deadman-boot.service
+if [ ! -s "$BOOT" ]; then
+  printf '[Unit]\nDescription=xdr e2e: reset a box that rebooted mid-test\nConditionPathExists=%s\n\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/xdr-e2e-reset\n\n[Install]\nWantedBy=multi-user.target\n' "$ARMED" > "$BOOT.new" &&
+    mv "$BOOT.new" "$BOOT" && systemctl daemon-reload && systemctl enable e2e-deadman-boot.service >/dev/null 2>&1
 fi
 
 # What `xdr install` put down (e2e-protect). The pinned hash goes first: with
@@ -48,18 +60,38 @@ nft delete table inet xdr 2>/dev/null
 # is unpacked first, so a failed unpack leaves the live files alone.
 NEW=/var/backups/xdr-e2e-restore
 rm -rf "$NEW" && mkdir -p "$NEW" && tar -C "$NEW" -xpf "$SAVED" || { echo "xdr-e2e-reset: cannot unpack $SAVED" >&2; exit 1; }
+# exchange A B: swap two paths in one rename (renameat2 RENAME_EXCHANGE),
+# so a directory such as /etc/pam.d is never missing, not even briefly.
+exchange() {
+  python3 -c 'import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+sys.exit(0 if libc.renameat2(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 2) == 0 else 1)' "$1" "$2" 2>/dev/null
+}
 for f in $FILES; do
   if [ -d "$NEW/$f" ] && [ ! -L "$NEW/$f" ]; then
-    rm -rf "/$f.xdr-old" && mv "/$f" "/$f.xdr-old" && mv "$NEW/$f" "/$f" && rm -rf "/$f.xdr-old"
+    if [ -e "/$f" ] && exchange "$NEW/$f" "/$f"; then
+      rm -rf "${NEW:?}/$f"
+    else
+      rm -rf "/$f.xdr-old" && { [ ! -e "/$f" ] || mv "/$f" "/$f.xdr-old"; } && mv "$NEW/$f" "/$f" && rm -rf "/$f.xdr-old"
+    fi
   else
     cp -a "$NEW/$f" "/$f.xdr-new" 2>/dev/null && mv -T "/$f.xdr-new" "/$f"
   fi
 done
 rm -rf "$NEW"
 sshd -t && systemctl try-reload-or-restart ssh.service
-# Accounts a test added are gone from passwd now; so go their homes.
+# Accounts a test added are gone from passwd now; so go their homes: only
+# those not there at the first save (a box saved before that list was kept
+# gets one from the homes whose owner is still known).
+if [ ! -f "$HOMES" ]; then
+  for d in /home/*; do
+    [ -d "$d" ] && [ "$(stat -c %U "$d")" != UNKNOWN ] && basename "$d"
+  done > "$HOMES"
+fi
 for d in /home/*; do
-  [ -d "$d" ] && [ "$(stat -c %U "$d")" = UNKNOWN ] && rm -rf "$d"
+  [ -d "$d" ] || continue
+  grep -qxF -- "$(basename "$d")" "$HOMES" && continue
+  [ "$(stat -c %U "$d")" = UNKNOWN ] && rm -rf "$d"
 done
 
 # shellcheck disable=SC2086

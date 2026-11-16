@@ -75,6 +75,7 @@ boxes_up() {
     x systemctl stop xdr-e2e-deadman.timer >/dev/null 2>&1
     x systemctl reset-failed xdr-e2e-deadman >/dev/null 2>&1
     x systemd-run --unit=xdr-e2e-deadman --on-active="$DEADMAN" /usr/local/sbin/xdr-e2e-reset >/dev/null || return 1
+    x touch /var/lib/xdr-e2e-armed || return 1 # a reboot mid-test resets too
   done
 }
 boxes_down() {
@@ -82,7 +83,7 @@ boxes_down() {
   ctl_kill
   jb rm -rf $JROOT
   for VM in "$@"; do
-    if x xdr-e2e-reset && x systemctl stop xdr-e2e-deadman.timer; then continue; fi
+    if x xdr-e2e-reset && x systemctl stop xdr-e2e-deadman.timer && x rm -f /var/lib/xdr-e2e-armed; then continue; fi
     echo "warning: $VM did not reset; its dead-man timer does within $DEADMAN"
   done
   ssh -F "$SSHCFG" -O exit "$JUMP" 2>/dev/null
