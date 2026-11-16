@@ -19,6 +19,7 @@ type Config struct {
 	Protect   []config.Net `json:"protect"`    // addresses no rule may name
 	GuardExes []string     `json:"guard_exes"` // scored-service binaries on any host
 	Baselines []string     `json:"baselines"`  // layers over the embedded baseline
+	GrayUsers []string     `json:"gray_users"` // accounts no order or rotation may touch
 }
 
 // LoadConfig reads and checks a controller config.

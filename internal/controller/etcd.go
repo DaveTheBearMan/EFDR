@@ -133,7 +133,7 @@ func role(ctx context.Context, c *clientv3.Client, name string) error {
 
 // Bootstrap sets up users and roles and turns auth on: root may do
 // anything; each host may write its own proposals, incidents, heartbeat
-// and hunts, and read the rule set and every hunt. Running it again adds hosts enrolled
+// and hunts, and read the rule set, every hunt and its own orders. Running it again adds hosts enrolled
 // since.
 func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 	if err := role(ctx, c, "root"); err != nil {
@@ -160,6 +160,8 @@ func Bootstrap(ctx context.Context, c *clientv3.Client, hosts []string) error {
 		}{
 			{fleet.RulesKey, "", clientv3.PermissionType(clientv3.PermRead)},
 			{fleet.HuntAll, clientv3.GetPrefixRangeEnd(fleet.HuntAll), clientv3.PermissionType(clientv3.PermRead)},
+			// Its orders, read even when disabled: it must still obey.
+			{fleet.To(h), clientv3.GetPrefixRangeEnd(fleet.To(h)), clientv3.PermissionType(clientv3.PermRead)},
 		}
 		if !disabled {
 			perms = append(perms, []struct {

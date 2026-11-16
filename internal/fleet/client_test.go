@@ -90,7 +90,8 @@ func (a *agent) run(t *testing.T) *agent {
 		a.c.Run(ctx,
 			func(s *rules.Set) { a.mu.Lock(); a.sets = append(a.sets, s); a.mu.Unlock() },
 			func(in incident.Incident) { a.mu.Lock(); a.ins = append(a.ins, in); a.mu.Unlock() },
-			func(r *hunt.Request) { a.mu.Lock(); a.hunts = append(a.hunts, r); a.mu.Unlock() })
+			func(r *hunt.Request) { a.mu.Lock(); a.hunts = append(a.hunts, r); a.mu.Unlock() },
+			func(fleet.Order) {})
 	}()
 	t.Cleanup(func() {
 		select {
@@ -450,5 +451,60 @@ func TestClient_OfferAndEnvelope(t *testing.T) {
 	eventually(t, "two refusals", time.Second, func() bool { _, ins := a.got(); return len(of(ins, "rules-refused")) == 2 })
 	if _, v := a.c.Envelope(); v != 3 {
 		t.Fatalf("envelope v%d", v)
+	}
+}
+
+func TestOrders_ReachHost(t *testing.T) {
+	f := fleettest.New(t, start, "web01", "db01")
+	t.Cleanup(f.Stop)
+	var mu sync.Mutex
+	got := map[string][]fleet.Order{}
+	run := func(host string) {
+		a := newAgentAs(t, f, host, f.Listen)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			a.c.Run(ctx, func(*rules.Set) {}, func(incident.Incident) {}, func(*hunt.Request) {},
+				func(o fleet.Order) { mu.Lock(); got[host] = append(got[host], o); mu.Unlock() })
+		}()
+		t.Cleanup(func() { cancel(); <-done })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Put before the agent connects: replayed on connect.
+	if _, err := f.Root.Put(ctx, fleet.To("web01")+"user/evil", `{"verdict":"approve"}`); err != nil {
+		t.Fatal(err)
+	}
+	run("web01")
+	run("db01")
+	eventually(t, "replayed order", 3*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(got["web01"]) == 1 })
+	f.Root.Put(ctx, fleet.To("web01")+"session/7", `{"verdict":"kill"}`)
+	f.Root.Delete(ctx, fleet.To("web01")+"user/evil")
+	eventually(t, "watched orders", 3*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(got["web01"]) == 3 })
+	mu.Lock()
+	o := got["web01"]
+	mu.Unlock()
+	if o[0].Kind != "user" || o[0].Name != "evil" || string(o[0].Value) != `{"verdict":"approve"}` ||
+		o[1].Kind != "session" || o[1].Name != "7" || !o[2].Deleted || o[2].Name != "evil" {
+		t.Fatalf("orders %+v", o)
+	}
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got["db01"]) != 0 {
+		t.Fatalf("db01 saw web01's orders: %+v", got["db01"])
+	}
+	tc, err := pki.ClientTLS(filepath.Join(f.Bundle("db01"), "ca.pem"), filepath.Join(f.Bundle("db01"), "host.pem"), filepath.Join(f.Bundle("db01"), "host-key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := clientv3.New(clientv3.Config{Endpoints: []string{f.Listen}, TLS: tc, DialTimeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Get(ctx, fleet.To("web01"), clientv3.WithPrefix()); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("db01 reading web01's orders: %v", err)
 	}
 }

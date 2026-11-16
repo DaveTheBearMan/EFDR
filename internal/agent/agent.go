@@ -73,7 +73,7 @@ type Options struct {
 // fleetLink is the agent's link to the controller (fleet.Client).
 type fleetLink interface {
 	Cached() (*rules.Set, error)
-	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request))
+	Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request), onOrder func(fleet.Order))
 	Propose([]rules.Rule)
 	Report(incident.Incident)
 	PutHunt(*hunt.Request)
@@ -280,7 +280,7 @@ func (a *agent) startFleet(ctx context.Context, f fleetLink) (stop func()) {
 			if a.mesh != nil {
 				a.mesh.PushHunt(r, netip.Addr{})
 			}
-		})
+		}, a.onOrder)
 	}()
 	return func() { <-done }
 }
@@ -796,6 +796,7 @@ func Run(ctx context.Context, o Options) error {
 		a.ssh = &sshgate.Asserter{Root: a.root, State: defaultState, Run: runCmd, Output: outputCmd}
 	}
 	a.state, a.spool = defaultState, breakglass.Spool
+	a.loadOrders()
 	if err := makeSpool(a.spool); err != nil {
 		logf("breakglass: spool %s: %v", a.spool, err)
 	}

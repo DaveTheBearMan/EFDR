@@ -16,7 +16,11 @@ const (
 	RevokedAll   = "/xdr/revoked/"  // rule ids never to promote again
 	DisabledAll  = "/xdr/disabled/" // hosts whose writes were taken away
 	HuntAll      = "/xdr/hunt/"     // every host reads every hunt
+	ToAll        = "/xdr/to/"       // orders to one host: session verdicts, user approvals, credentials
 )
+
+// To is the prefix of host's orders; only root writes there.
+func To(host string) string { return ToAll + host + "/" }
 
 // Hunt is the prefix of the hunts host started, one key per hunt id.
 func Hunt(host string) string { return HuntAll + host + "/" }

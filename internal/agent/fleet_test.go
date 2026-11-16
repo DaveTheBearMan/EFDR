@@ -14,6 +14,7 @@ import (
 	"xdr/internal/baseline"
 	"xdr/internal/config"
 	"xdr/internal/detect"
+	"xdr/internal/fleet"
 	"xdr/internal/hunt"
 	"xdr/internal/incident"
 	"xdr/internal/model"
@@ -31,7 +32,7 @@ type fakeFleet struct {
 }
 
 func (f *fakeFleet) Cached() (*rules.Set, error) { return f.cached, nil }
-func (f *fakeFleet) Run(ctx context.Context, _ func(*rules.Set), _ func(incident.Incident), _ func(*hunt.Request)) {
+func (f *fakeFleet) Run(ctx context.Context, _ func(*rules.Set), _ func(incident.Incident), _ func(*hunt.Request), _ func(fleet.Order)) {
 	close(f.running)
 	<-ctx.Done()
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,7 @@ const (
 	maxBackoff = 30 * time.Second
 	huntTTL    = 600 // seconds a hunt stays in etcd
 	maxHunt    = 64 << 10
+	maxOrder   = 64 << 10
 )
 
 // item is one key the client is to put.
@@ -259,7 +261,25 @@ func (c *Client) beat(ctx context.Context, cli *clientv3.Client, lease clientv3.
 
 // session is one connection: it returns when the connection fails or ctx
 // is done. up is called once etcd has answered.
-func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request)) error {
+// Order is one key under To(host): Kind and Name from the key
+// (session/7, user/evil, creds), Value its JSON.
+type Order struct {
+	Kind, Name string
+	Value      []byte
+	Deleted    bool
+}
+
+// orderOf is the order at key, or false for a key that is not one.
+func orderOf(host, key string, val []byte, deleted bool) (Order, bool) {
+	rest, ok := strings.CutPrefix(key, To(host))
+	if !ok || rest == "" || len(val) > maxOrder {
+		return Order{}, false
+	}
+	kind, name, _ := strings.Cut(rest, "/")
+	return Order{Kind: kind, Name: name, Value: val, Deleted: deleted}, true
+}
+
+func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request), onOrder func(Order)) error {
 	gctx, cancel := context.WithTimeout(ctx, opTimeout)
 	resp, err := cli.Get(gctx, RulesKey)
 	cancel()
@@ -269,6 +289,18 @@ func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), o
 	up()
 	if len(resp.Kvs) == 1 {
 		c.apply(resp.Kvs[0].Value, onRules, onIncident)
+	}
+	// The orders standing now, at the rules' revision, then the changes.
+	gctx, cancel = context.WithTimeout(ctx, opTimeout)
+	ords, err := cli.Get(gctx, To(c.host), clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision))
+	cancel()
+	if err != nil {
+		return err
+	}
+	for _, kv := range ords.Kvs {
+		if o, ok := orderOf(c.host, string(kv.Key), kv.Value, false); ok {
+			onOrder(o)
+		}
 	}
 	gctx, cancel = context.WithTimeout(ctx, opTimeout)
 	lease, err := cli.Grant(gctx, c.ttl)
@@ -292,6 +324,7 @@ func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), o
 	}
 	watch := cli.Watch(clientv3.WithRequireLeader(sctx), RulesKey, clientv3.WithRev(resp.Header.Revision+1))
 	hunts := cli.Watch(clientv3.WithRequireLeader(sctx), HuntAll, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
+	orders := cli.Watch(clientv3.WithRequireLeader(sctx), To(c.host), clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision+1))
 	beats := time.NewTicker(c.beatEvery)
 	defer beats.Stop()
 	// Hunts are put on a lease of their own, renewed by a fresh grant
@@ -350,6 +383,15 @@ func (c *Client) session(ctx context.Context, cli *clientv3.Client, up func(), o
 					onHunt(r)
 				}
 			}
+		case wr, ok := <-orders:
+			if !ok || wr.Err() != nil {
+				return errors.New("order watch ended")
+			}
+			for _, ev := range wr.Events {
+				if o, ok := orderOf(c.host, string(ev.Kv.Key), ev.Kv.Value, ev.Type == clientv3.EventTypeDelete); ok {
+					onOrder(o)
+				}
+			}
 		case _, ok := <-alive:
 			if !ok {
 				return errors.New("heartbeat lease lost")
@@ -378,7 +420,7 @@ func huntOf(key string, b []byte) *hunt.Request {
 // regaining etcd) go to onIncident; other hosts' hunts go to onHunt. They
 // may be called from any of Run's goroutines (and Offer's), one call at a
 // time.
-func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request)) {
+func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident func(incident.Incident), onHunt func(*hunt.Request), onOrder func(Order)) {
 	var mu sync.Mutex // one callback at a time; guards the state below
 	// A session is healthy once it has lasted unreachableAfter: one that
 	// answers and then fails, again and again, is as good as none.
@@ -392,6 +434,7 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 	safeRules := func(s *rules.Set) { locked(func() { onRules(s) }) }
 	safeIncident := func(in incident.Incident) { locked(func() { onIncident(in) }) }
 	safeHunt := func(r *hunt.Request) { locked(func() { onHunt(r) }) }
+	safeOrder := func(o Order) { locked(func() { onOrder(o) }) }
 	c.mu.Lock()
 	c.onRules, c.onIncident = safeRules, safeIncident
 	c.mu.Unlock()
@@ -440,7 +483,7 @@ func (c *Client) Run(ctx context.Context, onRules func(*rules.Set), onIncident f
 		if err == nil {
 			err = c.session(ctx, cli, func() {
 				locked(func() { up, upAt = true, time.Now() })
-			}, safeRules, safeIncident, safeHunt)
+			}, safeRules, safeIncident, safeHunt, safeOrder)
 			cli.Close()
 		}
 		if ctx.Err() != nil {

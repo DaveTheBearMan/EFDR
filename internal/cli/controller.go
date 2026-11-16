@@ -25,7 +25,7 @@ import (
 // controllerCmd is `xdr controller`: the jump-box side of the fleet.
 func controllerCmd(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|mint-breakglass\n")
+		fmt.Fprint(stderr, "xdr controller: init|enroll|run|disable-host|sign-config|mint-breakglass|approve-session|kill-session|approve-user\n")
 		return errUsage
 	}
 	switch sub, rest := args[0], args[1:]; sub {
@@ -114,6 +114,8 @@ func controllerCmd(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "disabled %s: it can no longer propose, report or send heartbeats\n", *host)
+	case "approve-session", "kill-session", "approve-user":
+		return orderCmd(sub, rest, stdout, stderr)
 	case "mint-breakglass":
 		return mintCmd(rest, stdout, stderr)
 	case "sign-config":
