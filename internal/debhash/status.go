@@ -3,7 +3,16 @@ package debhash
 import (
 	"bufio"
 	"io"
+	"regexp"
 	"strings"
+)
+
+// Debian's grammar for the fields that reach stdout and apt (policy 5.6.1,
+// 5.6.12); an entry outside it is dropped.
+var (
+	pkgName = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	pkgVer  = regexp.MustCompile(`^[0-9A-Za-z.+~:-]+$`)
+	pkgArch = regexp.MustCompile(`^[a-z0-9-]+$`)
 )
 
 // Installed is one installed package from the dpkg status database.
@@ -13,13 +22,14 @@ type Installed struct {
 
 // ParseStatus parses /var/lib/dpkg/status, returning only packages whose
 // status is "install ok installed". It is used to learn which versions to
-// verify; it is never a source of trusted hashes.
-func ParseStatus(r io.Reader) []Installed {
+// verify; it is never a source of trusted hashes. A line over the scanner's
+// limit is an error, so a list is never silently cut short.
+func ParseStatus(r io.Reader) ([]Installed, error) {
 	var out []Installed
 	var cur Installed
 	var installed bool
 	flush := func() {
-		if installed && cur.Package != "" {
+		if installed && pkgName.MatchString(cur.Package) && pkgVer.MatchString(cur.Version) && pkgArch.MatchString(cur.Arch) {
 			out = append(out, cur)
 		}
 		cur, installed = Installed{}, false
@@ -52,5 +62,5 @@ func ParseStatus(r io.Reader) []Installed {
 		}
 	}
 	flush()
-	return out
+	return out, s.Err()
 }

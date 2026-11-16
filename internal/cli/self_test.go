@@ -254,7 +254,7 @@ func TestInstallCLI_Baseline(t *testing.T) {
 	}
 	good := filepath.Join(t.TempDir(), "base.json.gz")
 	var buf bytes.Buffer
-	if err := baseline.Save(&buf, &baseline.Baseline{Files: map[string]baseline.FileEntry{}}); err != nil {
+	if err := baseline.Save(&buf, &baseline.Baseline{Schema: 1, Files: map[string]baseline.FileEntry{}}); err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(good, buf.Bytes(), 0o600)

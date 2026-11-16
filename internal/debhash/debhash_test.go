@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
@@ -165,7 +167,7 @@ func TestParseDeb_Garbage(t *testing.T) {
 
 func TestParseStatus(t *testing.T) {
 	in := "Package: a\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0\n\nPackage: b\nStatus: deinstall ok config-files\nVersion: 2\n\nPackage: c\nStatus: install ok installed\nArchitecture: all\nVersion: 3\nDescription: x\n continued\n"
-	got := ParseStatus(strings.NewReader(in))
+	got, _ := ParseStatus(strings.NewReader(in))
 	if len(got) != 2 || got[0] != (Installed{"a", "1.0", "amd64"}) || got[1] != (Installed{"c", "3", "all"}) {
 		t.Fatalf("got %+v", got)
 	}
@@ -184,5 +186,55 @@ func TestLayer_LinkTargetIsEncoded(t *testing.T) {
 	b := Layer([]*Deb{{Files: []DebFile{{Path: "/usr/bin/l", Type: baseline.TypeLink, Link: "t\xff"}}}})
 	if got := b.Files["/usr/bin/l"].Link; got != pathenc.Encode("t\xff") {
 		t.Fatalf("link %q", got)
+	}
+}
+
+// A status line longer than the scanner's limit must be an error, not a
+// silently truncated package list.
+func TestParseStatus_OverlongLineIsError(t *testing.T) {
+	in := "Package: a\nStatus: install ok installed\nVersion: 1\n\nPackage: b\nDescription: " + strings.Repeat("x", 5<<20) + "\n"
+	if _, err := ParseStatus(strings.NewReader(in)); err == nil {
+		t.Fatal("want error for a line over the buffer limit")
+	}
+}
+
+// Package and version values reach stdout and apt; anything outside
+// Debian's grammar (spaces, shell or control characters) is dropped.
+func TestParseStatus_DropsInvalidNames(t *testing.T) {
+	in := "Package: ok-pkg+x.y\nStatus: install ok installed\nVersion: 1:2.3~rc1-0ubuntu1+b2\nArchitecture: amd64\n\n" +
+		"Package: bad;rm -rf\nStatus: install ok installed\nVersion: 1\nArchitecture: amd64\n\n" +
+		"Package: badver\nStatus: install ok installed\nVersion: 1 $(x)\nArchitecture: amd64\n\n" +
+		"Package: badarch\nStatus: install ok installed\nVersion: 1\nArchitecture: am\x1bd64\n"
+	got, err := ParseStatus(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != (Installed{"ok-pkg+x.y", "1:2.3~rc1-0ubuntu1+b2", "amd64"}) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// Each zstd member must release its decoder: parsing many .debs must not
+// leave decoder goroutines behind.
+func TestParseDeb_ZstdDecoderReleased(t *testing.T) {
+	// Decoding stops mid-stream: a hardlink to a file that is not in the
+	// archive, then a large member never read.
+	big := make([]byte, 8<<20)
+	rand.New(rand.NewSource(2)).Read(big)
+	deb := buildDeb(t, "p", "1", map[string]string{"./0": "=>./nope", "./a": string(big)}, "zst")
+	runtime.GC()
+	before := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		if _, err := ParseDeb(bytes.NewReader(deb)); err == nil {
+			t.Fatal("want hardlink error")
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		runtime.Gosched()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before+2 {
+		t.Fatalf("goroutines %d -> %d after 20 zstd debs", before, n)
 	}
 }

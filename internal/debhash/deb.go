@@ -88,14 +88,20 @@ func ParseDeb(r io.Reader) (*Deb, error) {
 	return d, nil
 }
 
-func decompress(name string, r io.Reader) (io.Reader, error) {
+// decompress opens a member's decompressor; the caller closes it, which for
+// zstd stops the decoder's goroutines when parsing ends mid-stream.
+func decompress(name string, r io.Reader) (io.ReadCloser, error) {
 	switch path.Ext(name) {
 	case ".tar":
-		return r, nil
+		return io.NopCloser(r), nil
 	case ".gz":
 		return gzip.NewReader(r)
 	case ".xz":
-		return xz.NewReader(r)
+		xr, err := xz.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(xr), nil
 	case ".zst":
 		zr, err := zstd.NewReader(r)
 		if err != nil {
@@ -111,6 +117,7 @@ func parseControl(d *Deb, name string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	defer dr.Close()
 	tr := tar.NewReader(dr)
 	for {
 		h, err := tr.Next()
@@ -148,6 +155,7 @@ func parseData(d *Deb, name string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	defer dr.Close()
 	tr := tar.NewReader(dr)
 	hashes := map[string]string{}
 	for {

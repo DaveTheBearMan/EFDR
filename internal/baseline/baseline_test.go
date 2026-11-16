@@ -2,6 +2,8 @@ package baseline
 
 import (
 	"bytes"
+	"compress/gzip"
+	"strings"
 	"reflect"
 	"testing"
 	"time"
@@ -86,5 +88,38 @@ func TestCompose_HashOnlyTypeChangeReplaces(t *testing.T) {
 	pkg := &Baseline{Files: map[string]FileEntry{"/usr/bin/x": link}}
 	if got := Compose(base, pkg).Files["/usr/bin/x"]; !reflect.DeepEqual(got, link) {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func gz(t *testing.T, s string) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write([]byte(s))
+	zw.Close()
+	return &buf
+}
+
+// Load refuses a baseline of an unknown schema rather than reading its
+// fields under the wrong meaning.
+func TestLoad_RefusesUnknownSchema(t *testing.T) {
+	for _, s := range []string{`{"Schema":2,"Files":{}}`, `{"Files":{}}`} {
+		if _, err := Load(gz(t, s)); err == nil {
+			t.Fatalf("%s: want error", s)
+		}
+	}
+	if _, err := Load(gz(t, `{"Schema":1,"Files":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A gzip bomb is refused once the decompressed size passes the limit.
+func TestLoad_SizeLimit(t *testing.T) {
+	old := maxDecoded
+	maxDecoded = 1 << 20
+	defer func() { maxDecoded = old }()
+	s := `{"Schema":1,"Host":"` + strings.Repeat("a", 2<<20) + `","Files":{}}`
+	if _, err := Load(gz(t, s)); err == nil {
+		t.Fatal("want error over the size limit")
 	}
 }

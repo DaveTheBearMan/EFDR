@@ -280,7 +280,10 @@ func pkglist(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pkgs := debhash.ParseStatus(bytes.NewReader(data))
+	pkgs, err := debhash.ParseStatus(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("dpkg status: %w", err)
+	}
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Package < pkgs[j].Package })
 	for _, p := range pkgs {
 		fmt.Fprintf(stdout, "%s=%s %s\n", p.Package, p.Version, p.Arch)
