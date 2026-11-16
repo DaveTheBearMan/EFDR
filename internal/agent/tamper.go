@@ -77,7 +77,12 @@ func (a *agent) ownExe(exe, hash string) bool {
 // killed, and its login session ended, by the same rules as every kill: a
 // gray account and a pause token make it an alert, a scored service is held,
 // the box's own auto and recovery accounts keep their session.
+//
+// A writer the event's pidfd shows exited (or the kernel said had) is never
+// taken from /proc by its pid: the pid may be another process's by now.
+// It is an alert, unless the chain says it was the box's own.
 func (a *agent) onTamper(ev tamper.Event) {
+	defer ev.Close()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.uninstalled {
@@ -106,6 +111,9 @@ func (a *agent) onTamper(ev tamper.Event) {
 	if snap == nil {
 		snap = &proc.Snapshot{}
 	}
+	// Looked at after the read: a pidfd that shows the writer alive now
+	// means the pid in /proc is still the writer's.
+	gone := ev.Gone()
 	var actor *proc.Proc
 	known := false
 	for cur, hops := pid, 0; cur > 1 && hops < maxChain; hops++ {
@@ -116,7 +124,7 @@ func (a *agent) onTamper(ev tamper.Event) {
 			if a.pol.Hash != nil {
 				hash = a.pol.Hash(p)
 			}
-			if hops == 0 {
+			if hops == 0 && !gone {
 				actor, known = p, true
 			}
 		} else if e, ok := a.execs[cur]; ok {

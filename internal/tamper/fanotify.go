@@ -19,7 +19,42 @@ type Event struct {
 	Path string
 	Op   string // modify, close-write, attrib, create, delete, moved-from, moved-to, delete-self, move-self (joined with +)
 	PID  int
+	// Exited: the kernel said the writer had exited before the event was
+	// read (FAN_NOPIDFD), so PID may already be another process's.
+	Exited bool
+	// Writer is the writer's pidfd (FAN_REPORT_PIDFD), which outlives a
+	// reuse of its pid; nil when the kernel gives none. Close closes it.
+	Writer *os.File
 }
+
+// Gone reports whether the writer is known to have exited: the kernel said
+// so, or its pidfd shows it. Then the pid names no process, or another one.
+// Without a pidfd (an older kernel) it is false: the pid is all there is.
+func (e Event) Gone() bool {
+	if e.Exited {
+		return true
+	}
+	if e.Writer == nil {
+		return false
+	}
+	// A pidfd polls readable once its process has exited.
+	fds := []unix.PollFd{{Fd: int32(e.Writer.Fd()), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, 0)
+	return err == nil && n > 0 && fds[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0
+}
+
+// Close releases the event's pidfd, if it has one.
+func (e Event) Close() {
+	if e.Writer != nil {
+		e.Writer.Close()
+	}
+}
+
+// PidFDs reports whether the kernel gives the writers' pidfds.
+func (w *Watcher) PidFDs() bool { return w.pidfds }
+
+// fanotifyInit is fanotify_init; tests replace it.
+var fanotifyInit = unix.FanotifyInit
 
 // Watcher is a running fanotify group.
 type Watcher struct {
@@ -30,6 +65,7 @@ type Watcher struct {
 	byHandle map[string]string // a directory's file handle → its path
 	skipped  int
 	dropped  atomic.Uint64 // events lost: the kernel's queue overflowed, or the channel was full
+	pidfds   bool          // the group reports pidfds (FAN_REPORT_PIDFD)
 }
 
 const mask = unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_ATTRIB | unix.FAN_CREATE | unix.FAN_DELETE |
@@ -47,13 +83,21 @@ var ops = []struct {
 // Watch reports every change to each of paths, and every entry change in
 // each of dirs. A directory that cannot be marked (it is missing) is
 // skipped: Skipped says how many. The parent directory of each path is
-// marked, but only changes to the path itself are reported.
+// marked, but only changes to the path itself are reported. Each event
+// carries its writer's pidfd where the kernel gives one (5.15 and later);
+// on a kernel that refuses FAN_REPORT_PIDFD the group is made without it.
 func Watch(paths, dirs []string) (*Watcher, error) {
-	fd, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK|unix.FAN_REPORT_DFID_NAME, unix.O_RDONLY|unix.O_LARGEFILE)
+	const flags = unix.FAN_CLASS_NOTIF | unix.FAN_CLOEXEC | unix.FAN_NONBLOCK | unix.FAN_REPORT_DFID_NAME
+	pidfds := true
+	fd, err := fanotifyInit(flags|unix.FAN_REPORT_PIDFD, unix.O_RDONLY|unix.O_LARGEFILE)
+	if err != nil {
+		pidfds = false
+		fd, err = fanotifyInit(flags, unix.O_RDONLY|unix.O_LARGEFILE)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
-	w := &Watcher{f: os.NewFile(uintptr(fd), "fanotify"), events: make(chan Event, 256),
+	w := &Watcher{f: os.NewFile(uintptr(fd), "fanotify"), events: make(chan Event, 256), pidfds: pidfds,
 		paths: map[string]bool{}, dirs: map[string]bool{}, byHandle: map[string]string{}}
 	marked := map[string]bool{}
 	mark := func(dir string) {
@@ -125,20 +169,23 @@ func (w *Watcher) parse(buf []byte) {
 		if md.Fd >= 0 {
 			unix.Close(int(md.Fd))
 		}
-		dir, name := w.where(buf[off+int(md.Metadata_len) : end])
+		dir, name, pidfd := w.where(buf[off+int(md.Metadata_len) : end])
 		off = end
-		if md.Mask&unix.FAN_Q_OVERFLOW != 0 {
-			w.noteDrop()
-			continue
+		ev := Event{PID: int(md.Pid), Exited: w.pidfds && pidfd == unix.FAN_NOPIDFD}
+		if pidfd >= 0 {
+			ev.Writer = os.NewFile(uintptr(pidfd), "pidfd")
 		}
-		if dir == "" {
+		if md.Mask&unix.FAN_Q_OVERFLOW != 0 {
+			ev.Close()
+			w.noteDrop()
 			continue
 		}
 		full := dir
 		if name != "" {
 			full = filepath.Join(dir, name)
 		}
-		if !w.paths[full] && !w.dirs[dir] {
+		if dir == "" || !w.paths[full] && !w.dirs[dir] {
+			ev.Close()
 			continue
 		}
 		var which []string
@@ -147,16 +194,23 @@ func (w *Watcher) parse(buf []byte) {
 				which = append(which, o.name)
 			}
 		}
+		ev.Path, ev.Op = full, strings.Join(which, "+")
 		select {
-		case w.events <- Event{Path: full, Op: strings.Join(which, "+"), PID: int(md.Pid)}:
+		case w.events <- ev:
 		default: // a flood: the first of it was seen
+			ev.Close()
 			w.noteDrop()
 		}
 	}
 }
 
-// where reads the directory and entry name out of an event's info records.
-func (w *Watcher) where(info []byte) (dir, name string) {
+// where reads the directory, the entry name and the writer's pidfd out of
+// an event's info records. pidfd is FAN_NOPIDFD (-1) when there is no pidfd
+// record or the kernel had none to give (the writer had exited), or
+// FAN_EPIDFD (-2) when making one failed.
+func (w *Watcher) where(info []byte) (dir, name string, pidfd int) {
+	pidfd = unix.FAN_NOPIDFD
+	have := false
 	for len(info) >= 4 {
 		typ, l := info[0], int(binary.NativeEndian.Uint16(info[2:4]))
 		if l < 4 || l > len(info) {
@@ -179,7 +233,13 @@ func (w *Watcher) where(info []byte) (dir, name string) {
 				}
 			}
 		}
+		if typ == unix.FAN_EVENT_INFO_TYPE_PIDFD && l >= 8 && !have {
+			pidfd, have = int(int32(binary.NativeEndian.Uint32(info[4:8]))), true
+		}
 		info = info[l:]
+	}
+	if !have && w.pidfds {
+		pidfd = unix.FAN_EPIDFD // a pidfd group's event without one: unknown, not gone
 	}
 	return
 }

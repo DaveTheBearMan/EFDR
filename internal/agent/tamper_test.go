@@ -339,3 +339,26 @@ func TestTamper_DroppedEventsReportedOncePerMinute(t *testing.T) {
 		t.Fatalf("no new drops, yet %d", n)
 	}
 }
+
+// The writer exited before its event was judged and its pid now belongs to
+// another process: that one is not killed; the change is an alert.
+func TestTamper_ExitedWriterPidReused(t *testing.T) {
+	fresh := inSession(mk(800, 1, 1000, "/usr/sbin/apache2-helper"), "12")
+	r, ran := tamperRig(t, fresh)
+	ev := hit(800)
+	ev.Exited = true
+	r.a.onTamper(ev)
+	got := r.kind("tamper")
+	if len(r.kills) != 0 || len(*ran) != 0 {
+		t.Fatalf("a reused pid was killed: %+v %v", r.kills, *ran)
+	}
+	if len(got) != 1 || got[0].Action != "alert" || !strings.Contains(got[0].Detail, "exited") || got[0].Exe != "" {
+		t.Fatalf("tamper: %+v", got)
+	}
+	// The same pid with the writer alive is still the actor.
+	r, _ = tamperRig(t, inSession(mk(800, 1, 1000, "/tmp/evil"), "12"))
+	r.a.onTamper(hit(800))
+	if len(r.kills) != 1 {
+		t.Fatalf("a live writer was not killed: %+v", r.got)
+	}
+}
