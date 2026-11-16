@@ -50,12 +50,17 @@ func isAddrChar(r rune) bool {
 	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == ':' || r == '.' || r == '/'
 }
 
-// parsePrefix is an address or a block; ok is false for anything else.
+// parsePrefix is an address or a block; ok is false for anything else. A
+// v4-mapped address (::ffff:192.0.2.7) is read as the v4 one it maps.
 func parsePrefix(tok string) (netip.Prefix, bool) {
 	if q, err := netip.ParsePrefix(tok); err == nil {
+		if q.Addr().Is4In6() && q.Bits() >= 96 {
+			q = netip.PrefixFrom(q.Addr().Unmap(), q.Bits()-96)
+		}
 		return q.Masked(), true
 	}
 	if a, err := netip.ParseAddr(tok); err == nil {
+		a = a.Unmap()
 		return netip.PrefixFrom(a, a.BitLen()), true
 	}
 	return netip.Prefix{}, false
@@ -222,7 +227,57 @@ func iptMatches(f []string) []match {
 	return out
 }
 
-var nftComment = regexp.MustCompile(`comment\s+"[^"]*"`)
+// nftComment is a comment, escaped quotes (\") inside it included.
+var nftComment = regexp.MustCompile(`comment\s+"(?:[^"\\]|\\.)*"`)
+
+// nftSets reads the named sets of `nft -a list ruleset`: for each, by
+// "family table name", the first word of each element (an address, a
+// block, a port or a range; a timeout and the like after it dropped). An
+// element list may run over several lines.
+func nftSets(ruleset string) map[string][]string {
+	out := map[string][]string{}
+	var table, set string
+	var elems *strings.Builder
+	for _, line := range strings.Split(ruleset, "\n") {
+		line, _ = cutHandle(strings.TrimSpace(line))
+		f := strings.Fields(line)
+		switch {
+		case elems != nil:
+			// Inside "elements = { ... }": up to the closing brace.
+		case len(f) >= 3 && f[0] == "table":
+			table, set = f[1]+" "+f[2], ""
+			continue
+		case len(f) >= 2 && (f[0] == "set" || f[0] == "map") && f[len(f)-1] == "{":
+			set = f[1]
+			if f[0] == "map" {
+				set = "" // a map's elements are pairs: not judged
+			}
+			continue
+		case set != "" && line == "}":
+			set = ""
+			continue
+		case set != "" && strings.HasPrefix(line, "elements = {"):
+			elems = &strings.Builder{}
+			line = strings.TrimPrefix(line, "elements = {")
+		default:
+			continue
+		}
+		body, end := strings.CutSuffix(strings.TrimSpace(line), "}")
+		elems.WriteString(body)
+		elems.WriteString(" ")
+		if end {
+			var vals []string
+			for _, e := range strings.Split(elems.String(), ",") {
+				if w := strings.Fields(e); len(w) > 0 {
+					vals = append(vals, w[0])
+				}
+			}
+			out[table+" "+set] = vals
+			elems = nil
+		}
+	}
+	return out
+}
 
 // cutHandle splits a trailing "# handle N" off a line of nft output; the
 // handle is 0 when there is none.
@@ -248,6 +303,8 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 	var cur *Table
 	var chain string
 	skipT, skipC := false, false
+	sets := nftSets(ruleset)
+	inSet := false
 	flush := func() {
 		if cur != nil && len(cur.Rules) > 0 {
 			out = append(out, *cur)
@@ -264,6 +321,9 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 		line, handle := cutHandle(line)
 		f := strings.Fields(line)
 		switch {
+		case inSet:
+			inSet = line != "}" // a set's body: read by nftSets
+			continue
 		case len(f) == 0 || line == "}":
 			continue
 		case f[0] == "table" && len(f) >= 4 && f[len(f)-1] == "{":
@@ -271,6 +331,8 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 			skipT = skipTable(f[1], f[2])
 			cur = &Table{Family: f[1], Name: f[2]}
 			chain, skipC = "", false
+		case (f[0] == "set" || f[0] == "map" || f[0] == "flowtable") && f[len(f)-1] == "{":
+			inSet, chain = true, ""
 		case f[0] == "chain" && len(f) >= 3:
 			chain = f[1]
 			skipC = skipChain(chain)
@@ -291,7 +353,17 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 			if len(rf) == 0 || (rf[len(rf)-1] != "drop" && rf[len(rf)-1] != "reject" && !strings.Contains(rule, " reject ")) {
 				continue
 			}
-			if blocks(nftMatches(rule), fleet, ports, scored) {
+			ms := nftMatches(rule)
+			for i, m := range ms {
+				// "@name": the table's set of that name. A set not
+				// listed stays "@name", which no judgement accepts.
+				if len(m.vals) == 1 && strings.HasPrefix(m.vals[0], "@") {
+					if vals, ok := sets[cur.Family+" "+cur.Name+" "+m.vals[0][1:]]; ok {
+						ms[i].vals = vals
+					}
+				}
+			}
+			if blocks(ms, fleet, ports, scored) {
 				cur.Rules = append(cur.Rules, NftRule{Chain: chain, Handle: h})
 			}
 		}
