@@ -308,3 +308,20 @@ func PeerTLS(caPath, certPath, keyPath, self string) (server, client *tls.Config
 	}
 	return server, client, nil
 }
+
+// HostName is the host name in a host certificate (host.pem).
+func HostName(certPath string) (string, error) {
+	b, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return "", fmt.Errorf("%s: no PEM block", certPath)
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return "", err
+	}
+	return c.Subject.CommonName, nil
+}

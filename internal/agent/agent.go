@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"xdr/internal/baseline"
+	"xdr/internal/breakglass"
 	"xdr/internal/collect"
 	"xdr/internal/config"
 	"xdr/internal/detect"
@@ -121,16 +123,20 @@ type agent struct {
 	snap     *proc.Snapshot
 	snapAt   time.Time
 
-	ssh         *sshgate.Asserter   // nil: no SSH gate
-	gateExe     string              // what pam_exec runs: this binary
-	gateOffSaid bool                // the gate-off alert was recorded
-	run         sshgate.Runner      // loginctl, usermod, systemctl
-	sess        map[string]*session // live sessions by id
-	approved    map[string]bool     // session ids approved (orders, break-glass)
-	ended       map[string]bool     // session ids ordered ended
-	okUsers     map[string]bool     // new accounts approved
-	pausedUntil time.Time           // a pause token holds until then
-	uidSaid     map[string]uint32   // gray accounts whose bad uid was reported
+	ssh         *sshgate.Asserter    // nil: no SSH gate
+	gateExe     string               // what pam_exec runs: this binary
+	gateOffSaid bool                 // the gate-off alert was recorded
+	run         sshgate.Runner       // loginctl, usermod, systemctl
+	sess        map[string]*session  // live sessions by id
+	approved    map[string]bool      // session ids approved (orders, break-glass)
+	ended       map[string]bool      // session ids ordered ended
+	okUsers     map[string]bool      // new accounts approved
+	pausedUntil time.Time            // a pause token holds until then
+	uidSaid     map[string]uint32    // gray accounts whose bad uid was reported
+	tokenPub    ed25519.PublicKey    // the jump box's rule key; nil: tokens refused
+	used        map[string]time.Time // break-glass token ids used, by expiry
+	state       string               // the state directory
+	spool       string               // the break-glass spool
 
 	unitMu sync.Mutex
 	units  map[string]string // unit → unit file hash, this sweep
@@ -408,7 +414,7 @@ func (a *agent) handle(s *proc.Snapshot, ds []detect.Detection) {
 			in.Action = "killed" // with its process, by an earlier detection
 		case decided != "kill":
 			in.Action = decided
-		case !a.cfg.Kill:
+		case !a.cfg.Kill || a.paused():
 			in.Action = "would-kill"
 		default:
 			pids, err := a.kill(d.PID, d.Start, protect)
@@ -788,6 +794,17 @@ func Run(ctx context.Context, o Options) error {
 	} else {
 		a.gateExe = exe
 		a.ssh = &sshgate.Asserter{Root: a.root, State: defaultState, Run: runCmd, Output: outputCmd}
+	}
+	a.state, a.spool = defaultState, breakglass.Spool
+	if err := makeSpool(a.spool); err != nil {
+		logf("breakglass: spool %s: %v", a.spool, err)
+	}
+	pubPath := defaultFleetPub
+	if cfg.Fleet != nil {
+		pubPath = filepath.Join(cfg.Fleet.Dir, "rules.pub")
+	}
+	if pub, err := rules.LoadPublic(pubPath); err == nil {
+		a.tokenPub = pub
 	}
 	a.exeSize = func(p *proc.Proc) int64 {
 		st, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(p.PID), "exe"))

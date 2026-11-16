@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -81,6 +80,7 @@ func (a *agent) sessions(s *proc.Snapshot) {
 		return
 	}
 	a.checkGrayUIDs()
+	a.scanSpool()
 	list, err := sshgate.Sessions(a.root)
 	if err != nil {
 		a.logf("sessions: %v", err)
@@ -214,9 +214,6 @@ func listenGate(sock string) (net.Listener, error) {
 	return l, nil
 }
 
-// scopeSession is the session id in a cgroup path's session-N.scope.
-var scopeSession = regexp.MustCompile(`/session-(c?[0-9]{1,10})\.scope$`)
-
 // onGate answers the gate socket: a session opening is registered (its
 // grace starts now) and refused at once when the judge would end it; a
 // token message is a break-glass use.
@@ -261,11 +258,7 @@ func (a *agent) lookupSession(m sshgate.Msg) (sshgate.Session, bool) {
 	id := m.Session
 	if id == "" && m.PPID > 0 {
 		cg, _ := collect.ReadFile(filepath.Join(a.root, "proc", strconv.Itoa(m.PPID), "cgroup"), 4096)
-		for _, l := range strings.Split(string(cg), "\n") {
-			if sm := scopeSession.FindStringSubmatch(l); sm != nil {
-				id = sm[1]
-			}
-		}
+		id = sshgate.CgroupSession(cg)
 	}
 	for _, ls := range list {
 		if id != "" && ls.ID == id {
@@ -273,9 +266,4 @@ func (a *agent) lookupSession(m sshgate.Msg) (sshgate.Session, bool) {
 		}
 	}
 	return sshgate.Session{}, false
-}
-
-// onToken is a break-glass use; tokens come with the break-glass plan.
-func (a *agent) onToken(m sshgate.Msg) sshgate.Reply {
-	return sshgate.Reply{Why: "tokens are not accepted yet"}
 }

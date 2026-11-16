@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"xdr/internal/collect"
 )
@@ -102,4 +103,18 @@ func Terminate(run Runner, id string) error {
 		return fmt.Errorf("sshgate: %q is not a session id", id)
 	}
 	return run("loginctl", "terminate-session", id)
+}
+
+// scopeSession is the session id in a cgroup path's session-N.scope.
+var scopeSession = regexp.MustCompile(`/session-(c?[0-9]{1,10})\.scope$`)
+
+// CgroupSession is the logind session of a process from its
+// /proc/PID/cgroup, or "".
+func CgroupSession(cgroup []byte) string {
+	for _, l := range strings.Split(string(cgroup), "\n") {
+		if m := scopeSession.FindStringSubmatch(l); m != nil {
+			return m[1]
+		}
+	}
+	return ""
 }

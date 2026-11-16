@@ -40,6 +40,7 @@ commands:
   controller jump box:              controller init --dir D --name ADDR... | enroll --dir D --host H --out DIR | run --dir D [--config FILE] | disable-host --dir D --host H
   rules     the signed rule set:    rules list|revoke --dir D [--endpoint ADDR] [ID]
   gate      PAM session hook:       gate (run by pam_exec; refuses when the agent says no or is down)
+  breakglass use a token:          breakglass TOKEN|- [--session ID]
   version   print the xdr version
 `
 
@@ -80,6 +81,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = rulesCmd(rest, stdout, stderr)
 	case "gate":
 		err = gateCmd(rest, stderr)
+	case "breakglass":
+		err = breakglassCmd(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s", cmd, usage)
 		return 2
