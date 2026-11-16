@@ -34,6 +34,10 @@ var fwConfirm = "/run/xdr/fw-confirm"
 // that is not confirmed goes back to its table.
 var fwKept = "/run/xdr/fw-kept.json"
 
+// fwBlocks is the fleet's blocks the agent has in force: a table built
+// without --block carries them, so applying it does not drop them.
+var fwBlocks = fw.BlocksFile
+
 // fwCmd is `xdr fw print|apply|try|confirm|remove`.
 func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
@@ -45,11 +49,17 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	path := fs.String("config", "", "deployment config (agent.json)")
 	timeout := fs.Duration("timeout", 60*time.Second, "try: how long to wait for `xdr fw confirm`")
 	var blockArgs multi
-	fs.Var(&blockArgs, "block", "ADDR:PORT/PROTO to drop outbound traffic to; repeat (a revert goes back to the table with none)")
+	fs.Var(&blockArgs, "block", "ADDR:PORT/PROTO to drop outbound traffic to, in place of the fleet's blocks in force; repeat")
 	if err := parse(fs, args[1:]); err != nil {
 		return 0, err
 	}
-	var blocks []fw.Block
+	blocks, err := fleetBlocks()
+	if err != nil {
+		return 0, err
+	}
+	if len(blockArgs) > 0 {
+		blocks = nil
+	}
 	for _, a := range blockArgs {
 		b, err := parseBlock(a)
 		if err != nil {
@@ -134,11 +144,21 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 }
 
-// revert goes back to the table of the last confirmed try, or removes the
-// table when there was none.
+// fleetBlocks is the fleet's blocks the agent last had in force.
+func fleetBlocks() ([]fw.Block, error) {
+	b, err := fw.LoadBlocks(fwBlocks)
+	if err != nil {
+		return nil, fmt.Errorf("the fleet's blocks (%s): %w", fwBlocks, err)
+	}
+	return b, nil
+}
+
+// revert goes back to the table of the last confirmed try, with the
+// fleet's blocks, or removes the table when there was none.
 func revert(f *fw.Firewall, stdout io.Writer) error {
 	if c, err := config.Load(fwKept); err == nil {
-		if err := f.Apply(fw.Build(c, nil, time.Now())); err == nil {
+		blocks, _ := fleetBlocks()
+		if err := f.Apply(fw.Build(c, blocks, time.Now())); err == nil {
 			fmt.Fprintln(stdout, "reverted to the last confirmed table")
 			return nil
 		}

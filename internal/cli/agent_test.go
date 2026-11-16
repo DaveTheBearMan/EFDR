@@ -215,3 +215,26 @@ func TestFwPrint_Block(t *testing.T) {
 		}
 	}
 }
+
+// Without --block, the table carries the fleet's blocks the agent has in
+// force: an operator's apply or try does not drop them until the agent runs.
+func TestFwPrint_KeepsTheFleetsBlocks(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "agent.json")
+	os.WriteFile(p, []byte(`{"jump":["192.0.2.7"]}`), 0o600)
+	old := fwBlocks
+	fwBlocks = filepath.Join(t.TempDir(), "blocks.json")
+	defer func() { fwBlocks = old }()
+	os.WriteFile(fwBlocks, []byte(`[{"Addr":"203.0.113.9","Proto":"tcp","Port":4444}]`), 0o600)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"fw", "print", "--config", p}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "ip daddr 203.0.113.9 tcp dport 4444 drop") {
+		t.Fatalf("print lacks the fleet's block:\n%s", out.String())
+	}
+	out.Reset()
+	if code := Run([]string{"fw", "print", "--config", p, "--block", "198.51.100.4:53/udp"}, &out, &errb); code != 0 ||
+		strings.Contains(out.String(), "dport 4444") || !strings.Contains(out.String(), "198.51.100.4 udp dport 53 drop") {
+		t.Fatalf("--block names the blocks:\n%s", out.String())
+	}
+}
