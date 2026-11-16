@@ -274,8 +274,9 @@ func (a *agent) takeRules() {
 	if a.selfHash == "" {
 		baseHash = a.baseHash
 	}
+	live, recorded := persist.StockCron(a.root, a.baseHash), persist.BaselineCron(a.pol.Base)
 	g := rules.Guard{Baseline: baseHash, GuardExes: a.cfg.GuardExes, Protect: a.cfg.Protected(),
-		StockCron: persist.StockCron(a.root, a.baseHash)}
+		StockCron: func(c string) bool { return live(c) || recorded(c) }}
 	var kept []rules.Rule
 	for _, r := range a.ruleSet.Rules {
 		if err := g.Validate(r); err != nil {

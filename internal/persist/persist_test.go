@@ -3,6 +3,7 @@ package persist
 import (
 	"testing"
 
+	"xdr/internal/baseline"
 	"xdr/internal/proc"
 	"xdr/internal/testfs"
 )
@@ -58,5 +59,34 @@ func TestStockCron(t *testing.T) {
 	}
 	if is("curl x | sh") || is("run-parts /tmp") {
 		t.Fatal("non-baseline crontab counted as stock")
+	}
+}
+
+// The baseline's own crontab contents are stock wherever the box's live
+// crontab has since been edited.
+func TestBaselineCron(t *testing.T) {
+	file := func(c string) baseline.FileEntry {
+		return baseline.FileEntry{Type: baseline.TypeFile, Content: []byte(c)}
+	}
+	b := &baseline.Baseline{Files: map[string]baseline.FileEntry{
+		"/etc/crontab":                  file("17 * * * * root cd / && run-parts --report /etc/cron.hourly\n"),
+		"/etc/cron.d/e2scrub":           file("30 3 * * 0 root test -e /run/systemd/system || /usr/lib/x/e2scrub_all_cron\n"),
+		"/etc/cron.d/sub/deep":          file("* * * * * root deep-cmd\n"),
+		"/etc/profile.d/x.sh":           file("curl x | sh\n"),
+		"/var/spool/cron/crontabs/root": file("0 0 * * * /usr/local/bin/backup\n"),
+	}}
+	is := BaselineCron(b)
+	for _, c := range []string{"cd / && run-parts --report /etc/cron.hourly", "/usr/lib/x/e2scrub_all_cron", "/usr/local/bin/backup"} {
+		if !is(c) {
+			t.Errorf("%q not stock", c)
+		}
+	}
+	for _, c := range []string{"curl x | sh", "deep-cmd", "", " "} {
+		if is(c) {
+			t.Errorf("%q counted as stock", c)
+		}
+	}
+	if BaselineCron(nil)("x") {
+		t.Fatal("nil baseline")
 	}
 }

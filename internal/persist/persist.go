@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"xdr/internal/baseline"
 	"xdr/internal/collect"
+	"xdr/internal/pathenc"
 	"xdr/internal/proc"
 )
 
@@ -103,6 +105,10 @@ func StockCron(root string, isBase func(sha string) bool) func(command string) b
 			}
 		}
 	}
+	return onLine(lines)
+}
+
+func onLine(lines []string) func(command string) bool {
 	return func(command string) bool {
 		if strings.TrimSpace(command) == "" {
 			return false
@@ -114,4 +120,26 @@ func StockCron(root string, isBase func(sha string) bool) func(command string) b
 		}
 		return false
 	}
+}
+
+// BaselineCron returns whether a command appears on a line of a crontab
+// the baseline recorded with its content, so the stock lines of a crontab
+// edited since are still known.
+func BaselineCron(b *baseline.Baseline) func(command string) bool {
+	var lines []string
+	if b != nil {
+		for key, e := range b.Files {
+			p, err := pathenc.Decode(key)
+			if err != nil || e.Type != baseline.TypeFile || e.Content == nil {
+				continue
+			}
+			for _, f := range CronFiles {
+				if p == f || path.Dir(p) == f {
+					lines = append(lines, strings.Split(string(e.Content), "\n")...)
+					break
+				}
+			}
+		}
+	}
+	return onLine(lines)
 }

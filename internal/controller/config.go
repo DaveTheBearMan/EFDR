@@ -9,6 +9,7 @@ import (
 
 	"xdr/internal/baseline"
 	"xdr/internal/config"
+	"xdr/internal/persist"
 	"xdr/internal/rules"
 )
 
@@ -67,5 +68,6 @@ func (c *Config) Guard() (rules.Guard, error) {
 	for _, n := range c.Protect {
 		protect = append(protect, n.Prefix)
 	}
-	return rules.Guard{Baseline: rules.BaselineHashes(base), GuardExes: c.GuardExes, Protect: protect}, nil
+	return rules.Guard{Baseline: rules.BaselineHashes(base), GuardExes: c.GuardExes, Protect: protect,
+		StockCron: persist.BaselineCron(base)}, nil
 }

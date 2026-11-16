@@ -20,6 +20,7 @@ import (
 	"xdr/internal/pathenc"
 	"xdr/internal/proc"
 	"xdr/internal/rules"
+	"xdr/internal/testfs"
 )
 
 type fakeFleet struct {
@@ -293,4 +294,21 @@ func onlyEndpointAndParent(rs []rules.Rule) bool {
 		}
 	}
 	return remote
+}
+
+// An edited /etc/crontab no longer hashes to the baseline, but its stock
+// lines are still the baseline's: no rule may name them.
+func TestSetRules_StockCronFromBaselineAfterEdit(t *testing.T) {
+	r, _ := fleetRig(t)
+	stock := "17 * * * * root cd / && run-parts --report /etc/cron.hourly\n"
+	r.a.pol.Base = &baseline.Baseline{Files: map[string]baseline.FileEntry{
+		"/etc/crontab": {Type: baseline.TypeFile, SHA256: "aa", Content: []byte(stock)}}}
+	r.a.baseHash = func(s string) bool { return s == "aa" }
+	testfs.File(t, r.root, "/etc/crontab", stock+"* * * * * root /tmp/.x\n", 0o644)
+	set := &rules.Set{Version: 3, Rules: []rules.Rule{{Kind: "cron", Command: "cd / && run-parts --report /etc/cron.hourly", From: "db01"}}}
+	set.Rules[0].SetID()
+	r.a.setRules(set)
+	if n := len(r.kind("rules-refused")); n != 1 {
+		t.Fatalf("%d refused: %+v", n, r.got)
+	}
 }
