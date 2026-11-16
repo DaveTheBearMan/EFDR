@@ -16,6 +16,7 @@ BASE=/var/cache/xdr-e2e/base.json.gz
 LOG=/var/lib/xdr/incidents.jsonl
 # shellcheck source=test/vm/lib.sh
 . test/vm/lib.sh
+[ "${XDR_E2E_BACKEND:-lxd}" = lxd ] || { echo "e2e-net needs the lxd backend: its host is the attacker"; exit 1; }
 
 OUT=$(mktemp -d)
 CATCH=""

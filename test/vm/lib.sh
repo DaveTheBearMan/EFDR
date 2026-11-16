@@ -1,7 +1,11 @@
 # Shared helpers of the VM tests. The caller sets VM, CONF, BASE and LOG.
+# XDR_E2E_BACKEND picks how boxes are reached: lxd (default, VMs on this
+# host) or ssh (the hosts of inventory.ini); it defines x, push, jb and the
+# box and controller lifecycle.
 # shellcheck shell=bash
 
-x() { lxc exec "$VM" -- "$@"; }
+# shellcheck source=test/vm/backend-lxd.sh
+. "$(dirname "${BASH_SOURCE[0]}")/backend-${XDR_E2E_BACKEND:-lxd}.sh" || exit 1
 # bg CMD: start CMD in the VM, detached, so lxc exec returns at once.
 bg() { x sh -c "setsid -f $1 </dev/null >/dev/null 2>&1"; }
 fails=0
