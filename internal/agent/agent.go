@@ -108,9 +108,12 @@ type agent struct {
 	users map[uint32]string
 	logf  func(string, ...any)
 
-	applied string          // the ruleset last applied, as text
-	pinned  string          // the config and DNS switch the files were last asserted for
-	foreign map[string]bool // base chains of other tables already seen (nil: not looked yet)
+	applied    string            // the ruleset last applied, as text
+	pinned     string            // the config and DNS switch the files were last asserted for
+	blocks     []fw.Block        // the remote rules in force, as blocks
+	blockSet   map[fw.Block]bool // the ones the table holds
+	blocksOver int               // how many the table had no room for, last time
+	foreign    map[string]bool   // base chains of other tables already seen (nil: not looked yet)
 
 	fleet    fleetLink // nil: a standalone agent
 	mesh     meshLink  // nil: no peer links
@@ -206,6 +209,9 @@ func (a *agent) reload(cfg *config.Config) error {
 	if old.DNS.Listen != cfg.DNS.Listen {
 		changed = append(changed, "dns.listen") // the stub stays bound where it is
 	}
+	if old.DNS.Pin != cfg.DNS.Pin {
+		changed = append(changed, "dns.pin") // the stub is started once, and files are not unpinned
+	}
 	if !reflect.DeepEqual(old.Fleet, cfg.Fleet) || old.RulesCache != cfg.RulesCache {
 		changed = append(changed, "fleet") // the client is started once
 	}
@@ -254,6 +260,7 @@ func (a *agent) takeRules() {
 	pol := *a.pol
 	pol.Rules = &ix
 	a.pol = &pol
+	a.setBlocks(kept)
 }
 
 // recordLocked is record for callers that do not hold a.mu.
@@ -459,31 +466,16 @@ func (a *agent) assert(report bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	drift := func(action, detail string) {
-		a.record(incident.Incident{Kind: "fw-drift", Action: action, Severity: model.SevHigh, Detail: detail})
-	}
-	rules := fw.Build(a.cfg, nil, now)
-	if text := rules.String(); text != a.applied {
-		// The DNS switch, its expiry or a reload: ours, not drift.
-		if err := a.fw.Apply(rules); err != nil {
-			drift("alert", "the table could not be applied: "+err.Error())
-		} else {
-			a.applied = text
-		}
-	} else if drifted, err := a.fw.Drifted(); err != nil {
-		drift("alert", "the table could not be read: "+err.Error())
-	} else if drifted {
-		if err := a.fw.Apply(rules); err != nil {
-			drift("alert", "the table was changed and could not be repaired: "+err.Error())
-		} else {
-			drift("repaired", "table inet xdr was changed")
-		}
-	}
+	a.syncTable(now)
 	// A reload or the switch going on or off changes the files the
 	// config calls for: writing them then is not a repair.
 	pinned := fmt.Sprintf("%p %v", a.cfg, a.cfg.DNSOn(now))
 	report = report && pinned == a.pinned
-	changed, err := dnsguard.Assert(a.root, a.cfg, now)
+	var changed []string
+	var err error
+	if a.cfg.DNS.Pin {
+		changed, err = dnsguard.Assert(a.root, a.cfg, now)
+	}
 	if err == nil {
 		a.pinned = pinned
 	}
@@ -854,7 +846,9 @@ func Run(ctx context.Context, o Options) error {
 
 	var stub sync.WaitGroup
 	defer stub.Wait()
-	if pc, err := net.ListenPacket("udp", cfg.DNS.Listen); err != nil {
+	if !cfg.DNS.Pin {
+		// DNS passes: no stub, nothing pinned.
+	} else if pc, err := net.ListenPacket("udp", cfg.DNS.Listen); err != nil {
 		a.mu.Lock()
 		a.record(incident.Incident{Kind: "dns-stub", Action: "alert", Severity: model.SevHigh, Detail: err.Error()})
 		a.mu.Unlock()

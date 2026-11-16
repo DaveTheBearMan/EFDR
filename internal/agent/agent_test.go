@@ -445,6 +445,7 @@ func TestGuard_DNSExpiryReappliesWithoutDriftIncident(t *testing.T) {
 
 func TestGuard_ChangedFilesLogged(t *testing.T) {
 	r := newRig(t)
+	r.a.cfg.DNS.Pin = true
 	r.a.assert(false) // the start: writes the three files, which is no incident
 	r.a.guard()
 	if len(r.got) != 0 {
@@ -586,6 +587,7 @@ func TestGrayUIDs(t *testing.T) {
 // own change, not a repair.
 func TestGuard_DNSSwitchIsNotARepair(t *testing.T) {
 	r := newRig(t)
+	r.a.cfg.DNS.Pin = true
 	r.a.assert(false)
 	on := *r.a.cfg
 	on.DNS.Resolver = netip.MustParseAddr("192.0.2.53")
