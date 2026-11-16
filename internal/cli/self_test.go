@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"xdr/internal/breakglass"
+	"xdr/internal/dnsguard"
 	"xdr/internal/install"
 	"xdr/internal/rules"
 	"xdr/internal/sshgate"
@@ -186,5 +187,26 @@ func TestInstallHelp_UpgradeNeedsAPause(t *testing.T) {
 	}
 	if !strings.Contains(usage, "pause token") {
 		t.Fatal("the usage text does not say it")
+	}
+}
+
+// With the agent dead, the CLI's uninstall puts the resolver files the pin
+// saved back first.
+func TestUninstallCLI_RestoresDNS(t *testing.T) {
+	root, f, mint := uninstallRig(t)
+	resolv := filepath.Join(root, "etc/resolv.conf")
+	os.MkdirAll(filepath.Dir(resolv), 0o755)
+	os.WriteFile(resolv, []byte("nameserver 192.0.2.53\n"), 0o644)
+	if err := dnsguard.Save(root, filepath.Join(root, "var/lib/xdr/dns-orig")); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(resolv, []byte("nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"), 0o644)
+	now := time.Now()
+	var so, se bytes.Buffer
+	if code := Run([]string{"uninstall", "--token", mint("web01", "uninstall", now.Add(-time.Minute), now.Add(time.Hour))}, &so, &se); code != 0 {
+		t.Fatalf("%d %s", code, se.String())
+	}
+	if b, _ := os.ReadFile(resolv); string(b) != "nameserver 192.0.2.53\n" || len(f.cmds) == 0 {
+		t.Fatalf("resolv.conf %q", b)
 	}
 }

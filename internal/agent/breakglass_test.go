@@ -10,6 +10,7 @@ import (
 
 	"xdr/internal/breakglass"
 	"xdr/internal/detect"
+	"xdr/internal/dnsguard"
 	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/sshgate"
@@ -325,5 +326,40 @@ func TestBreakglass_UninstallReleasesTheGate(t *testing.T) {
 	r.a.guard()
 	if b, _ := os.ReadFile(pam); string(b) != pamBase || len(r.fw.applied) != n {
 		t.Fatalf("asserted after the uninstall: pam %q, %d applies", b, len(r.fw.applied)-n)
+	}
+}
+
+// A pinned box gets its resolver files back before the install goes: it
+// keeps name resolution once the agent (and its stub) are gone.
+func TestBreakglass_UninstallRestoresDNS(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	resolv := filepath.Join(r.a.root, "etc/resolv.conf")
+	os.MkdirAll(filepath.Dir(resolv), 0o755)
+	os.WriteFile(resolv, []byte("nameserver 192.0.2.53\n"), 0o644)
+	backup := filepath.Join(r.a.state, "dns-orig")
+	os.MkdirAll(r.a.state, 0o755)
+	if err := dnsguard.Save(r.a.root, backup); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(resolv, []byte("nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"), 0o644)
+	restoredFirst := false
+	run := r.a.runner
+	r.a.runner = func(name string, args ...string) ([]byte, error) {
+		if len(order) == 0 {
+			b, _ := os.ReadFile(resolv)
+			restoredFirst = string(b) == "nameserver 192.0.2.53\n"
+		}
+		return run(name, args...)
+	}
+	if rep := r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000d5", "uninstall")}); !rep.OK {
+		t.Fatalf("%+v", rep)
+	}
+	if !restoredFirst {
+		t.Fatal("the resolver files were not restored before the uninstall ran")
+	}
+	if _, err := os.Stat(backup); err == nil {
+		t.Fatal("the backup is still there")
 	}
 }

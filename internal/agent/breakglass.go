@@ -9,6 +9,7 @@ import (
 
 	"xdr/internal/breakglass"
 	"xdr/internal/collect"
+	"xdr/internal/dnsguard"
 	"xdr/internal/incident"
 	"xdr/internal/install"
 	"xdr/internal/model"
@@ -101,6 +102,12 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: the ssh gate stays in PAM: " + err.Error()})
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}
+	// The resolver files the pin replaced go back while the agent lives:
+	// once it (and its stub) are gone the box must still resolve.
+	if err := a.restoreDNS(); err != nil {
+		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: the resolver files were not restored: " + err.Error()})
+		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
+	}
 	a.uninstalled = true // no table, no gate from here on
 	a.uninstTried = true
 	if err := install.Uninstall(a.layout, a.runner); err != nil {
@@ -178,4 +185,13 @@ func makeSpool(dir string) error {
 		}
 	}
 	return os.Chmod(dir, os.ModeSticky|0o733)
+}
+
+// restoreDNS puts back the resolver files the DNS pin saved, if it did.
+func (a *agent) restoreDNS() error {
+	restored, err := dnsguard.Restore(a.root, filepath.Join(a.state, "dns-orig"))
+	for _, path := range restored {
+		a.record(incident.Incident{Kind: "dns-files", Action: "repaired", Severity: model.SevMedium, Detail: path + " restored: uninstall"})
+	}
+	return err
 }

@@ -15,12 +15,17 @@ import (
 	"time"
 
 	"xdr/internal/breakglass"
+	"xdr/internal/dnsguard"
 	"xdr/internal/guard"
 	"xdr/internal/install"
 	"xdr/internal/pki"
 	"xdr/internal/rules"
 	"xdr/internal/sshgate"
 )
+
+// dnsBackup is where the agent's DNS pin keeps the resolver files it
+// replaced (its state directory's dns-orig).
+const dnsBackup = "/var/lib/xdr/dns-orig"
 
 // layout and runner are what install and ensure act on; tests replace them.
 var (
@@ -153,6 +158,15 @@ func uninstallCmd(args []string, stdout, stderr io.Writer) error {
 	}
 	if _, err := sshgate.ReleasePAM(root); err != nil {
 		return fmt.Errorf("the ssh gate stays in PAM: %w", err)
+	}
+	// The resolver files the agent's DNS pin replaced go back first: with
+	// the agent and its stub gone the box must still resolve.
+	restored, err := dnsguard.Restore(root, filepath.Join(root, dnsBackup))
+	for _, p := range restored {
+		fmt.Fprintln(stdout, "restored", p)
+	}
+	if err != nil {
+		return fmt.Errorf("the resolver files were not restored: %w", err)
 	}
 	if err := install.Uninstall(layout, runner); err != nil {
 		return err
