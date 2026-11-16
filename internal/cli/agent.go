@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -43,8 +44,18 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flags("fw "+verb, stderr)
 	path := fs.String("config", "", "deployment config (agent.json)")
 	timeout := fs.Duration("timeout", 60*time.Second, "try: how long to wait for `xdr fw confirm`")
+	var blockArgs multi
+	fs.Var(&blockArgs, "block", "ADDR:PORT/PROTO to drop outbound traffic to; repeat (a revert goes back to the table with none)")
 	if err := parse(fs, args[1:]); err != nil {
 		return 0, err
+	}
+	var blocks []fw.Block
+	for _, a := range blockArgs {
+		b, err := parseBlock(a)
+		if err != nil {
+			return 0, err
+		}
+		blocks = append(blocks, b)
 	}
 	var rules fw.Ruleset
 	var raw []byte
@@ -58,7 +69,7 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		rules = fw.Build(c, nil, time.Now())
+		rules = fw.Build(c, blocks, time.Now())
 		if raw, err = os.ReadFile(*path); err != nil {
 			return 0, err
 		}
@@ -277,4 +288,14 @@ func listenersCmd(args []string, stdout, stderr io.Writer) error {
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// parseBlock reads ADDR:PORT/PROTO (203.0.113.9:4444/tcp).
+func parseBlock(s string) (fw.Block, error) {
+	hostport, proto, ok := strings.Cut(s, "/")
+	ap, err := netip.ParseAddrPort(hostport)
+	if !ok || err != nil || ap.Port() == 0 || proto != "tcp" && proto != "udp" {
+		return fw.Block{}, fmt.Errorf("--block %q: want ADDR:PORT/tcp or /udp", s)
+	}
+	return fw.Block{Addr: ap.Addr().Unmap(), Proto: proto, Port: ap.Port()}, nil
 }

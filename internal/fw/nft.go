@@ -30,7 +30,8 @@ type Firewall struct {
 	// after the last Apply. Drift is any difference from that: comparing
 	// what the kernel says with what the kernel said needs no knowledge of
 	// how it rewrites what we send, nor of expressions we never use.
-	seen map[string][]string
+	seen   map[string][]string
+	policy nftables.ChainPolicy // the policy of the chains as last applied
 }
 
 // Open prepares to manage the table. It fails if nftables cannot be reached.
@@ -59,13 +60,13 @@ func (f *Firewall) Apply(rs Ruleset) error {
 	c.AddTable(t) // so that the delete below cannot fail
 	c.DelTable(t)
 	c.AddTable(t)
-	drop := nftables.ChainPolicyDrop
+	policy := chainPolicy(rs.Policy)
 	hooks := [...]*nftables.ChainHook{HookInput: nftables.ChainHookInput, HookOutput: nftables.ChainHookOutput, HookForward: nftables.ChainHookForward}
 	want := map[string]int{}
 	for hook, rules := range [...][]Rule{HookInput: rs.Input, HookOutput: rs.Output, HookForward: rs.Forward} {
 		ch := c.AddChain(&nftables.Chain{
 			Name: chainNames[hook], Table: t, Type: nftables.ChainTypeFilter,
-			Hooknum: hooks[hook], Priority: nftables.ChainPriorityRef(priority), Policy: &drop,
+			Hooknum: hooks[hook], Priority: nftables.ChainPriorityRef(priority), Policy: &policy,
 		})
 		for _, r := range rules {
 			c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: exprs(r, hook)})
@@ -75,7 +76,7 @@ func (f *Firewall) Apply(rs Ruleset) error {
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("nftables: %w", err)
 	}
-	seen, ok, err := f.read()
+	seen, ok, err := f.read(policy)
 	if err != nil {
 		return fmt.Errorf("nftables: reading the table back: %w", err)
 	}
@@ -87,13 +88,21 @@ func (f *Firewall) Apply(rs Ruleset) error {
 			return fmt.Errorf("nftables: chain %s has %d rules right after %d were written", name, len(seen[name]), n)
 		}
 	}
-	f.seen = seen
+	f.seen, f.policy = seen, policy
 	return nil
+}
+
+// chainPolicy is the nftables policy of an Action.
+func chainPolicy(a Action) nftables.ChainPolicy {
+	if a == Accept {
+		return nftables.ChainPolicyAccept
+	}
+	return nftables.ChainPolicyDrop
 }
 
 // read returns the rules of the three chains. ok is false when the table,
 // a chain or a chain's hook, priority or policy is not ours.
-func (f *Firewall) read() (seen map[string][]string, ok bool, err error) {
+func (f *Firewall) read(policy nftables.ChainPolicy) (seen map[string][]string, ok bool, err error) {
 	chains, err := f.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
 	if err != nil {
 		return nil, false, err
@@ -110,7 +119,7 @@ func (f *Firewall) read() (seen map[string][]string, ok bool, err error) {
 		if !ours || ch.Type != nftables.ChainTypeFilter ||
 			ch.Hooknum == nil || *ch.Hooknum != hook ||
 			ch.Priority == nil || *ch.Priority != priority ||
-			ch.Policy == nil || *ch.Policy != nftables.ChainPolicyDrop {
+			ch.Policy == nil || *ch.Policy != policy {
 			return nil, false, nil
 		}
 		seen[ch.Name] = []string{}
@@ -197,7 +206,7 @@ func dumpRules() ([]rawRule, error) {
 // Apply left: missing, a chain added, removed or re-hooked, a policy
 // changed, or any rule added, removed or altered.
 func (f *Firewall) Drifted() (bool, error) {
-	seen, ok, err := f.read()
+	seen, ok, err := f.read(f.policy)
 	if err != nil {
 		return false, fmt.Errorf("nftables: %w", err)
 	}

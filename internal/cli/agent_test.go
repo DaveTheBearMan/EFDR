@@ -27,12 +27,14 @@ func TestFwPrint(t *testing.T) {
 	if code := Run([]string{"fw", "print", "--config", exampleConfig}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	found := false
-	for _, line := range strings.Split(out.String(), "\n") {
-		found = found || strings.Contains(line, "tcp dport 22 accept")
+	// Policy accept; the agents' ports shut to strangers; ssh not filtered.
+	for _, want := range []string{"chain input  # filter, priority -10, policy accept", "tcp dport 7443 drop"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("print lacks %q:\n%s", want, out.String())
+		}
 	}
-	if !found {
-		t.Fatalf("no ssh rule in:\n%s", out.String())
+	if strings.Contains(out.String(), "dport 22") {
+		t.Errorf("ssh is filtered:\n%s", out.String())
 	}
 }
 
@@ -191,5 +193,25 @@ func TestIncidents_ReadsRotatedFileFirst(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 2 || !strings.Contains(lines[0], "pid=1") || !strings.Contains(lines[1], "pid=2") {
 		t.Fatalf("got:\n%s", out.String())
+	}
+}
+
+func TestFwPrint_Block(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "agent.json")
+	os.WriteFile(p, []byte(`{"jump":["192.0.2.7"]}`), 0o600)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"fw", "print", "--config", p, "--block", "203.0.113.9:4444/tcp", "--block", "203.0.113.9:53/udp"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, want := range []string{"policy accept", "ip daddr 203.0.113.9 tcp dport 4444 drop", "ip daddr 203.0.113.9 udp dport 53 drop"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("print lacks %q:\n%s", want, out.String())
+		}
+	}
+	for _, bad := range []string{"203.0.113.9:4444", "203.0.113.9/tcp", "x:1/tcp", "203.0.113.9:0/tcp", "203.0.113.9:1/icmp"} {
+		errb.Reset()
+		if code := Run([]string{"fw", "print", "--config", p, "--block", bad}, &out, &errb); code == 0 {
+			t.Errorf("--block %q accepted", bad)
+		}
 	}
 }

@@ -1,7 +1,9 @@
 package fw
 
 import (
+	"net/netip"
 	"os"
+	"os/exec"
 	"runtime"
 	"testing"
 
@@ -84,7 +86,7 @@ func TestKernel_ApplyIdempotent(t *testing.T) {
 	}
 	for name, want := range map[string][]Rule{"input": rs.Input, "output": rs.Output, "forward": rs.Forward} {
 		ch := chains[name]
-		if ch == nil || ch.Policy == nil || *ch.Policy != nftables.ChainPolicyDrop || ch.Priority == nil || *ch.Priority != -10 {
+		if ch == nil || ch.Policy == nil || *ch.Policy != nftables.ChainPolicyAccept || ch.Priority == nil || *ch.Priority != -10 {
 			t.Fatalf("chain %s: %+v", name, ch)
 		}
 		if n := len(rulesOf(t, name)); n != len(want) {
@@ -140,28 +142,87 @@ func TestKernel_DriftSameCountDifferentRule(t *testing.T) {
 	}
 }
 
-func TestKernel_DriftPolicyAndExtraChain(t *testing.T) {
+func TestKernel_DriftPolicyFlippedToDrop(t *testing.T) {
 	f, rs := applied(t)
-	c, table, chains := kernel(t)
-	accept := nftables.ChainPolicyAccept
+	c, _, chains := kernel(t)
+	drop := nftables.ChainPolicyDrop
 	ch := chains["output"]
-	ch.Policy = &accept
+	ch.Policy = &drop
 	c.AddChain(ch)
 	if err := c.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if !drifted(t, f) {
-		t.Fatal("policy accept not noticed")
+		t.Fatal("a chain flipped to policy drop (an outage we did not cause the rules for) was not noticed")
 	}
 	if err := f.Apply(rs); err != nil {
 		t.Fatal(err)
 	}
+	if drifted(t, f) {
+		t.Fatal("still drifted after Apply")
+	}
+	if _, _, chains := kernel(t); *chains["output"].Policy != nftables.ChainPolicyAccept {
+		t.Fatal("policy not back to accept")
+	}
+}
+
+func TestKernel_DriftExtraChain(t *testing.T) {
+	f, _ := applied(t)
+	c, table, _ := kernel(t)
 	c.AddChain(&nftables.Chain{Name: "extra", Table: table})
 	if err := c.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if !drifted(t, f) {
 		t.Fatal("extra chain not noticed")
+	}
+}
+
+func ipCmd(t *testing.T, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		t.Skipf("ip %v: %v: %s", args, err, out)
+	}
+}
+
+// A drop on the output hook fails a UDP send at once with EPERM; anything
+// the table lets through is merely sent into a network where nothing
+// answers. (A dropped TCP SYN is retransmitted, not reported.)
+func TestKernel_BlockDropsOnlyItsEndpoint(t *testing.T) {
+	inNetns(t)
+	ipCmd(t, "link", "add", "d0", "type", "dummy")
+	ipCmd(t, "addr", "add", "203.0.113.1/24", "dev", "d0")
+	ipCmd(t, "link", "set", "d0", "up")
+	f, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	rs := Build(fixture(), []Block{{Addr: netip.MustParseAddr("203.0.113.9"), Proto: "udp", Port: 4444}}, now)
+	if err := f.Apply(rs); err != nil {
+		t.Fatal(err)
+	}
+	send := func(addr string, port int) error {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		return unix.Sendto(fd, []byte("x"), 0, &unix.SockaddrInet4{Port: port, Addr: netip.MustParseAddr(addr).As4()})
+	}
+	if err := send("203.0.113.9", 4444); err != unix.EPERM {
+		t.Fatalf("the blocked endpoint: %v, want EPERM", err)
+	}
+	for _, c := range []struct {
+		addr string
+		port int
+	}{{"203.0.113.9", 4445}, {"203.0.113.10", 4444}} {
+		if err := send(c.addr, c.port); err != nil {
+			t.Fatalf("%s:%d: %v, want it sent (not blocked)", c.addr, c.port, err)
+		}
+	}
+	if drifted(t, f) {
+		t.Fatal("drift right after Apply")
 	}
 }
 

@@ -146,21 +146,24 @@ table ip nat {
 NFT
 
 cat > "$tmp/agent.json" <<JSON
-{"host": "xa", "jump": ["$JUMP"], "dhcp": false,
+{"host": "xa", "jump": ["$JUMP"],
  "scored": [{"proto": "tcp", "port": 80}, {"proto": "tcp", "port": 8080}]}
 JSON
 fw() { in_ns xa "$XDR" fw "$@" --config "$tmp/agent.json"; }
+# What the fleet found malicious: the stranger's port 9999.
+BLOCK="$STRANGER:9999/tcp"
 
-serve xa 80; serve xa 4444; serve xa 22
-serve xb 9999; serve xb 7443
+serve xa 80; serve xa 4444; serve xa 22; serve xa 7443
+serve xb 9998; serve xb 9999; serve xb 7443
 serve xc 80
 sleep 0.5
 
 # Without the firewall everything connects: the cases below that expect a
-# timeout are then the firewall's doing.
+# timeout are then the firewall's doing. Its policy is accept: only the block
+# and the agents' port are shut.
 published="xb $STRANGER $BOX 8080"
 [ -z "$NO_NAT" ] || published=""
-for t in "xb $STRANGER $BOX 4444" "xb $STRANGER $BOX 22" "xa - $STRANGER 9999" "xc - $STRANGER 9999" ${published:+"$published"}; do
+for t in "xb $STRANGER $BOX 4444" "xb $STRANGER $BOX 22" "xb $STRANGER $BOX 7443" "xa - $STRANGER 9999" "xa - $STRANGER 9998" "xc - $STRANGER 9999" ${published:+"$published"}; do
 	# shellcheck disable=SC2086
 	got=$(probe $t)
 	[ "$got" = ok ] || { echo "fw.sh: setup is broken: probe $t: $got" >&2; exit 2; }
@@ -177,27 +180,33 @@ sleep 1
 	{ echo "fw.sh: setup is broken: the long-lived connections are silent" >&2; exit 2; }
 
 shell_in=$(lines "$tmp/shell.log") shell_out=$(lines "$tmp/xb-9999.log")
-fw apply || { echo "fw.sh: fw apply failed" >&2; exit 1; }
+fw apply --block "$BLOCK" || { echo "fw.sh: fw apply failed" >&2; exit 1; }
 # The first seconds are when a half-cut connection still delivers: a sender
 # whose data is never acknowledged soon stops sending. One byte may have
 # been in flight when the table loaded.
 sleep 3
 passed() { [ $(($(lines "$1") - $2)) -gt 1 ] && echo yes || echo no; }
-expect pre-existing-revshell "in no, out no" "in $(passed "$tmp/shell.log" "$shell_in"), out $(passed "$tmp/xb-9999.log" "$shell_out")"
+# The shell talks to the blocked endpoint: what it sends is cut, though the
+# connection was open before the table (the drop has no "established"
+# exception). Inbound is never blocked, so what the far end sends still arrives.
+expect pre-existing-blocked-out no "$(passed "$tmp/xb-9999.log" "$shell_out")"
 
 expect scored-in ok "$(probe xb $STRANGER $BOX 80)"
-expect unknown-in timeout "$(probe xb $STRANGER $BOX 4444)"
+expect unknown-in ok "$(probe xb $STRANGER $BOX 4444)"
 expect ssh-jump ok "$(probe xb $JUMP $BOX 22)"
-expect ssh-stranger timeout "$(probe xb $STRANGER $BOX 22)"
-expect egress-denied timeout "$(probe xa - $STRANGER 9999)"
+expect ssh-stranger ok "$(probe xb $STRANGER $BOX 22)"
+expect agent-port-jump ok "$(probe xb $JUMP $BOX 7443)"
+expect agent-port-stranger timeout "$(probe xb $STRANGER $BOX 7443)"
+expect egress-open ok "$(probe xa - $STRANGER 9998)"
+expect egress-blocked timeout "$(probe xa - $STRANGER 9999)"
 expect egress-xdr ok "$(probe xa - $JUMP 7443)"
 expect ping-in answered "$(in_ns xb ping -c1 -W1 $BOX >/dev/null && echo answered || echo lost)"
-expect ping-out lost "$(in_ns xa ping -c1 -W1 $STRANGER >/dev/null && echo answered || echo lost)"
+expect ping-out answered "$(in_ns xa ping -c1 -W1 $STRANGER >/dev/null && echo answered || echo lost)"
 expect pre-existing-scored "in yes, out yes" "in $(grows "$tmp/xa-80.log"), out $(grows "$tmp/visitor.log")"
 expect pre-existing-quiet-ssh yes "$(grows "$tmp/operator.log")"
 [ -n "$NO_NAT" ] || expect forward-published ok "$(probe xb $STRANGER $BOX 8080)"
-expect forward-egress timeout "$(probe xc - $STRANGER 9999)"
-
+expect forward-open ok "$(probe xc - $STRANGER 9998)"
+expect forward-blocked timeout "$(probe xc - $STRANGER 9999)"
 table() { in_ns xa nft list table inet xdr >/dev/null 2>&1 && echo present || echo gone; }
 fw remove
 fw try --timeout 3s >/dev/null
@@ -212,20 +221,23 @@ expect try-confirmed "exit 0, table present" "exit $?, table $(table)"
 # A try killed with its session reverts at once, to the last confirmed
 # table; a hangup alone does not stop it. A try that times out goes back
 # to that table too, not to none.
-sed 's/, {"proto": "tcp", "port": 8080}//' "$tmp/agent.json" > "$tmp/other.json"
+cat > "$tmp/other.json" <<JSON
+{"host": "xa", "jump": ["$JUMP"], "dns": {"pin": true, "resolver": "192.0.2.1"}}
+JSON
 other() { in_ns xa "$XDR" fw try --config "$tmp/other.json" "$@" >/dev/null; }
-open8080() { in_ns xa nft list table inet xdr 2>/dev/null | grep -q 'dport 8080' && echo open || echo closed; }
+# pinned: whether the table drops DNS (the lockdown only the other config has).
+pinned() { in_ns xa nft list table inet xdr 2>/dev/null | grep -q 'dport 53 drop' && echo pinned || echo open; }
 # Not through a function: $! must be xdr itself (ip netns exec execs it).
 ip netns exec xa "$XDR" fw try --config "$tmp/other.json" --timeout 30s >/dev/null &
 try=$!
 sleep 1
-got=$(open8080)
+got=$(pinned)
 kill -HUP $try; sleep 0.5
 kill -0 $try 2>/dev/null && hup=survives || hup=died
 kill -TERM $try
 wait $try
-expect try-killed-reverts "8080 closed, hup survives, exit 1, 8080 open" "8080 $got, hup $hup, exit $?, 8080 $(open8080)"
+expect try-killed-reverts "dns pinned, hup survives, exit 1, dns open" "dns $got, hup $hup, exit $?, dns $(pinned)"
 other --timeout 1s
-expect try-restores-confirmed "exit 1, 8080 open" "exit $?, 8080 $(open8080)"
+expect try-restores-confirmed "exit 1, dns open" "exit $?, dns $(pinned)"
 
 [ $fails = 0 ]
