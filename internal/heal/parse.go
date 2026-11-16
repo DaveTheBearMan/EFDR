@@ -8,6 +8,7 @@ package heal
 import (
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -29,97 +30,196 @@ type Table struct {
 	Rules        []NftRule
 }
 
-// ours and the tables of container runtimes: never touched.
-func skipTable(name string) bool {
-	switch {
-	case name == "xdr" || name == "nat":
-		return true
-	}
-	for _, p := range []string{"docker", "libvirt", "kube", "cali"} {
-		if strings.HasPrefix(strings.ToLower(name), p) {
+// skipTable: the agent's own table, by family and name. Every other table
+// is judged, whatever it is called; its NAT chains are left by their type.
+func skipTable(family, name string) bool { return family == "inet" && name == "xdr" }
+
+// skipChain: Docker, Kubernetes, Calico, CNI and libvirt keep their own
+// chains (forwarding isolation among them), whatever table they sit in.
+func skipChain(name string) bool {
+	u := strings.ToUpper(name)
+	for _, p := range []string{"DOCKER", "KUBE", "CALI", "CNI-", "LIBVIRT"} {
+		if strings.HasPrefix(u, p) {
 			return true
 		}
 	}
 	return false
-}
-
-// skipChain: Docker, libvirt and the like keep their own chains.
-func skipChain(name string) bool {
-	u := strings.ToUpper(name)
-	return strings.HasPrefix(u, "DOCKER") || strings.HasPrefix(u, "LIBVIRT") || strings.HasPrefix(u, "KUBE-") || strings.HasPrefix(u, "CNI-")
 }
 
 func isAddrChar(r rune) bool {
 	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == ':' || r == '.' || r == '/'
 }
 
-// namesFleet reports whether text names an address in, or a block
-// overlapping, one of the fleet's.
-func namesFleet(text string, fleet []netip.Prefix) bool {
-	for _, tok := range strings.FieldsFunc(text, func(r rune) bool { return !isAddrChar(r) }) {
-		var p netip.Prefix
-		if q, err := netip.ParsePrefix(tok); err == nil {
-			p = q
-		} else if a, err := netip.ParseAddr(tok); err == nil {
-			p = netip.PrefixFrom(a, a.BitLen())
-		} else {
-			continue
-		}
-		for _, f := range fleet {
-			if f.Overlaps(p) {
-				return true
-			}
-		}
+// parsePrefix is an address or a block; ok is false for anything else.
+func parsePrefix(tok string) (netip.Prefix, bool) {
+	if q, err := netip.ParsePrefix(tok); err == nil {
+		return q.Masked(), true
 	}
-	return false
+	if a, err := netip.ParseAddr(tok); err == nil {
+		return netip.PrefixFrom(a, a.BitLen()), true
+	}
+	return netip.Prefix{}, false
 }
 
-// portsIn is every port a match names after dport, sport, --dport and
-// the like: single ports, lists and sets; a range names each end.
-var portRe = regexp.MustCompile(`(?:dport|sport|dports|sports)\s+(?:!=\s*)?(\{[^}]*\}|[0-9,:\-]+)`)
-
-func portsIn(text string) []uint16 {
-	var out []uint16
-	for _, m := range portRe.FindAllStringSubmatch(text, -1) {
-		for _, f := range strings.FieldsFunc(m[1], func(r rune) bool { return r < '0' || r > '9' }) {
-			if n, err := strconv.Atoi(f); err == nil && n <= 65535 {
-				out = append(out, uint16(n))
-			}
-		}
-	}
-	return out
-}
-
-func namesAgentPort(text string, ports []uint16) bool {
-	for _, p := range portsIn(text) {
-		for _, a := range ports {
-			if a == p {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isScored(p uint16, scored []config.Port) bool {
-	for _, s := range scored {
-		if s.Port == p {
+// inFleet: p lies wholly inside one of the fleet's nets. A block wider
+// than the fleet's (10.0.0.0/8 around a /24) does not name the fleet: it
+// takes others with it.
+func inFleet(p netip.Prefix, fleet []netip.Prefix) bool {
+	for _, f := range fleet {
+		if f.Addr().Is4() == p.Addr().Is4() && f.Bits() <= p.Bits() && f.Contains(p.Addr()) {
 			return true
 		}
 	}
 	return false
 }
 
-// blocks: the match text names a fleet address or an agent port, and no
-// scored port. A rule that names a scored port is never a blocker, even
-// beside a fleet address: it may be the very rule that guards the service.
-func blocks(text string, fleet []netip.Prefix, ports []uint16, scored []config.Port) bool {
-	for _, p := range portsIn(text) {
-		if isScored(p, scored) {
-			return false
+// namesFleet reports whether text names an address in, or a block inside,
+// one of the fleet's.
+func namesFleet(text string, fleet []netip.Prefix) bool {
+	for _, tok := range strings.FieldsFunc(text, func(r rune) bool { return !isAddrChar(r) }) {
+		if p, ok := parsePrefix(tok); ok && inFleet(p, fleet) {
+			return true
 		}
 	}
-	return namesFleet(text, fleet) || namesAgentPort(text, ports)
+	return false
+}
+
+// match is one address or port match of a rule: its values (one, or a
+// set's or list's elements) and whether it is negated.
+type match struct {
+	port bool
+	neg  bool
+	vals []string
+}
+
+// portRange reads a port or a range ("1-1024", iptables' "1:1024").
+func portRange(v string) (lo, hi int, ok bool) {
+	a, b, isRange := strings.Cut(v, "-")
+	if !isRange {
+		a, b, isRange = strings.Cut(v, ":")
+	}
+	if !isRange {
+		b = a
+	}
+	x, err1 := strconv.Atoi(a)
+	y, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || x < 0 || y > 65535 || x > y {
+		return 0, 0, false
+	}
+	return x, y, true
+}
+
+// blocks judges a rule by its matches, negated ones left out: it is a
+// blocker when one address match names only the fleet (an address or a
+// block inside a fleet net, or a set of them) or one port match names only
+// agent ports, each as a single port; and no port match takes in a scored
+// port anywhere (a range or a set that holds one), nor anything it cannot
+// read. When unsure the rule is left.
+func blocks(ms []match, fleet []netip.Prefix, ports []uint16, scored []config.Port) bool {
+	fleetOnly, agentOnly := false, false
+	for _, m := range ms {
+		if m.neg || len(m.vals) == 0 {
+			continue
+		}
+		if m.port {
+			all := true
+			for _, v := range m.vals {
+				lo, hi, ok := portRange(v)
+				if !ok {
+					return false
+				}
+				for _, s := range scored {
+					if int(s.Port) >= lo && int(s.Port) <= hi {
+						return false
+					}
+				}
+				all = all && lo == hi && slices.Contains(ports, uint16(lo))
+			}
+			agentOnly = agentOnly || all
+			continue
+		}
+		all := true
+		for _, v := range m.vals {
+			p, ok := parsePrefix(v)
+			all = all && ok && inFleet(p, fleet)
+		}
+		fleetOnly = fleetOnly || all
+	}
+	return fleetOnly || agentOnly
+}
+
+// nftMatches reads the address and port matches of an nft rule:
+// "saddr|daddr|dport|sport [!=|==] VALUE", VALUE a word or "{ a, b }".
+func nftMatches(rule string) []match {
+	rule = strings.NewReplacer("{", " { ", "}", " } ", ",", " ").Replace(rule)
+	f := strings.Fields(rule)
+	var out []match
+	for i := 0; i < len(f); i++ {
+		var m match
+		switch f[i] {
+		case "saddr", "daddr":
+		case "dport", "sport":
+			m.port = true
+		default:
+			continue
+		}
+		j := i + 1
+		if j < len(f) && (f[j] == "!=" || f[j] == "==") {
+			m.neg = f[j] == "!="
+			j++
+		}
+		if j >= len(f) {
+			break
+		}
+		if f[j] == "{" {
+			for j++; j < len(f) && f[j] != "}"; j++ {
+				m.vals = append(m.vals, f[j])
+			}
+		} else {
+			m.vals = []string{f[j]}
+		}
+		out = append(out, m)
+		i = j
+	}
+	return out
+}
+
+// iptMatches reads the address and port matches of an iptables-save rule's
+// words: -s/-d (a comma list), --dport/--sport, --dports/--sports (a comma
+// list of ports and ranges), each negated by a "!" before it (or after
+// the option, the old way).
+func iptMatches(f []string) []match {
+	var out []match
+	neg := false
+	for i := 0; i < len(f); i++ {
+		w := f[i]
+		if w == "!" {
+			neg = true
+			continue
+		}
+		var m match
+		switch w {
+		case "-s", "--source", "-d", "--destination":
+		case "--dport", "--sport", "--dports", "--sports", "--destination-port", "--source-port", "--destination-ports", "--source-ports":
+			m.port = true
+		default:
+			neg = false
+			continue
+		}
+		m.neg, neg = neg, false
+		j := i + 1
+		if j < len(f) && f[j] == "!" {
+			m.neg = true
+			j++
+		}
+		if j >= len(f) {
+			break
+		}
+		m.vals = strings.Split(f[j], ",")
+		out = append(out, m)
+		i = j
+	}
+	return out
 }
 
 var nftComment = regexp.MustCompile(`comment\s+"[^"]*"`)
@@ -139,9 +239,10 @@ func cutHandle(line string) (string, uint64) {
 }
 
 // NftBlockers reads `nft -a list ruleset` and returns, for each table
-// other than ours (and the NAT and container tables), the drop and reject
-// rules that name a fleet address or one of the agent's ports. A rule
-// whose only matches are scored ports is never returned.
+// other than ours, in its chains other than NAT and the container
+// runtimes', the drop and reject rules that plainly block the fleet or one
+// of the agent's ports (see blocks). A rule that takes in a scored port is
+// never returned.
 func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []config.Port) []Table {
 	var out []Table
 	var cur *Table
@@ -167,7 +268,7 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 			continue
 		case f[0] == "table" && len(f) >= 4 && f[len(f)-1] == "{":
 			flush()
-			skipT = skipTable(f[2])
+			skipT = skipTable(f[1], f[2])
 			cur = &Table{Family: f[1], Name: f[2]}
 			chain, skipC = "", false
 		case f[0] == "chain" && len(f) >= 3:
@@ -190,7 +291,7 @@ func NftBlockers(ruleset string, fleet []netip.Prefix, ports []uint16, scored []
 			if len(rf) == 0 || (rf[len(rf)-1] != "drop" && rf[len(rf)-1] != "reject" && !strings.Contains(rule, " reject ")) {
 				continue
 			}
-			if blocks(rule, fleet, ports, scored) {
+			if blocks(nftMatches(rule), fleet, ports, scored) {
 				cur.Rules = append(cur.Rules, NftRule{Chain: chain, Handle: h})
 			}
 		}
@@ -255,8 +356,7 @@ func IptablesBlockers(save string, fleet []netip.Prefix, ports []uint16, scored 
 		if target != "DROP" && target != "REJECT" {
 			continue
 		}
-		// Words that are not addresses or ports cannot match: the comment
-		// text is left out of the judgement.
+		// The comment text is left out of the judgement.
 		var judge []string
 		for i := 0; i < len(f); i++ {
 			if f[i] == "--comment" {
@@ -265,8 +365,7 @@ func IptablesBlockers(save string, fleet []netip.Prefix, ports []uint16, scored 
 			}
 			judge = append(judge, f[i])
 		}
-		text := strings.NewReplacer("--dports", "dports", "--dport", "dport", "--sports", "sports", "--sport", "sport").Replace(strings.Join(judge, " "))
-		if !blocks(text, fleet, ports, scored) {
+		if !blocks(iptMatches(judge), fleet, ports, scored) {
 			continue
 		}
 		args := append([]string{"-t", table, "-D", f[1]}, f[2:]...)
@@ -329,8 +428,30 @@ func denyNames(tok string, fleet []netip.Prefix) bool {
 	return namesFleet(tok, fleet)
 }
 
-// DenyLines returns the lines of /etc/hosts.deny that name a fleet
-// address, as they are written there. Comments and other lines are left.
+// fieldsOf splits a hosts.deny line at its colons, those inside brackets
+// ([2001:db8::7]) aside.
+func fieldsOf(line string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i, r := range line {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ':':
+			if depth == 0 {
+				out = append(out, line[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, line[start:])
+}
+
+// DenyLines returns the lines of /etc/hosts.deny whose clients are only
+// fleet addresses, as they are written there. A line that also names
+// others, or has an EXCEPT, is left, as are comments.
 func DenyLines(hostsDeny string, fleet []netip.Prefix) []string {
 	var out []string
 	for _, line := range strings.Split(hostsDeny, "\n") {
@@ -338,12 +459,17 @@ func DenyLines(hostsDeny string, fleet []netip.Prefix) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		_, clients, _ := strings.Cut(line, ":")
-		for _, tok := range strings.FieldsFunc(clients, func(r rune) bool { return r == ' ' || r == '\t' || r == ',' }) {
-			if denyNames(tok, fleet) {
-				out = append(out, line)
-				break
-			}
+		fs := fieldsOf(line)
+		if len(fs) < 2 || slices.Contains(strings.Fields(line), "EXCEPT") {
+			continue
+		}
+		toks := strings.FieldsFunc(fs[1], func(r rune) bool { return r == ' ' || r == '\t' || r == ',' })
+		all := len(toks) > 0
+		for _, tok := range toks {
+			all = all && denyNames(tok, fleet)
+		}
+		if all {
+			out = append(out, line)
 		}
 	}
 	return out
