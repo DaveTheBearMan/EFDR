@@ -137,6 +137,7 @@ type agent struct {
 	ssh           *sshgate.Asserter                                     // nil: no SSH gate
 	gateExe       string                                                // what pam_exec runs: this binary
 	gateOffSaid   bool                                                  // the gate-off alert was recorded
+	sshErrSaid    string                                                // the ssh-config error last told; "" when the render took
 	run           sshgate.Runner                                        // loginctl, usermod, systemctl
 	sess          map[string]*session                                   // live sessions by id
 	approved      map[string]bool                                       // session ids approved (orders, break-glass)

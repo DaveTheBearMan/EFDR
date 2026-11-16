@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"xdr/internal/baseline"
 	"xdr/internal/config"
+	"xdr/internal/incident"
 	"xdr/internal/model"
 	"xdr/internal/sshgate"
 	"xdr/internal/testfs"
@@ -184,5 +186,43 @@ func TestAgentGate_RefusalDoesNotMarkEnded(t *testing.T) {
 	r.a.sessions(r.snap)
 	if terminates(*ran) != 1 {
 		t.Fatalf("the sweep skipped a refused session: %v", *ran)
+	}
+}
+
+// A render sshd -t refuses is put back every tick, but told once per
+// render, not every 3 s.
+func TestAgent_RefusedRenderToldOnce(t *testing.T) {
+	r, _ := gateRig(t, &baseline.Baseline{Files: map[string]baseline.FileEntry{
+		"/etc/ssh/sshd_config": {Content: []byte("UsePAM yes\n")}, "/etc/pam.d/sshd": {Content: []byte(pamBase)}}})
+	// No folding of repeats: what is told is what the agent says.
+	log, err := incident.Open(filepath.Join(t.TempDir(), "i.jsonl"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	log.OnWrite = func(in incident.Incident) { r.got = append(r.got, in) }
+	r.a.log = log
+	refuse := true
+	r.a.ssh.Output = func(name string, args ...string) ([]byte, error) {
+		if refuse && len(args) > 0 && args[0] == "-t" {
+			return []byte("line 3: Bad configuration option"), errors.New("exit status 255")
+		}
+		return []byte("passwordauthentication no\n"), nil
+	}
+	testfs.File(t, r.root, "etc/pam.d/sshd", pamBase, 0o644)
+	for i := 0; i < 3; i++ {
+		testfs.File(t, r.root, "etc/ssh/sshd_config", "UsePAM yes\n# drift\n", 0o644)
+		r.a.guard()
+	}
+	if got := r.kind("ssh-config"); len(got) != 1 {
+		t.Fatalf("ssh-config told %d times: %+v", len(got), got)
+	}
+	refuse = false
+	r.a.guard()
+	refuse = true
+	testfs.File(t, r.root, "etc/ssh/sshd_config", "UsePAM yes\n# drift\n", 0o644)
+	r.a.guard()
+	if got := r.kind("ssh-config"); len(got) != 2 {
+		t.Fatalf("after a good render: told %d times", len(got))
 	}
 }

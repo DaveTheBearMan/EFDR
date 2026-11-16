@@ -40,8 +40,13 @@ func (a *agent) assertSSH(report bool) {
 		return
 	}
 	a.gateOffSaid = false
-	if err != nil {
+	// The same refusal comes back every tick until the render changes or
+	// takes: it is told once.
+	if err == nil {
+		a.sshErrSaid = ""
+	} else if err.Error() != a.sshErrSaid {
 		a.record(incident.Incident{Kind: "ssh-config", Action: "alert", Severity: model.SevCritical, Detail: err.Error()})
+		a.sshErrSaid = err.Error()
 	}
 }
 
