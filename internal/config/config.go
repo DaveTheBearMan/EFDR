@@ -272,6 +272,11 @@ func (c *Config) Validate() error {
 // userName is what useradd accepts by default.
 var userName = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+// grayName is a gray account as the competition may name it: anything an
+// sshd AllowUsers/Match list and a PAM user list carry as one plain name
+// (no space, comma, colon, pattern or leading dash).
+var grayName = regexp.MustCompile(`^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,31}\$?$`)
+
 // validateSSH refuses a gate that would touch a gray account or that the
 // recovery account could not get through. An empty jump is refused before
 // this: the gate pins every other account to it.
@@ -286,13 +291,18 @@ func (c *Config) validateSSH() error {
 	if s.Grace.Duration < 10*time.Second {
 		return fmt.Errorf("ssh.grace: %s is under 10s", s.Grace.Duration)
 	}
-	names := append(append(slices.Clone(s.Blue), s.Auto...), c.GrayUsers...)
+	names := append(slices.Clone(s.Blue), s.Auto...)
 	if s.Recovery != "" {
 		names = append(names, s.Recovery)
 	}
 	for _, u := range names {
 		if !userName.MatchString(u) {
 			return fmt.Errorf("ssh: bad user %q", u)
+		}
+	}
+	for _, u := range c.GrayUsers {
+		if !grayName.MatchString(u) {
+			return fmt.Errorf("ssh: bad gray user %q", u)
 		}
 	}
 	for _, u := range append(append(slices.Clone(s.Blue), s.Auto...), s.Recovery) {

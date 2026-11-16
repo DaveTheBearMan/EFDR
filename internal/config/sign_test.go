@@ -37,9 +37,19 @@ func TestValidate_SSH(t *testing.T) {
 		`"ssh":{"grace":"5s"}`:                                                 "ssh.grace",
 		`"ssh":{"blue_users":["Alice"]}`:                                       "ssh: bad user",
 		`"ssh":{"auto":["a b"]}`:                                               "ssh: bad user",
+		`"gray_users":["a,b"],"ssh":{"blue_users":["alice"]}`:                  "ssh: bad gray user",
+		`"gray_users":["-x"],"ssh":{"blue_users":["alice"]}`:                   "ssh: bad gray user",
+		`"gray_users":["a*"],"ssh":{"blue_users":["alice"]}`:                   "ssh: bad gray user",
 	} {
 		if _, err := load(t, `{"jump":["192.0.2.7"],`+frag+`}`); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want %q", frag, err, want)
+		}
+	}
+	// Gray accounts are the competition's, named as it likes; only what
+	// sshd's and PAM's user lists cannot carry is refused.
+	for _, g := range []string{"Gray.Team", "GRAY1", "svc$", "gray_2"} {
+		if _, err := load(t, `{"jump":["192.0.2.7"],"gray_users":["`+g+`"],"ssh":{"blue_users":["alice"]}}`); err != nil {
+			t.Errorf("gray %q: %v", g, err)
 		}
 	}
 	// Empty jump is refused before the ssh section is looked at.
