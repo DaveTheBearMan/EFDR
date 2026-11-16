@@ -58,7 +58,7 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		rules = fw.Build(c, time.Now())
+		rules = fw.Build(c, nil, time.Now())
 		if raw, err = os.ReadFile(*path); err != nil {
 			return 0, err
 		}
@@ -127,7 +127,7 @@ func fwCmd(args []string, stdout, stderr io.Writer) (int, error) {
 // table when there was none.
 func revert(f *fw.Firewall, stdout io.Writer) error {
 	if c, err := config.Load(fwKept); err == nil {
-		if err := f.Apply(fw.Build(c, time.Now())); err == nil {
+		if err := f.Apply(fw.Build(c, nil, time.Now())); err == nil {
 			fmt.Fprintln(stdout, "reverted to the last confirmed table")
 			return nil
 		}

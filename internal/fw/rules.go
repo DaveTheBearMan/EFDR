@@ -1,6 +1,6 @@
-// Package fw is the host firewall: a default-deny policy built from the
-// deployment config, an evaluator that tests it without a kernel, and a
-// netlink translator that applies it.
+// Package fw is the host firewall: a policy-accept table built from the
+// deployment config and the fleet's blocklist, an evaluator that tests it
+// without a kernel, and a netlink translator that applies it.
 package fw
 
 import (
@@ -59,8 +59,23 @@ type Rule struct {
 	Action       Action
 }
 
-// Ruleset is the three base chains. Each has policy drop.
-type Ruleset struct{ Input, Output, Forward []Rule }
+// Ruleset is the three base chains. Each has the policy of the set: Build
+// makes it Accept (a zero Ruleset drops everything).
+type Ruleset struct {
+	Policy                 Action
+	Input, Output, Forward []Rule
+}
+
+// Block is an endpoint the fleet found malicious: packets from this box to
+// it are dropped.
+type Block struct {
+	Addr  netip.Addr
+	Proto string // "tcp" or "udp"
+	Port  uint16
+}
+
+// MaxBlocks is the most blocks one table holds.
+const MaxBlocks = 512
 
 func rule() Rule { return Rule{ICMPType: -1, Action: Accept} }
 
@@ -86,138 +101,89 @@ func union(lists ...[]config.Net) []netip.Prefix {
 	return out
 }
 
-// mirror is the rule for the reply packets of connections r allows: the
-// same addresses and ports seen from the other end, in the reply direction
-// of an established connection.
-func mirror(r Rule) Rule {
-	m := r
-	m.CT, m.Mark = CTReply, 0
-	m.Src, m.Dst = r.Dst, r.Src
-	m.SPort, m.DPort = r.DPort, r.SPort
-	switch {
-	case r.Proto == unix.IPPROTO_ICMP && r.ICMPType == 8:
-		m.ICMPType = 0 // echo-reply
-	case r.Proto == unix.IPPROTO_ICMPV6 && r.ICMPType == 128:
-		m.ICMPType = 129
+// Select is the blocks the table will hold: those that are well formed and
+// name no protected address (the jump box, the peers, ssh_from, the
+// resolver), without repeats, in a fixed order (address, protocol, port),
+// cut at MaxBlocks. over is how many valid ones the cut left out.
+func Select(c *config.Config, blocks []Block) (kept []Block, over int) {
+	protected := c.Protected()
+	for _, b := range blocks {
+		a := b.Addr.Unmap()
+		if !a.IsValid() || b.Port == 0 || b.Proto != "tcp" && b.Proto != "udp" {
+			continue
+		}
+		if slices.ContainsFunc(protected, func(p netip.Prefix) bool { return p.Contains(a) }) {
+			continue
+		}
+		kept = append(kept, Block{a, b.Proto, b.Port})
 	}
-	return m
+	slices.SortFunc(kept, func(x, y Block) int {
+		if c := x.Addr.Compare(y.Addr); c != 0 {
+			return c
+		}
+		if c := strings.Compare(x.Proto, y.Proto); c != 0 {
+			return c
+		}
+		return int(x.Port) - int(y.Port)
+	})
+	kept = slices.Compact(kept)
+	if len(kept) > MaxBlocks {
+		over, kept = len(kept)-MaxBlocks, kept[:MaxBlocks]
+	}
+	return kept, over
 }
 
-// Build turns the deployment config into the policy in force at now.
+// Build turns the deployment config and the fleet's blocks into the policy
+// in force at now.
 //
-// A connection passes only while its opening direction matches an allow
-// rule: that direction is checked on every packet, an allow rule accepts
-// that direction only, and reply packets are accepted only by the mirror
-// of such a rule. There is no rule that accepts
-// "established" as such, so a connection opened before the table was
-// loaded gets no free pass in either direction: a reverse shell goes
-// silent both ways, a session to a scored port carries on.
-func Build(c *config.Config, now time.Time) Ruleset {
-	var rs Ruleset
+// The policy is accept: what is malicious has to be found before it can be
+// blocked, and a table that dropped by default would take a scored
+// service offline. The table holds only these rules, in this order:
+// loopback and invalid-state housekeeping; the agents' own ports, open to
+// the jump box and the peers and shut to everyone else; one drop of
+// outbound and forwarded packets to each block (never inbound: the scorer
+// shares a subnet with the red team); and, with dns.pin, the DNS lockdown.
+// SSH is not filtered here: sshd's AllowUsers and the gate decide.
+func Build(c *config.Config, blocks []Block, now time.Time) Ruleset {
+	rs := Ruleset{Policy: Accept}
 	add := func(chain *[]Rule, edit func(*Rule)) {
 		r := rule()
 		edit(&r)
 		*chain = append(*chain, r)
 	}
-	// allow adds a rule to chain and its mirror to the chain the replies
-	// pass through.
-	allow := func(chain, replies *[]Rule, edit func(*Rule)) {
-		add(chain, func(r *Rule) { r.CT = CTOriginal; edit(r) })
-		*replies = append(*replies, mirror((*chain)[len(*chain)-1]))
-	}
-	// either is allow in both directions, for the operator's and the
-	// agents' own sessions: on a host that tracked nothing before the
-	// table loaded, a session already open is picked up from whichever
-	// packet comes first, and the box may speak first. The far end is
-	// pinned to the jump box or a peer, which the red team cannot hold.
-	either := func(chain, replies *[]Rule, edit func(*Rule)) {
-		allow(chain, replies, edit)
-		(*chain)[len(*chain)-1].CT = CTAny
-		(*replies)[len(*replies)-1].CT = CTAny
-	}
-	icmp := func(chain *[]Rule, proto uint8, types ...int) {
-		for _, t := range types {
-			add(chain, func(r *Rule) { r.Proto, r.ICMPType = proto, t })
-		}
-	}
-	common := func(chain *[]Rule, v6 bool) {
-		add(chain, func(r *Rule) { r.CT, r.Action = CTInvalid, Drop })
-		add(chain, func(r *Rule) { r.CT, r.Proto = CTRelated, unix.IPPROTO_ICMP })
-		if v6 {
-			add(chain, func(r *Rule) { r.CT, r.Proto = CTRelated, unix.IPPROTO_ICMPV6 })
-		}
-	}
-	xdr := union(c.Jump, c.Peers)
 	in, out, fwd := &rs.Input, &rs.Output, &rs.Forward
 
 	add(in, func(r *Rule) { r.Loopback = true })
 	add(out, func(r *Rule) { r.Loopback = true })
-	common(in, true)
-	common(out, true)
-	common(fwd, false)
+	for _, chain := range []*[]Rule{in, out, fwd} {
+		add(chain, func(r *Rule) { r.CT, r.Action = CTInvalid, Drop })
+	}
 
-	// Inbound.
-	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMP, 8 })
-	allow(in, out, func(r *Rule) { r.Proto, r.ICMPType = unix.IPPROTO_ICMPV6, 128 })
-	icmp(in, unix.IPPROTO_ICMPV6, 135, 136, 134)
-	// DHCP replies come from the server when it is known; requests (below)
-	// go to the broadcast address or to it.
-	dhcpServers := union(c.DHCPServer)
-	if c.DHCP && len(dhcpServers) == 0 {
-		add(in, func(r *Rule) { r.Proto, r.SPort, r.DPort = unix.IPPROTO_UDP, 67, 68 })
-	}
-	for _, src := range dhcpServers {
-		if !c.DHCP {
-			break
-		}
-		add(in, func(r *Rule) { r.Src, r.Proto, r.SPort, r.DPort = &src, unix.IPPROTO_UDP, 67, 68 })
-	}
-	for _, p := range c.Scored {
-		allow(in, out, func(r *Rule) { r.Proto, r.DPort = protoNum(p.Proto), p.Port })
-	}
-	jump := union(c.Jump)
-	for _, src := range union(c.Jump, c.SSHFrom) {
-		how := allow
-		if slices.Contains(jump, src) {
-			how = either
-		}
-		how(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, c.SSHPort })
-	}
-	for _, src := range xdr {
+	for _, src := range union(c.Jump, c.Peers) {
 		for _, port := range c.XDRPorts {
-			either(in, out, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
+			add(in, func(r *Rule) { r.Src, r.Proto, r.DPort = &src, unix.IPPROTO_TCP, port })
+		}
+	}
+	for _, port := range c.XDRPorts {
+		add(in, func(r *Rule) { r.Proto, r.DPort, r.Action = unix.IPPROTO_TCP, port, Drop })
+	}
+
+	kept, _ := Select(c, blocks)
+	for _, b := range kept {
+		dst := netip.PrefixFrom(b.Addr, b.Addr.BitLen())
+		for _, chain := range []*[]Rule{out, fwd} {
+			add(chain, func(r *Rule) { r.Dst, r.Proto, r.DPort, r.Action = &dst, protoNum(b.Proto), b.Port, Drop })
 		}
 	}
 
-	// Outbound.
-	icmp(out, unix.IPPROTO_ICMPV6, 135, 136, 133)
-	if c.DHCP {
-		bcast := netip.MustParsePrefix("255.255.255.255/32")
-		for _, dst := range append([]netip.Prefix{bcast}, dhcpServers...) {
-			add(out, func(r *Rule) { r.Dst, r.Proto, r.SPort, r.DPort = &dst, unix.IPPROTO_UDP, 68, 67 })
+	if c.DNS.Pin {
+		if c.DNSOn(now) && c.DNS.Resolver.IsValid() {
+			res := netip.PrefixFrom(c.DNS.Resolver, c.DNS.Resolver.BitLen())
+			add(out, func(r *Rule) { r.Mark, r.Dst, r.Proto, r.DPort = DNSMark, &res, unix.IPPROTO_UDP, 53 })
 		}
-	}
-	for _, dst := range xdr {
-		for _, port := range c.XDRPorts {
-			either(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &dst, unix.IPPROTO_TCP, port })
-		}
-	}
-	for _, d := range c.AllowOut {
-		allow(out, in, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
-	}
-	if c.DNSOn(now) && c.DNS.Resolver.IsValid() {
-		res := netip.PrefixFrom(c.DNS.Resolver, c.DNS.Resolver.BitLen())
-		allow(out, in, func(r *Rule) { r.Mark, r.Dst, r.Proto, r.DPort = DNSMark, &res, unix.IPPROTO_UDP, 53 })
-	}
-
-	// Forwarded: to and from containers. The original destination port of
-	// a published connection is the same on its packets in both directions,
-	// so that rule is its own mirror.
-	for _, p := range c.Scored {
-		add(fwd, func(r *Rule) { r.Proto, r.OrigDPort = protoNum(p.Proto), p.Port })
-	}
-	for _, d := range c.AllowOut {
-		allow(fwd, fwd, func(r *Rule) { r.Dst, r.Proto, r.DPort = &d.To.Prefix, protoNum(d.Proto), d.Port })
+		add(out, func(r *Rule) { r.Proto, r.DPort, r.Action = unix.IPPROTO_UDP, 53, Drop })
+		add(out, func(r *Rule) { r.Proto, r.DPort, r.Action = unix.IPPROTO_TCP, 53, Drop })
+		add(out, func(r *Rule) { r.Proto, r.DPort, r.Action = unix.IPPROTO_TCP, 853, Drop })
 	}
 	return rs
 }
@@ -252,7 +218,7 @@ type Packet struct {
 	Mark         uint32
 }
 
-// Verdict is the action of the first rule that matches p, or Drop.
+// Verdict is the action of the first rule that matches p, or the policy.
 func (rs Ruleset) Verdict(p Packet) Action {
 	chain := rs.Input
 	switch p.Hook {
@@ -266,7 +232,7 @@ func (rs Ruleset) Verdict(p Packet) Action {
 			return r.Action
 		}
 	}
-	return Drop
+	return rs.Policy
 }
 
 func (r Rule) matches(p Packet) bool {
@@ -374,7 +340,7 @@ func (rs Ruleset) String() string {
 	var b strings.Builder
 	b.WriteString("table inet xdr\n")
 	for hook, chain := range [][]Rule{rs.Input, rs.Output, rs.Forward} {
-		fmt.Fprintf(&b, "chain %s  # filter, priority -10, policy drop\n", [...]string{"input", "output", "forward"}[hook])
+		fmt.Fprintf(&b, "chain %s  # filter, priority -10, policy %s\n", [...]string{"input", "output", "forward"}[hook], rs.Policy)
 		for _, r := range chain {
 			fmt.Fprintf(&b, "  %s\n", r.text(hook))
 		}

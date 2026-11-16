@@ -462,7 +462,7 @@ func (a *agent) assert(report bool) {
 	drift := func(action, detail string) {
 		a.record(incident.Incident{Kind: "fw-drift", Action: action, Severity: model.SevHigh, Detail: detail})
 	}
-	rules := fw.Build(a.cfg, now)
+	rules := fw.Build(a.cfg, nil, now)
 	if text := rules.String(); text != a.applied {
 		// The DNS switch, its expiry or a reload: ours, not drift.
 		if err := a.fw.Apply(rules); err != nil {

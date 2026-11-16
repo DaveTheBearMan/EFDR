@@ -31,7 +31,7 @@ func applied(t *testing.T) (*Firewall, Ruleset) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { f.Close() })
-	rs := Build(fixture(), now)
+	rs := Build(fixture(), nil, now)
 	if err := f.Apply(rs); err != nil {
 		t.Fatal(err)
 	}

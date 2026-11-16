@@ -55,7 +55,8 @@ type Listener struct {
 	Exe   string `json:"exe"`
 }
 
-// DNS configures name resolution, which is off unless switched on.
+// DNS configures name resolution. By default DNS passes; Pin turns on the
+// lockdown, in which it is off unless switched on.
 type DNS struct {
 	Resolver netip.Addr            `json:"resolver"` // the team resolver
 	Enabled  bool                  `json:"enabled"`  // the switch
@@ -63,6 +64,7 @@ type DNS struct {
 	Allow    []string              `json:"allow"`    // names the stub may forward
 	Hosts    map[string]netip.Addr `json:"hosts"`    // written to /etc/hosts
 	Listen   string                `json:"listen"`   // where the stub listens
+	Pin      bool                  `json:"pin"`      // the lockdown: pinned files, the stub, port 53 dropped; off: DNS passes
 }
 
 // Config is one box's deployment configuration.

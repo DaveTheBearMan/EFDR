@@ -2,6 +2,7 @@ package fw
 
 import (
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,10 +38,9 @@ func nets(ss ...string) []config.Net {
 func fixture() *config.Config {
 	return &config.Config{
 		Jump: nets("192.0.2.7"), Peers: nets("192.0.2.4"), SSHFrom: nets("198.51.100.0/24"),
-		SSHPort: 22, XDRPorts: []uint16{7443}, DHCP: true,
-		Scored:   []config.Port{{Proto: "tcp", Port: 80}},
-		AllowOut: []config.Dest{{To: nets("192.0.2.3")[0], Proto: "tcp", Port: 3306}},
-		DNS:      config.DNS{Resolver: resolver},
+		SSHPort: 22, XDRPorts: []uint16{7443},
+		Scored: []config.Port{{Proto: "tcp", Port: 80}},
+		DNS:    config.DNS{Resolver: resolver},
 	}
 }
 
@@ -73,197 +73,115 @@ func check(t *testing.T, rs Ruleset, cases []vcase) {
 	}
 }
 
-func TestVerdict_Inbound(t *testing.T) {
-	check(t, Build(fixture(), now), []vcase{
-		{"scored from stranger", tcp(HookInput, stranger, box, 50000, 80), Accept},
-		{"unknown port", tcp(HookInput, stranger, box, 50000, 4444), Drop},
-		{"ssh from jump", tcp(HookInput, jump, box, 50000, 22), Accept},
-		{"ssh from gray subnet", tcp(HookInput, gray, box, 50000, 22), Accept},
-		{"ssh from stranger", tcp(HookInput, stranger, box, 50000, 22), Drop},
-		{"ssh from peer", tcp(HookInput, peer, box, 50000, 22), Drop},
-		{"xdr from peer", tcp(HookInput, peer, box, 50000, 7443), Accept},
-		{"xdr from jump", tcp(HookInput, jump, box, 50000, 7443), Accept},
-		{"xdr from stranger", tcp(HookInput, stranger, box, 50000, 7443), Drop},
-		{"udp to scored tcp port", udp(HookInput, stranger, box, 50000, 80), Drop},
-		{"echo request in", echo(HookInput, stranger, box), Accept},
-		{"dhcp reply", udp(HookInput, resolver, box, 67, 68), Accept},
+func blk(addr netip.Addr, proto string, port uint16) Block {
+	return Block{Addr: addr, Proto: proto, Port: port}
+}
+
+func TestBuild_PolicyAccept(t *testing.T) {
+	rs := Build(fixture(), nil, now)
+	if rs.Policy != Accept {
+		t.Fatalf("policy %v", rs.Policy)
+	}
+	if !strings.Contains(rs.String(), "chain output  # filter, priority -10, policy accept") {
+		t.Fatalf("String() does not say policy accept:\n%s", rs)
+	}
+	check(t, rs, []vcase{
+		{"out to anywhere", tcp(HookOutput, box, stranger, 40000, 443), Accept},
+		{"in from anywhere", udp(HookInput, stranger, box, 5000, 53), Accept},
+		{"forwarded", tcp(HookForward, stranger, db, 40000, 80), Accept},
+		{"in to ssh from anywhere", tcp(HookInput, gray, box, 40000, 22), Accept},
 	})
 }
 
-func TestVerdict_Outbound(t *testing.T) {
-	lo := tcp(HookOutput, netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.1"), 50000, 9000)
-	lo.Loopback = true
-	check(t, Build(fixture(), now), []vcase{
-		{"to stranger", tcp(HookOutput, box, stranger, 50000, 443), Drop},
-		{"xdr to peer", tcp(HookOutput, box, peer, 50000, 7443), Accept},
-		{"xdr to jump", tcp(HookOutput, box, jump, 50000, 7443), Accept},
-		{"jump other port", tcp(HookOutput, box, jump, 50000, 4444), Drop},
-		{"allow_out", tcp(HookOutput, box, db, 50000, 3306), Accept},
-		{"allow_out host, other port", tcp(HookOutput, box, db, 50000, 22), Drop},
-		{"echo request out", echo(HookOutput, box, stranger), Drop},
-		{"dhcp request", udp(HookOutput, box, netip.MustParseAddr("255.255.255.255"), 68, 67), Accept},
-		{"loopback", lo, Accept},
+func TestBuild_Blocks(t *testing.T) {
+	rs := Build(fixture(), []Block{blk(stranger, "tcp", 4444)}, now)
+	other := netip.MustParseAddr("203.0.113.10")
+	check(t, rs, []vcase{
+		{"out to the block", tcp(HookOutput, box, stranger, 40000, 4444), Drop},
+		{"forwarded to the block", tcp(HookForward, db, stranger, 40000, 4444), Drop},
+		{"same address, other port", tcp(HookOutput, box, stranger, 40000, 4445), Accept},
+		{"same endpoint, other protocol", udp(HookOutput, box, stranger, 40000, 4444), Accept},
+		{"same port, other address", tcp(HookOutput, box, other, 40000, 4444), Accept},
 	})
+}
+
+// The scorer shares a subnet with the red team: nothing inbound is cut.
+func TestBuild_InboundNeverBlocked(t *testing.T) {
+	rs := Build(fixture(), []Block{blk(stranger, "tcp", 4444)}, now)
+	in := tcp(HookInput, stranger, box, 4444, 80)
+	reply := tcp(HookInput, stranger, box, 4444, 40000)
+	reply.Reply, reply.State = true, StateEstablished
+	check(t, rs, []vcase{{"in from the block's address", in, Accept}, {"a reply from it", reply, Accept}})
+}
+
+func TestBuild_ProtectedNeverBlocked(t *testing.T) {
 	c := fixture()
-	c.DHCP = false
-	check(t, Build(c, now), []vcase{
-		{"dhcp off, request", udp(HookOutput, box, resolver, 68, 67), Drop},
-		{"dhcp off, reply", udp(HookInput, resolver, box, 67, 68), Drop},
-	})
-}
-
-func TestVerdict_EstablishedOriginalDirectionNeedsAllow(t *testing.T) {
-	est := func(p Packet, reply bool) Packet { p.State, p.Reply = StateEstablished, reply; return p }
-	inv := tcp(HookInput, stranger, box, 50000, 80)
-	inv.State = StateInvalid
-	check(t, Build(fixture(), now), []vcase{
-		{"reverse shell, our packets", est(tcp(HookOutput, box, stranger, 50000, 9999), false), Drop},
-		// Data from the far end would still reach the shell's stdin.
-		{"reverse shell, their replies", est(tcp(HookInput, stranger, box, 9999, 50000), true), Drop},
-		{"reverse shell from a scored source port", est(tcp(HookOutput, box, stranger, 80, 9999), false), Drop},
-		{"its replies", est(tcp(HookInput, stranger, box, 9999, 80), true), Drop},
-		{"reply from a stranger on the xdr port", est(tcp(HookInput, stranger, box, 7443, 50000), true), Drop},
-		{"ssh reply to jump", est(tcp(HookOutput, box, jump, 22, 50000), true), Accept},
-		{"ssh reply to stranger", est(tcp(HookOutput, box, stranger, 22, 50000), true), Drop},
-		{"xdr reply to peer", est(tcp(HookOutput, box, peer, 7443, 50000), true), Accept},
-		{"allow_out reply", est(tcp(HookInput, db, box, 3306, 50000), true), Accept},
-		{"echo reply out", est(Packet{Hook: HookOutput, Proto: unix.IPPROTO_ICMP, Src: box, Dst: stranger, ICMPType: 0}, true), Accept},
-		{"echo reply in", est(Packet{Hook: HookInput, Proto: unix.IPPROTO_ICMP, Src: stranger, Dst: box, ICMPType: 0}, true), Drop},
-		{"bind shell, their packets", est(tcp(HookInput, stranger, box, 50000, 4444), false), Drop},
-		{"xdr reply from peer", est(tcp(HookInput, peer, box, 7443, 50000), true), Accept},
-		{"scored reply out", est(tcp(HookOutput, box, stranger, 80, 50000), true), Accept},
-		{"scored original in", est(tcp(HookInput, stranger, box, 50000, 80), false), Accept},
-		{"invalid to scored", inv, Drop},
-	})
-}
-
-func TestVerdict_DNS(t *testing.T) {
-	q := func(dst netip.Addr, mark uint32) Packet {
-		p := udp(HookOutput, box, dst, 50000, 53)
-		p.Mark = mark
-		return p
+	bare := Build(c, nil, now).String()
+	blocks := []Block{blk(jump, "tcp", 22), blk(peer, "tcp", 7443), blk(gray, "tcp", 22), blk(resolver, "udp", 53),
+		{Addr: stranger, Proto: "icmp", Port: 1}, {Addr: stranger, Proto: "tcp"}, {Proto: "tcp", Port: 1}}
+	if got := Build(c, blocks, now).String(); got != bare {
+		t.Fatalf("a protected or malformed block reached the table:\n%s", got)
 	}
-	off := fixture()
-	on := fixture()
-	on.DNS.Enabled = true
-	expired := fixture()
-	expired.DNS.Enabled, expired.DNS.Expires = true, now.Add(-time.Second)
-	answer := func(src netip.Addr) Packet {
-		p := udp(HookInput, src, box, 53, 50000)
-		p.State, p.Reply = StateEstablished, true
-		return p
+}
+
+func TestBuild_AgentPorts(t *testing.T) {
+	rs := Build(fixture(), nil, now)
+	check(t, rs, []vcase{
+		{"jump box to the agent port", tcp(HookInput, jump, box, 40000, 7443), Accept},
+		{"peer to the agent port", tcp(HookInput, peer, box, 40000, 7443), Accept},
+		{"stranger to the agent port", tcp(HookInput, stranger, box, 40000, 7443), Drop},
+		{"stranger to ssh", tcp(HookInput, stranger, box, 40000, 22), Accept},
+		{"box to a stranger's 7443", tcp(HookOutput, box, stranger, 40000, 7443), Accept},
+	})
+}
+
+func TestBuild_BlockCap(t *testing.T) {
+	var blocks []Block
+	for i := 0; i < 600; i++ {
+		blocks = append(blocks, blk(netip.AddrFrom4([4]byte{203, 0, byte(i >> 8), byte(i)}), "tcp", 4444))
 	}
-	check(t, Build(off, now), []vcase{{"switch off", q(resolver, DNSMark), Drop}, {"answer, switch off", answer(resolver), Drop}})
-	check(t, Build(expired, now), []vcase{{"switch expired", q(resolver, DNSMark), Drop}})
-	check(t, Build(on, now), []vcase{
-		{"agent to resolver", q(resolver, DNSMark), Accept},
-		{"answer", answer(resolver), Accept},
-		{"answer from another server", answer(stranger), Drop},
-		{"unmarked to resolver", q(resolver, 0), Drop},
-		{"marked to another server", q(netip.MustParseAddr("203.0.113.53"), DNSMark), Drop},
-		{"tcp 53", tcp(HookOutput, box, resolver, 50000, 53), Drop},
-		{"tcp 853", tcp(HookOutput, box, stranger, 50000, 853), Drop},
-	})
-}
-
-func TestVerdict_Forward(t *testing.T) {
-	ctr := netip.MustParseAddr("172.17.0.2")
-	dnat := func(orig uint16) Packet {
-		p := tcp(HookForward, stranger, ctr, 50000, 80)
-		p.DNAT, p.OrigDPort = true, orig
-		return p
-	}
-	est := func(p Packet) Packet { p.State, p.Reply = StateEstablished, true; return p }
-	reply := est(tcp(HookForward, ctr, stranger, 80, 50000))
-	reply.DNAT, reply.OrigDPort = true, 80
-	check(t, Build(fixture(), now), []vcase{
-		{"published scored port", dnat(80), Accept},
-		{"published other port", dnat(8081), Drop},
-		{"not dnat", tcp(HookForward, stranger, ctr, 50000, 80), Drop},
-		{"container egress", tcp(HookForward, ctr, stranger, 50000, 443), Drop},
-		{"container to allow_out", tcp(HookForward, ctr, db, 50000, 3306), Accept},
-		{"published scored port, reply", reply, Accept},
-		{"reply of a connection that was never allowed", est(tcp(HookForward, ctr, stranger, 80, 50000)), Drop},
-		{"container reverse shell, their replies", est(tcp(HookForward, stranger, ctr, 443, 50000)), Drop},
-		{"allow_out reply", est(tcp(HookForward, db, ctr, 3306, 50000)), Accept},
-	})
-}
-
-func TestVerdict_IPv6(t *testing.T) {
-	c := fixture()
-	c.SSHFrom = nets("2001:db8::/32")
-	box6 := netip.MustParseAddr("2001:db8::5")
-	ns := Packet{Hook: HookInput, State: StateNew, Proto: unix.IPPROTO_ICMPV6, Src: box6, Dst: box6, ICMPType: 135}
-	mapped := tcp(HookInput, netip.MustParseAddr("::ffff:192.0.2.7"), box, 50000, 22)
-	check(t, Build(c, now), []vcase{
-		{"ssh v6 allowed", tcp(HookInput, netip.MustParseAddr("2001:db8::9"), box6, 50000, 22), Accept},
-		{"ssh v6 stranger", tcp(HookInput, netip.MustParseAddr("2001:dead::9"), box6, 50000, 22), Drop},
-		{"scored v6", tcp(HookInput, netip.MustParseAddr("2001:dead::9"), box6, 50000, 80), Accept},
-		{"neighbour solicit", ns, Accept},
-		{"v4-mapped jump", mapped, Accept},
-	})
-}
-
-func TestString(t *testing.T) {
-	s := Build(fixture(), now).String()
-	for _, want := range []string{"chain input", "chain output", "chain forward", " ip saddr 192.0.2.7 tcp dport 22 accept", "ct direction original ip saddr 198.51.100.0/24 tcp dport 22 accept",
-		"ct direction reply ct state established,related tcp sport 80 accept",
-		" ip saddr 192.0.2.4 tcp sport 7443 accept", "ip daddr 192.0.2.3 tcp dport 3306 accept", "ct original proto-dst 80 accept"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("String() lacks %q:\n%s", want, s)
+	rs := Build(fixture(), blocks, now)
+	n := 0
+	for _, r := range rs.Output {
+		if r.Action == Drop && r.CT != CTInvalid {
+			n++
 		}
 	}
-	if strings.Contains(s, "established,related accept") {
-		t.Error("a reply rule that accepts any connection")
+	if n != MaxBlocks {
+		t.Fatalf("%d drops, want %d", n, MaxBlocks)
 	}
-	if strings.Contains(s, "dport 53") {
-		t.Error("DNS rule present with the switch off")
-	}
-}
-
-// A connection open when conntrack starts (a host that was tracking
-// nothing before our table) is picked up from whichever packet comes
-// first, and that packet's direction becomes "original". The operator's
-// session from the jump box, and the agents' own, must survive the box
-// speaking first; nothing else gets that latitude.
-func TestVerdict_JumpSessionPickedUpMidStream(t *testing.T) {
-	picked := func(p Packet, reply bool) Packet {
-		p.Reply = reply
-		if reply {
-			p.State = StateEstablished
-		}
-		return p
-	}
-	check(t, Build(fixture(), now), []vcase{
-		{"box speaks first to jump", picked(tcp(HookOutput, box, jump, 22, 50000), false), Accept},
-		{"then jump's packets", picked(tcp(HookInput, jump, box, 50000, 22), true), Accept},
-		{"xdr: box speaks first to peer", picked(tcp(HookOutput, box, peer, 7443, 50000), false), Accept},
-		{"then the peer's packets", picked(tcp(HookInput, peer, box, 50000, 7443), true), Accept},
-		{"ssh from the gray subnet stays strict", picked(tcp(HookOutput, box, gray, 22, 50000), false), Drop},
-		{"so do its packets", picked(tcp(HookInput, gray, box, 50000, 22), true), Drop},
-		{"scored stays strict", picked(tcp(HookOutput, box, stranger, 80, 50000), false), Drop},
-		{"from source port 22 to a stranger", picked(tcp(HookOutput, box, stranger, 22, 50000), false), Drop},
-		{"jump's ssh port is not jump's any port", picked(tcp(HookOutput, box, jump, 4444, 50000), false), Drop},
+	check(t, rs, []vcase{
+		{"the lowest address is kept", tcp(HookOutput, box, blocks[0].Addr, 40000, 4444), Drop},
+		{"the highest is cut", tcp(HookOutput, box, blocks[599].Addr, 40000, 4444), Accept},
 	})
+	rev := slices.Clone(blocks)
+	slices.Reverse(rev)
+	if Build(fixture(), rev, now).String() != rs.String() {
+		t.Fatal("the table depends on the order of the blocks")
+	}
+	if _, over := Select(fixture(), blocks); over != 600-MaxBlocks {
+		t.Fatalf("over = %d", over)
+	}
 }
 
-// DHCP may not carry traffic to or from anywhere: requests go to the
-// broadcast address or the DHCP server, replies come from the server.
-func TestVerdict_DHCPPinned(t *testing.T) {
-	bcast := netip.MustParseAddr("255.255.255.255")
-	server := netip.MustParseAddr("192.0.2.254")
+func TestBuild_DNSPin(t *testing.T) {
+	q := udp(HookOutput, box, resolver, 40000, 53)
+	check(t, Build(fixture(), nil, now), []vcase{{"no pin: dns passes", q, Accept}})
 	c := fixture()
-	check(t, Build(c, now), []vcase{
-		{"broadcast request", udp(HookOutput, box, bcast, 68, 67), Accept},
-		{"request to a stranger", udp(HookOutput, box, stranger, 68, 67), Drop},
-		{"unknown server: reply", udp(HookInput, server, box, 67, 68), Accept},
+	c.DNS.Pin = true
+	marked := q
+	marked.Mark = DNSMark
+	dot := tcp(HookOutput, box, resolver, 40000, 853)
+	check(t, Build(c, nil, now), []vcase{
+		{"pin, switch off: dns dropped", q, Drop},
+		{"pin, switch off: even the stub's", marked, Drop},
+		{"pin: dns over tcp dropped", tcp(HookOutput, box, resolver, 40000, 53), Drop},
+		{"pin: dot dropped", dot, Drop},
+		{"pin: other traffic passes", tcp(HookOutput, box, stranger, 40000, 443), Accept},
 	})
-	c.DHCPServer = []config.Net{nets("192.0.2.254")[0]}
-	check(t, Build(c, now), []vcase{
-		{"broadcast request", udp(HookOutput, box, bcast, 68, 67), Accept},
-		{"renewal to the server", udp(HookOutput, box, server, 68, 67), Accept},
-		{"request to a stranger", udp(HookOutput, box, stranger, 68, 67), Drop},
-		{"reply from the server", udp(HookInput, server, box, 67, 68), Accept},
-		{"reply from a stranger", udp(HookInput, stranger, box, 67, 68), Drop},
+	c.DNS.Enabled = true
+	check(t, Build(c, nil, now), []vcase{
+		{"pin, switch on: the stub's query passes", marked, Accept},
+		{"pin, switch on: anyone else's is dropped", q, Drop},
 	})
 }
