@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -308,5 +310,37 @@ func TestLadder_LeavesChangedGatewayAndAddress(t *testing.T) {
 		if len(h.ran) != 0 {
 			t.Fatalf("%s: ran %q", name, h.ran)
 		}
+	}
+}
+
+func TestLadder_HostsDenyWrittenAtomically(t *testing.T) {
+	h := newHealRig(t)
+	h.a.readFile, h.a.writeFile = nil, nil
+	h.a.root = t.TempDir()
+	deny := filepath.Join(h.a.root, "etc/hosts.deny")
+	if err := os.MkdirAll(filepath.Dir(deny), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deny, []byte("ALL: 192.0.2.7\nsshd: 203.0.113.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(deny)
+	h.cutOff()
+	h.step()
+	h.now = h.now.Add(3 * time.Second)
+	h.step()
+	b, err := os.ReadFile(deny)
+	if err != nil || string(b) != "sshd: 203.0.113.5\n" {
+		t.Fatalf("hosts.deny %q %v", b, err)
+	}
+	after, _ := os.Stat(deny)
+	if after.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v, want 0600 kept", after.Mode().Perm())
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("hosts.deny rewritten in place, not through a rename")
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(deny)); len(ents) != 1 {
+		t.Fatalf("temporary files left: %v", ents)
 	}
 }

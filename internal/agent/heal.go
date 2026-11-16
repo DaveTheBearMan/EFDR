@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"xdr/internal/heal"
@@ -59,7 +60,45 @@ func (a *agent) writeF(path string, b []byte) error {
 	if a.writeFile != nil {
 		return a.writeFile(path, b)
 	}
-	return os.WriteFile(path, b, 0o644)
+	return writeAtomic(path, b, 0o644)
+}
+
+// writeAtomic replaces path through a temporary file in its directory and a
+// rename, so a reader never sees half a file. An existing file's mode and
+// owner are kept; a new one gets mode.
+func writeAtomic(path string, b []byte, mode os.FileMode) error {
+	uid, gid := -1, -1
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+		if s, ok := st.Sys().(*syscall.Stat_t); ok {
+			uid, gid = int(s.Uid), int(s.Gid)
+		}
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".xdr-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, err = tmp.Write(b)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(name, mode)
+	}
+	if err == nil && uid >= 0 && (uid != os.Getuid() || gid != os.Getgid()) {
+		err = os.Chown(name, uid, gid)
+	}
+	if err == nil {
+		err = os.Rename(name, path)
+	}
+	if err != nil {
+		os.Remove(name)
+	}
+	return err
 }
 
 // isolated reports whether the box has lost etcd and every mesh peer for

@@ -122,7 +122,7 @@ type agent struct {
 	linkSnap  linkSnap                                          // the network as first found, for the ladder
 	out       func(name string, args ...string) ([]byte, error) // command output; nil: exec
 	readFile  func(string) ([]byte, error)                      // nil: os.ReadFile
-	writeFile func(string, []byte) error                        // nil: os.WriteFile
+	writeFile func(string, []byte) error                        // nil: writeAtomic
 	mesh      meshLink                                          // nil: no peer links
 	hunts     *hunter                                           // nil: no hunts run here
 	search    func(context.Context, *hunt.Request) hunt.Result
