@@ -1,6 +1,6 @@
 VERSION := $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build bpf test test-root e2e e2e-fleet remote-check remote-reset remote-fleet remote-gate remote-block remote-detect remote-console remote-protect
+.PHONY: build bpf embed-baseline test test-root e2e e2e-fleet remote-check remote-reset remote-fleet remote-gate remote-block remote-detect remote-console remote-protect
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X xdr/internal/cli.Version=$(VERSION)" -o bin/xdr ./cmd/xdr
@@ -9,6 +9,15 @@ build:
 # libbpf-dev). The results are checked in: a plain build needs none of it.
 bpf:
 	go generate ./internal/sensor
+
+# Rebuilds the embedded baseline from a clean image mounted (read-only is
+# fine) at IMAGE_ROOT, then the binary that carries it. Run as root so the
+# capture can read every file.
+EMBED_OUT ?= internal/baseline/data/base.json.gz
+embed-baseline: build
+	@test -n "$(IMAGE_ROOT)" || { echo "set IMAGE_ROOT to the mounted clean image"; exit 1; }
+	bin/xdr capture --root "$(IMAGE_ROOT)" --out "$(EMBED_OUT)"
+	$(MAKE) build
 
 test:
 	go test ./...
