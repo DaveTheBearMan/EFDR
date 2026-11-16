@@ -70,7 +70,8 @@ type Incident struct {
 // foldKey is what makes two incidents the same one happening again.
 type foldKey struct {
 	kind, action, exe string
-	pid               int // kills only: each kill is its own line
+	host, path        string // the controller's log holds every host; a drift finding is about one path
+	pid               int    // kills only: each kill is its own line
 	uid               uint32
 	remote            Endpoint
 	hasRemote         bool
@@ -157,7 +158,7 @@ func (l *Log) Add(in Incident) (written bool, err error) {
 	if in.Time.IsZero() {
 		in.Time = now
 	}
-	key := foldKey{kind: in.Kind, action: in.Action, exe: in.Exe, uid: in.UID, detail: in.Detail}
+	key := foldKey{kind: in.Kind, action: in.Action, exe: in.Exe, host: in.Host, path: in.Path, uid: in.UID, detail: in.Detail}
 	if in.Remote != nil {
 		key.remote, key.hasRemote = *in.Remote, true
 	}

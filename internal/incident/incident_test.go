@@ -303,3 +303,34 @@ func TestLog_RotatesAtMaxSize(t *testing.T) {
 		t.Fatalf("last line %+v", got)
 	}
 }
+
+// The controller's log holds every host's incidents, and a drift finding
+// is about one path: the same words from another host or about another
+// file is another incident, not a repeat.
+func TestLog_FoldKeyHasHostAndPath(t *testing.T) {
+	l, err := Open(filepath.Join(t.TempDir(), "i.jsonl"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var got []Incident
+	l.OnWrite = func(in Incident) { got = append(got, in) }
+	at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	base := Incident{Time: at, Kind: "file-drift", Action: "alert", Detail: "cron added: new file", Host: "web01", Path: "/etc/cron.d/a"}
+	other := func(edit func(*Incident)) Incident { in := base; edit(&in); return in }
+	for _, in := range []Incident{
+		base,
+		base, // a real repeat: folded
+		other(func(i *Incident) { i.Host = "db01" }),
+		other(func(i *Incident) { i.Path = "/etc/cron.d/b" }),
+		other(func(i *Incident) { i.Kind, i.Detail = "session-pending", "session 5 from 192.0.2.7 (ends in 1m30s)" }),
+		other(func(i *Incident) { i.Kind, i.Detail, i.Host = "session-pending", "session 5 from 192.0.2.7 (ends in 1m30s)", "db01" }),
+	} {
+		if _, err := l.Add(in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 5 {
+		t.Fatalf("%d written, want 5 (one repeat folded): %+v", len(got), got)
+	}
+}
