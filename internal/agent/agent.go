@@ -145,6 +145,7 @@ type agent struct {
 	disabled     map[string]bool                                       // accounts the agent locked
 	userSaid     map[string]bool                                       // new accounts already alerted on
 	recoverySaid bool                                                  // recovery-missing was recorded
+	ordersDone   map[string]bool                                       // (kind/name/at) of file and proc orders already acted on, this boot
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID

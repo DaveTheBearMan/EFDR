@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,7 @@ type orders struct {
 	Users    map[string]bool `json:"users"`    // new accounts approved
 	Disabled map[string]bool `json:"disabled"` // accounts the agent locked
 	BootID   string          `json:"boot_id"`  // session ids mean nothing across boots
+	Done     map[string]bool `json:"done"`     // file and proc orders acted on, this boot
 }
 
 // onOrder takes in one order from To(host).
@@ -42,13 +44,16 @@ func (a *agent) onOrder(o fleet.Order) {
 	}
 	a.initOrders()
 	switch o.Kind {
-	case "file":
-		if !o.Deleted {
-			a.fileOrder(o.Name, v.Verdict)
+	case "file", "proc":
+		// etcd replays what it holds on every connect and nothing deletes an
+		// order: one is acted on once, and never when it was put before this
+		// boot (the same pid and hash can be a restarted service).
+		if o.Deleted || !a.firstTime(o.Kind, o.Name, v.Verdict, v.SHA256, v.At) {
+			return
 		}
-		return
-	case "proc":
-		if !o.Deleted && v.Verdict == "kill" {
+		if o.Kind == "file" {
+			a.fileOrder(o.Name, v.Verdict)
+		} else if v.Verdict == "kill" {
 			a.procOrder(o.Name, v.SHA256)
 		}
 		return
@@ -98,7 +103,7 @@ func (a *agent) initOrders() {
 func (a *agent) ordersPath() string { return filepath.Join(a.state, "orders.json") }
 
 func (a *agent) saveOrders() {
-	b, _ := json.Marshal(orders{a.approved, a.ended, a.okUsers, a.disabled, a.bootID})
+	b, _ := json.Marshal(orders{a.approved, a.ended, a.okUsers, a.disabled, a.bootID, a.ordersDone})
 	if err := os.MkdirAll(a.state, 0o700); err == nil {
 		tmp := a.ordersPath() + ".tmp"
 		if os.WriteFile(tmp, b, 0o600) == nil && os.Rename(tmp, a.ordersPath()) == nil {
@@ -114,11 +119,11 @@ func (a *agent) loadOrders() {
 	if b, err := collect.ReadFile(a.ordersPath(), 4<<20); err == nil {
 		json.Unmarshal(b, &o)
 	}
-	a.approved, a.ended, a.okUsers, a.disabled = o.Approved, o.Ended, o.Users, o.Disabled
+	a.approved, a.ended, a.okUsers, a.disabled, a.ordersDone = o.Approved, o.Ended, o.Users, o.Disabled, o.Done
 	a.bootID, a.btime = bootInfo(a.root)
 	if o.BootID != a.bootID {
 		// Kept across a restart of the agent, not of the box.
-		a.approved, a.ended = nil, nil
+		a.approved, a.ended, a.ordersDone = nil, nil, nil
 	}
 	a.initOrders()
 }
@@ -140,4 +145,28 @@ func bootInfo(root string) (id string, btime int64) {
 		}
 	}
 	return id, btime
+}
+
+// maxDone bounds the orders remembered as acted on.
+const maxDone = 1000
+
+// firstTime reports whether the file or proc order (kind, name, verdict, sha) put at `at`
+// should be acted on: it was put after this boot began (within the clock
+// slack) and has not been acted on yet. It records the order as acted on.
+// The caller holds a.mu.
+func (a *agent) firstTime(kind, name, verdict, sha string, at int64) bool {
+	if a.btime > 0 && at+bootSlack < a.btime {
+		a.logf("order %s/%s: put before this boot; ignored", kind, name)
+		return false
+	}
+	key := fmt.Sprintf("%s/%s/%s/%s/%d", kind, name, verdict, sha, at)
+	if a.ordersDone[key] {
+		return false
+	}
+	if a.ordersDone == nil || len(a.ordersDone) >= maxDone {
+		a.ordersDone = map[string]bool{}
+	}
+	a.ordersDone[key] = true
+	a.saveOrders()
+	return true
 }
