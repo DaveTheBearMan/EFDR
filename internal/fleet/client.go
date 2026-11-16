@@ -69,7 +69,12 @@ type Client struct {
 	// Set while Run runs: Offer hands peers' sets on through them.
 	onRules    func(*rules.Set)
 	onIncident func(incident.Incident)
+	told       map[string]time.Time // class of reason a peer's set was refused: when last told
 }
+
+// refuseEvery is how often a refusal of peers' sets for one reason is told:
+// a peer may post as fast as the mesh's rate allows.
+const refuseEvery = time.Minute
 
 // New is a client for host. cachePath is where the last verified set is
 // kept; pub is the controller's rule-signing key.
@@ -178,20 +183,22 @@ func (c *Client) writeCache(b []byte) error {
 
 // take verifies an envelope and, if it is newer, caches it and hands it
 // to onRules (when not nil). It reports whether the set was taken.
-func (c *Client) take(b []byte, onRules func(*rules.Set), onIncident func(incident.Incident)) bool {
-	refuse := func(why string) {
-		if onIncident != nil {
+func (c *Client) take(b []byte, onRules func(*rules.Set), onIncident func(incident.Incident), offered bool) bool {
+	// A peer's sets (offered) are refused aloud once a minute per class
+	// of reason.
+	refuse := func(class, why string) {
+		if onIncident != nil && (!offered || c.tell(class, time.Now())) {
 			onIncident(incident.Incident{Time: time.Now(), Kind: "rules-refused", Action: "alert", Severity: model.SevCritical, Detail: why})
 		}
 	}
 	e, err := rules.Unmarshal(b)
 	if err != nil {
-		refuse(err.Error())
+		refuse("malformed", err.Error())
 		return false
 	}
 	s, err := rules.Open(e, c.pub)
 	if err != nil {
-		refuse(err.Error())
+		refuse("unverified", err.Error())
 		return false
 	}
 	// One taker at a time, so two copies of one version cannot both pass.
@@ -204,7 +211,7 @@ func (c *Client) take(b []byte, onRules func(*rules.Set), onIncident func(incide
 	case s.Version == have:
 		return false
 	case s.Version < have:
-		refuse(fmt.Sprintf("version %d is older than %d, in force", s.Version, have))
+		refuse("older", fmt.Sprintf("version %d is older than %d, in force", s.Version, have))
 		return false
 	}
 	if err := c.writeCache(b); err != nil && onIncident != nil {
@@ -221,7 +228,7 @@ func (c *Client) take(b []byte, onRules func(*rules.Set), onIncident func(incide
 
 // apply takes a set read from etcd.
 func (c *Client) apply(b []byte, onRules func(*rules.Set), onIncident func(incident.Incident)) {
-	c.take(b, onRules, onIncident)
+	c.take(b, onRules, onIncident, false)
 }
 
 // Offer takes a signed set a peer sent, as if read from etcd. Before Run
@@ -231,7 +238,22 @@ func (c *Client) Offer(b []byte) bool {
 	c.mu.Lock()
 	onRules, onIncident := c.onRules, c.onIncident
 	c.mu.Unlock()
-	return c.take(b, onRules, onIncident)
+	return c.take(b, onRules, onIncident, true)
+}
+
+// tell reports whether a refusal of a peer's set for a class of reason is
+// told now: once per refuseEvery for each.
+func (c *Client) tell(why string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.told == nil {
+		c.told = map[string]time.Time{}
+	}
+	if t, ok := c.told[why]; ok && now.Sub(t) < refuseEvery {
+		return false
+	}
+	c.told[why] = now
+	return true
 }
 
 // Envelope is the last set taken, as signed, and its version.

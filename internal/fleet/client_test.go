@@ -508,3 +508,27 @@ func TestOrders_ReachHost(t *testing.T) {
 		t.Fatalf("db01 reading web01's orders: %v", err)
 	}
 }
+
+// A peer posting forged sets as fast as the mesh lets it (20 a second) is
+// told once a minute per reason, not once per envelope.
+func TestClient_OfferedRefusalsThrottled(t *testing.T) {
+	f := newFleet(t)
+	signing(t, f)
+	a := newAgent(t, f, "127.0.0.1:1").run(t)
+	eventually(t, "run started", 3*time.Second, func() bool { _, ins := a.got(); return len(of(ins, "fleet")) == 1 })
+	_, forger, _ := ed25519.GenerateKey(rand.Reader)
+	for v := uint64(1); v <= 30; v++ {
+		r := c2(uint16(4000 + v))
+		r.SetID()
+		e, _ := rules.Sign(&rules.Set{Version: v, Rules: []rules.Rule{r}}, forger)
+		b, _ := rules.Marshal(e)
+		if a.c.Offer(b) {
+			t.Fatal("forged set taken")
+		}
+	}
+	a.c.Offer([]byte("not an envelope"))
+	time.Sleep(200 * time.Millisecond)
+	if _, ins := a.got(); len(of(ins, "rules-refused")) != 2 {
+		t.Fatalf("%d refusals", len(of(ins, "rules-refused")))
+	}
+}
