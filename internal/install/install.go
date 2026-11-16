@@ -155,11 +155,19 @@ func Install(l Layout, run Runner, binary string) (Report, error) {
 	return rep, nil
 }
 
-// Uninstall stops the units, makes everything of the manifest mutable again,
-// removes it and the manifest, and deletes the firewall table. Nothing
-// installed is a success.
+// Uninstall stops the guards and the timer, makes everything of the manifest
+// mutable again, removes it and the manifest, deletes the firewall table,
+// reloads systemd and last stops the agent's unit: the agent may be the
+// caller, and stopping it ends the process. Every step runs whatever the
+// others did; nothing installed is a success.
 func Uninstall(l Layout, run Runner) error {
-	run("systemctl", append([]string{"disable", "--now"}, Units...)...)
+	var others []string
+	for _, u := range Units {
+		if u != agentUnit {
+			others = append(others, u)
+		}
+	}
+	_, gerr := run("systemctl", append([]string{"disable", "--now"}, others...)...)
 	m, err := ReadManifest(l)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -184,8 +192,19 @@ func Uninstall(l Layout, run Runner) error {
 	}
 	run("nft", "delete", "table", "inet", "xdr")
 	run("systemctl", "daemon-reload")
+	_, aerr := run("systemctl", "disable", "--now", agentUnit)
+	// A unit that was never there is not a failure: only report when there was an install.
+	if len(m.Entries) > 0 {
+		for _, e := range []error{gerr, aerr} {
+			if e != nil {
+				errs = append(errs, "systemctl disable --now: "+e.Error())
+			}
+		}
+	}
 	if errs != nil {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
 }
+
+const agentUnit = "xdr-agent.service"

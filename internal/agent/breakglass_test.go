@@ -221,3 +221,80 @@ func TestBreakglass_UninstallRemovesTheInstall(t *testing.T) {
 		t.Fatalf("ran: %v", order[n:])
 	}
 }
+
+func uninstallRigRun(t *testing.T, r *rig, order *[]string) {
+	r.a.layout = install.DefaultLayout()
+	r.a.layout.Root = t.TempDir()
+	r.a.runner = func(name string, args ...string) ([]byte, error) {
+		*order = append(*order, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+	r.a.exit = func() { *order = append(*order, "EXIT") }
+}
+
+func TestBreakglass_UninstallSettlesAfterTheIncident(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	r.a.settle = func() {
+		if len(r.kind("uninstall")) != 1 {
+			t.Error("settle ran before the incident was recorded")
+		}
+		order = append(order, "SETTLE")
+	}
+	r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000d3", "uninstall")})
+	if len(order) < 3 || order[0] != "SETTLE" || order[len(order)-1] != "EXIT" {
+		t.Fatalf("%v", order)
+	}
+}
+
+func TestBreakglass_UninstallFailureCanBeRetried(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(r.a.layout.Root, r.a.layout.Manifest)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mf := filepath.Join(r.a.layout.Root, r.a.layout.Manifest)
+	os.WriteFile(mf, []byte("not json"), 0o600)
+	tok := mint(r, key, "00000000000000d4", "uninstall")
+	if rep := r.a.onGate(sshgate.Msg{Token: tok}); rep.OK {
+		t.Fatalf("a failed uninstall succeeded: %+v", rep)
+	}
+	for _, c := range order {
+		if c == "EXIT" {
+			t.Fatal("exited after a failure")
+		}
+	}
+	failed := false
+	for _, in := range r.kind("uninstall") {
+		failed = failed || (in.Action == "alert" && strings.Contains(in.Detail, "failed"))
+	}
+	if !failed {
+		t.Fatalf("no alert: %+v", r.kind("uninstall"))
+	}
+	os.Remove(mf)
+	if rep := r.a.onGate(sshgate.Msg{Token: tok}); !rep.OK {
+		t.Fatalf("retry refused: %+v", rep)
+	}
+	if order[len(order)-1] != "EXIT" {
+		t.Fatalf("%v", order)
+	}
+}
+
+func TestBreakglass_ExpiredUninstallInSpoolIsDropped(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	uninstallRigRun(t, r, &order)
+	tok := breakglass.Mint(breakglass.Token{V: 1, ID: "00000000000000d5", Host: "web01", Action: "uninstall", NotBefore: r.now.Add(-4 * time.Hour), Expires: r.now.Add(-3 * time.Hour)}, key)
+	os.MkdirAll(r.a.spool, 0o700)
+	f := filepath.Join(r.a.spool, "old.tok")
+	os.WriteFile(f, []byte(tok+"\n"), 0o600)
+	r.a.scanSpool()
+	if len(order) != 0 {
+		t.Fatalf("ran: %v", order)
+	}
+	if _, err := os.Stat(f); err == nil {
+		t.Fatal("expired token left in the spool")
+	}
+}

@@ -107,4 +107,7 @@ func TestToken_UninstallAction(t *testing.T) {
 	if tk.Valid("web02", now.Add(time.Minute)) == nil {
 		t.Fatal("another host's token accepted")
 	}
+	if tk.Valid("web01", now.Add(2*time.Hour)) == nil {
+		t.Fatal("expired token accepted")
+	}
 }

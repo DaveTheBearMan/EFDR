@@ -95,7 +95,10 @@ func guardCmd(args []string, stdout, stderr io.Writer) error {
 
 // uninstallCmd is `xdr uninstall --token T [--dir FLEETDIR]`: for a dead
 // agent. The token is checked here, with the fleet bundle's rule key and
-// this box's certificate name; it never reaches a shell.
+// this box's certificate name; it never reaches a shell. There is no ledger
+// here: a token is not marked used, so within its window it can be replayed
+// by anyone who holds it and is root on this box (the install is gone after
+// the first use, which also removes the certificate that names the host).
 func uninstallCmd(args []string, stdout, stderr io.Writer) error {
 	fs := flags("uninstall", stderr)
 	tok := fs.String("token", "", "an uninstall break-glass token for this host")

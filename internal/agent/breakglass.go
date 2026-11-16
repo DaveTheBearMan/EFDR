@@ -81,12 +81,12 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 }
 
 // uninstall removes the install for a valid uninstall token, once. The
-// incident is recorded (and given a moment to leave) before anything is
-// removed; the agent stops after the units are disabled, so its own
-// restart policy cannot bring it back.
+// incident is recorded (and given a moment to leave, with a.mu held) before
+// anything is removed; install.Uninstall stops the agent's own unit last, so
+// the guards cannot bring it back and the removal is not cut short.
 func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
-	a.used[t.ID] = t.Expires
-	a.saveUsed()
+	// a.mu is held, so a second use cannot start while this runs. The id is
+	// spent only once the removal worked: a failed one may be retried.
 	a.record(incident.Incident{Kind: "uninstall", Action: "uninstalled", Severity: model.SevCritical,
 		Detail: fmt.Sprintf("a signed break-glass token (%s) removed the XDR install from %s", t.ID, t.Host)})
 	if a.settle != nil {
@@ -99,6 +99,8 @@ func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
 		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: " + err.Error()})
 		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
 	}
+	a.used[t.ID] = t.Expires
+	a.saveUsed()
 	if a.exit != nil {
 		a.exit()
 	}

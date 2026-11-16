@@ -114,15 +114,16 @@ func uninstallRig(t *testing.T) (string, *fakeSys, func(host, action string, nb,
 func TestUninstallCLI(t *testing.T) {
 	_, f, mint := uninstallRig(t)
 	now := time.Now()
-	for name, tok := range map[string]string{
-		"expired":      mint("web01", "uninstall", now.Add(-3*time.Hour), now.Add(-2*time.Hour)),
-		"another host": mint("web02", "uninstall", now.Add(-time.Minute), now.Add(time.Hour)),
-		"approve":      mint("web01", "approve-session", now.Add(-time.Minute), now.Add(time.Hour)),
-		"junk":         "abc.def",
+	for name, c := range map[string]struct{ tok, msg string }{
+		"expired":      {mint("web01", "uninstall", now.Add(-3*time.Hour), now.Add(-2*time.Hour)), "expired"},
+		"not yet":      {mint("web01", "uninstall", now.Add(time.Hour), now.Add(2*time.Hour)), "not yet valid"},
+		"another host": {mint("web02", "uninstall", now.Add(-time.Minute), now.Add(time.Hour)), "another host"},
+		"approve":      {mint("web01", "approve-session", now.Add(-time.Minute), now.Add(time.Hour)), "not uninstall"},
+		"junk":         {"abc.def", "bad signature"},
 	} {
 		var so, se bytes.Buffer
-		if code := Run([]string{"uninstall", "--token", tok}, &so, &se); code == 0 {
-			t.Errorf("%s: exit 0", name)
+		if code := Run([]string{"uninstall", "--token", c.tok}, &so, &se); code == 0 || !strings.Contains(se.String(), c.msg) {
+			t.Errorf("%s: exit %d %q", name, code, se.String())
 		}
 		if len(f.cmds) != 0 {
 			t.Fatalf("%s: ran %v", name, f.cmds)
