@@ -143,8 +143,8 @@ func (a *Actions) Creds() string {
 // Breakglass mints one token, valid from now for minutes (5 to 1440), for
 // an enrolled host.
 func (a *Actions) Breakglass(host, action string, minutes int) (string, error) {
-	if action != "pause" && action != "approve-session" {
-		return "", fmt.Errorf("action %q: pause or approve-session", action)
+	if !breakglass.Action(action) {
+		return "", fmt.Errorf("action %q: pause, approve-session or uninstall", action)
 	}
 	if minutes < 5 || minutes > 1440 {
 		return "", fmt.Errorf("minutes %d: between 5 and 1440", minutes)

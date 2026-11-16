@@ -92,3 +92,19 @@ func TestGate_SpooledPauseToken(t *testing.T) {
 		t.Fatal("expired pause holds")
 	}
 }
+
+func TestToken_UninstallAction(t *testing.T) {
+	pub, key, _ := ed25519.GenerateKey(nil)
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	s := Mint(Token{V: 1, ID: "00000000000000c1", Host: "web01", Action: "uninstall", NotBefore: now, Expires: now.Add(time.Hour)}, key)
+	tk, err := Parse(s, pub)
+	if err != nil || tk.Action != "uninstall" {
+		t.Fatalf("%+v %v", tk, err)
+	}
+	if tk.Valid("web01", now.Add(time.Minute)) != nil {
+		t.Fatal("not valid for its host")
+	}
+	if tk.Valid("web02", now.Add(time.Minute)) == nil {
+		t.Fatal("another host's token accepted")
+	}
+}

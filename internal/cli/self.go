@@ -6,13 +6,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"xdr/internal/breakglass"
 	"xdr/internal/guard"
 	"xdr/internal/install"
+	"xdr/internal/pki"
+	"xdr/internal/rules"
 )
 
 // layout and runner are what install and ensure act on; tests replace them.
@@ -86,5 +90,44 @@ func guardCmd(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	guard.Run(ctx, layout, runner, *watch, *every, func(s string) { fmt.Fprintln(stderr, "guard:", s) })
+	return nil
+}
+
+// uninstallCmd is `xdr uninstall --token T [--dir FLEETDIR]`: for a dead
+// agent. The token is checked here, with the fleet bundle's rule key and
+// this box's certificate name; it never reaches a shell.
+func uninstallCmd(args []string, stdout, stderr io.Writer) error {
+	fs := flags("uninstall", stderr)
+	tok := fs.String("token", "", "an uninstall break-glass token for this host")
+	dir := fs.String("dir", filepath.Join(layout.Root, layout.FleetDir), "the fleet bundle (rules.pub, host.pem)")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if *tok == "" {
+		fmt.Fprint(stderr, "xdr uninstall: --token is required\n")
+		return errUsage
+	}
+	pub, err := rules.LoadPublic(filepath.Join(*dir, "rules.pub"))
+	if err != nil {
+		return err
+	}
+	host, err := pki.HostName(filepath.Join(*dir, "host.pem"))
+	if err != nil {
+		return err
+	}
+	t, err := breakglass.Parse(*tok, pub)
+	if err == nil && t.Action != "uninstall" {
+		err = fmt.Errorf("token is for %s, not uninstall", t.Action)
+	}
+	if err == nil {
+		err = t.Valid(host, time.Now())
+	}
+	if err != nil {
+		return err
+	}
+	if err := install.Uninstall(layout, runner); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "uninstalled")
 	return nil
 }

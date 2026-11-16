@@ -17,7 +17,7 @@ import (
 // Token is one host's permission for one action in one window.
 type Token struct {
 	V                  int
-	ID, Host, Action   string // Action: "approve-session" or "pause"
+	ID, Host, Action   string // Action: "approve-session", "pause" or "uninstall"
 	NotBefore, Expires time.Time
 }
 
@@ -54,11 +54,14 @@ func Parse(s string, pub ed25519.PublicKey) (Token, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&t); err != nil || t.V != 1 || !tokenID.MatchString(t.ID) ||
-		(t.Action != "approve-session" && t.Action != "pause") || !t.Expires.After(t.NotBefore) {
+		!Action(t.Action) || !t.Expires.After(t.NotBefore) {
 		return Token{}, errMalformed
 	}
 	return t, nil
 }
+
+// Action reports whether a is one of the actions a token can carry.
+func Action(a string) bool { return a == "approve-session" || a == "pause" || a == "uninstall" }
 
 // Valid reports why t does not hold for host at now, or nil.
 func (t Token) Valid(host string, now time.Time) error {

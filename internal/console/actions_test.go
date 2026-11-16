@@ -186,6 +186,21 @@ func TestActions_RotateStoreBeforePut(t *testing.T) {
 	}
 }
 
+func TestActions_BreakglassUninstall(t *testing.T) {
+	a, _, f := actionsRig(t)
+	tok, err := a.Breakglass("web01", "uninstall", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := rules.LoadPublic(filepath.Join(f.Dir, "rules.pub"))
+	if got, err := breakglass.Parse(tok, pub); err != nil || got.Action != "uninstall" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if _, err := a.Breakglass("web01", "uninstall", 1441); err == nil {
+		t.Fatal("too long accepted")
+	}
+}
+
 func TestActions_Breakglass(t *testing.T) {
 	a, _, f := actionsRig(t)
 	tok, err := a.Breakglass("web01", "pause", 60)

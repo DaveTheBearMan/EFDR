@@ -157,6 +157,10 @@ type agent struct {
 	tamperSeen   map[string]time.Time                                  // pid|path of a tamper event, when last reported
 	pinnedHash   func() string                                         // the pinned binary hash
 	copies       []string                                              // the installed copies of the binary
+	layout       install.Layout                                        // what a signed uninstall removes
+	runner       install.Runner                                        // runs systemctl and chattr for it
+	exit         func()                                                // stops the agent for good
+	settle       func()                                                // lets the last report leave; nil: no wait
 	pinSaid      bool                                                  // the pinned-with-no-backup alert was recorded
 	drift        map[string]string                                     // path → what was last reported for it
 	driftNew     map[string]driftEntry                                 // the new files reported, by FileID
@@ -858,6 +862,14 @@ func Run(ctx context.Context, o Options) error {
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	ctx, a.exit = context.WithCancel(ctx)
+	defer a.exit()
+	a.layout, a.runner = install.DefaultLayout(), install.ExecRunner
+	a.settle = func() {
+		if a.fleet != nil && a.fleet.Connected() {
+			time.Sleep(2 * time.Second)
+		}
+	}
 	if cfg.Fleet != nil {
 		// Without its keys the agent still enforces on its own.
 		if pub, err := rules.LoadPublic(filepath.Join(cfg.Fleet.Dir, "rules.pub")); err != nil {

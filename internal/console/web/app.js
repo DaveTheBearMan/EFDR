@@ -170,7 +170,7 @@ function renderHosts() {
 }
 
 async function breakglass(host) {
-  const action = window.prompt('Token for ' + host + ': pause or approve-session?', 'pause');
+  const action = window.prompt('Token for ' + host + ': pause, approve-session or uninstall?', 'pause');
   if (!action) return;
   const minutes = parseInt(window.prompt('Valid for how many minutes (5 to 1440)?', '120'), 10);
   if (!minutes) return;

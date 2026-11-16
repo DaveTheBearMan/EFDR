@@ -10,6 +10,8 @@ import (
 
 	"xdr/internal/breakglass"
 	"xdr/internal/detect"
+	"xdr/internal/install"
+	"xdr/internal/model"
 	"xdr/internal/sshgate"
 )
 
@@ -179,5 +181,43 @@ func TestBreakglass_PauseEndRestartsGrace(t *testing.T) {
 	r.a.sessions(r.snap)
 	if len(r.kind("session-terminated")) != 1 {
 		t.Fatal("not ended after its grace")
+	}
+}
+
+func TestBreakglass_UninstallRemovesTheInstall(t *testing.T) {
+	r, key := tokenRig(t)
+	var order []string
+	r.a.layout = install.DefaultLayout()
+	r.a.layout.Root = t.TempDir()
+	r.a.runner = func(name string, args ...string) ([]byte, error) {
+		order = append(order, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+	r.a.exit = func() { order = append(order, "EXIT") }
+	tok := mint(r, key, "00000000000000d1", "uninstall")
+	rep := r.a.onGate(sshgate.Msg{Token: tok})
+	if !rep.OK {
+		t.Fatalf("%+v", rep)
+	}
+	if len(order) < 2 || !strings.HasPrefix(order[0], "systemctl disable --now") || order[len(order)-1] != "EXIT" {
+		t.Fatalf("uninstall must run before the exit: %v", order)
+	}
+	got := r.kind("uninstall")
+	if len(got) != 1 || got[0].Severity != model.SevCritical || got[0].Action != "uninstalled" ||
+		!strings.Contains(got[0].Detail, "break-glass") || !strings.Contains(got[0].Detail, "00000000000000d1") {
+		t.Fatalf("incident: %+v", got)
+	}
+	n := len(order)
+	if rep := r.a.onGate(sshgate.Msg{Token: tok}); rep.OK || !strings.Contains(rep.Why, "used") {
+		t.Fatalf("second use: %+v", rep)
+	}
+	if len(order) != n {
+		t.Fatalf("a second use ran again: %v", order[n:])
+	}
+	// Another action's token never uninstalls, and nor does a bad one.
+	r.a.onGate(sshgate.Msg{Token: mint(r, key, "00000000000000d2", "pause")})
+	r.a.onGate(sshgate.Msg{Token: "junk.junk"})
+	if len(order) != n {
+		t.Fatalf("ran: %v", order[n:])
 	}
 }

@@ -43,6 +43,7 @@ commands:
   guard     watcher process:        guard --watch UNIT [--every 1s] (the install's guard units run it)
   ensure    restore what differs:   ensure (run by every launch point; exit 3: it put something back)
   gate      PAM session hook:       gate (run by pam_exec; refuses when the agent says no or is down)
+  uninstall remove the install:    uninstall --token T [--dir FLEETDIR] (a signed break-glass token; for a dead agent)
   breakglass use a token:          breakglass TOKEN|- [--session ID]
   version   print the xdr version
 `
@@ -90,6 +91,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		code, err = ensureCmd(stdout, stderr)
 	case "guard":
 		err = guardCmd(rest, stdout, stderr)
+	case "uninstall":
+		err = uninstallCmd(rest, stdout, stderr)
 	case "breakglass":
 		err = breakglassCmd(rest, stdout, stderr)
 	default:

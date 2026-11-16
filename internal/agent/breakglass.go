@@ -10,6 +10,7 @@ import (
 	"xdr/internal/breakglass"
 	"xdr/internal/collect"
 	"xdr/internal/incident"
+	"xdr/internal/install"
 	"xdr/internal/model"
 	"xdr/internal/sshgate"
 )
@@ -44,6 +45,11 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 	a.loadUsed()
 	_, seen := a.used[t.ID]
 	switch t.Action {
+	case "uninstall":
+		if seen {
+			return sshgate.Reply{Why: "token used"}
+		}
+		return a.uninstall(t)
 	case "approve-session":
 		if seen {
 			return sshgate.Reply{Why: "token used"}
@@ -72,6 +78,31 @@ func (a *agent) useToken(s, session string, loud bool) sshgate.Reply {
 	}
 	a.record(incident.Incident{Kind: "breakglass", Action: "alert", Severity: model.SevHigh, Detail: detail})
 	return sshgate.Reply{OK: true, Why: t.Action}
+}
+
+// uninstall removes the install for a valid uninstall token, once. The
+// incident is recorded (and given a moment to leave) before anything is
+// removed; the agent stops after the units are disabled, so its own
+// restart policy cannot bring it back.
+func (a *agent) uninstall(t breakglass.Token) sshgate.Reply {
+	a.used[t.ID] = t.Expires
+	a.saveUsed()
+	a.record(incident.Incident{Kind: "uninstall", Action: "uninstalled", Severity: model.SevCritical,
+		Detail: fmt.Sprintf("a signed break-glass token (%s) removed the XDR install from %s", t.ID, t.Host)})
+	if a.settle != nil {
+		a.settle()
+	}
+	if a.runner == nil {
+		return sshgate.Reply{Why: "no install to remove"}
+	}
+	if err := install.Uninstall(a.layout, a.runner); err != nil {
+		a.record(incident.Incident{Kind: "uninstall", Action: "alert", Severity: model.SevCritical, Detail: "uninstall failed: " + err.Error()})
+		return sshgate.Reply{Why: "uninstall failed: " + err.Error()}
+	}
+	if a.exit != nil {
+		a.exit()
+	}
+	return sshgate.Reply{OK: true, Why: "uninstalled"}
 }
 
 // scanSpool applies tokens left in the spool, so ones written while the

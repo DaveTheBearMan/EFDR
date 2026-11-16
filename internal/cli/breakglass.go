@@ -96,7 +96,7 @@ func mintCmd(rest []string, stdout, stderr io.Writer) error {
 	fs := flags("controller mint-breakglass", stderr)
 	dir := fs.String("dir", "", "controller directory")
 	hosts := fs.String("hosts", "", "enrolled hosts, comma-separated")
-	action := fs.String("action", "", "pause or approve-session")
+	action := fs.String("action", "", "pause, approve-session or uninstall")
 	from := fs.String("from", "", "start of the first window (RFC 3339)")
 	every := fs.Duration("every", 2*time.Hour, "window length")
 	count := fs.Int("count", 1, "windows per host")
@@ -108,8 +108,8 @@ func mintCmd(rest []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stderr, "xdr controller mint-breakglass: --dir, --hosts, --action, --from and --out are required\n")
 		return errUsage
 	}
-	if *action != "pause" && *action != "approve-session" {
-		return fmt.Errorf("--action %q: pause or approve-session", *action)
+	if !breakglass.Action(*action) {
+		return fmt.Errorf("--action %q: pause, approve-session or uninstall", *action)
 	}
 	start, err := time.Parse(time.RFC3339, *from)
 	if err != nil {
