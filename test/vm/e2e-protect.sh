@@ -24,9 +24,9 @@ PINNED=/etc/xdr/pinned.sha256
 MANIFEST=/var/lib/xdr/manifest.json
 UNITS="xdr-agent.service xdr-guard-a.service xdr-guard-b.service xdr-ensure.timer"
 # Everything install puts down besides the config, the bundle and the backup.
-LAUNCH="/etc/systemd/system/xdr-agent.service /etc/systemd/system/xdr-guard-a.service /etc/systemd/system/xdr-guard-b.service
-  /etc/systemd/system/xdr-ensure.service /etc/systemd/system/xdr-ensure.timer /etc/cron.d/xdr-ensure
-  /usr/lib/systemd/system-generators/xdr-generator /etc/apt/apt.conf.d/99xdr /usr/lib/xdr/launch"
+LAUNCH="/etc/systemd/system/xdr-agent.service /etc/systemd/system/xdr-guard-a.service /etc/systemd/system/xdr-guard-b.service"
+LAUNCH="$LAUNCH /etc/systemd/system/xdr-ensure.service /etc/systemd/system/xdr-ensure.timer /etc/cron.d/xdr-ensure"
+LAUNCH="$LAUNCH /usr/lib/systemd/system-generators/xdr-generator /etc/apt/apt.conf.d/99xdr /usr/lib/xdr/launch"
 # shellcheck source=test/vm/lib.sh
 . test/vm/lib.sh
 VM=${XDR_E2E_VM:-${BOXES[0]}}
@@ -197,10 +197,17 @@ else
 fi
 
 echo "== stop-all-units"
+since=$(x date '+%Y-%m-%d %H:%M:%S')
 x systemctl stop $UNITS
 down=$(x systemctl is-active $UNITS | tr '\n' ' ')
+# The guards bring each other back at once; the timer and cron must also
+# run ensure on their own within the 90 s.
+cron_ran() { x journalctl --since "$since" -t CRON --no-pager | grep -q 'xdr ensure'; }
+timer_ran() { x journalctl --since "$since" -u xdr-ensure.service --no-pager | grep -q 'Finished xdr-ensure.service'; }
 if ! t=$(within 90 active $UNITS); then fail stop-all-units "not all back within 90 s: $(x systemctl is-active $UNITS | tr '\n' ' ')"
-else ok stop-all-units; echo "   right after the stop: $down; all active after ${t} s"; fi
+elif ! within 90 cron_ran >/dev/null; then fail stop-all-units "cron did not run ensure within 90 s"
+elif ! within 30 timer_ran >/dev/null; then fail stop-all-units "the timer did not run ensure"
+else ok stop-all-units; echo "   right after the stop: $down; all active after ${t} s; cron and the timer ran ensure"; fi
 
 echo "== delete-unit-files"
 mark
@@ -281,12 +288,13 @@ if [ -n "$bad" ]; then fail reinstall "$bad"; else ok reinstall; fi
 echo "== isolation-ladder"
 mark
 ctl_before=$(ctl_log | grep -c '^e2e .*isolation-over')
-x sh -c "cat > /root/xdr-e2e-evil.nft" <<EOF
+cat > "$OUT/evil.nft" <<EOF
 table inet e2e_evil {
   chain out { type filter hook output priority -10; policy accept; ip daddr $HOST tcp dport 2379 drop; }
   chain in { type filter hook input priority -10; policy accept; ip saddr $HOST tcp dport 8081 drop; }
 }
 EOF
+push "$OUT/evil.nft" /root/xdr-e2e-evil.nft 0600 || exit 1
 # A net under the agent: if the ladder does nothing, this lifts the cut in
 # 3 min so the harness gets back in (it is after every deadline below).
 x systemd-run --unit=xdr-e2e-unblock --on-active=180 /bin/sh -c "ip route del blackhole $HOST/32; nft delete table inet e2e_evil" >/dev/null
@@ -309,6 +317,7 @@ else
   x nft list table inet e2e_evil | grep -q 'dport 8081' || bad="$bad the-scored-rule-was-removed"
   within 30 ctl_heard >/dev/null || bad="$bad controller-never-heard-isolation-over"
   within 30 host_up e2e >/dev/null || bad="$bad not-up-in-the-console"
+  [ -n "$bad" ] && bad="$bad; the box logged: $(x sh -c "tail -n +$((MARK + 1)) $LOG | grep -E 'isolation|tamper' | cut -c1-400")"
   if [ -n "$bad" ]; then fail isolation-ladder "$bad"; else ok isolation-ladder; echo "   healed in ${t} s"; fi
 fi
 x systemctl stop xdr-e2e-unblock.timer 2>/dev/null
@@ -325,7 +334,8 @@ gone_all() {
     ! x nft list table inet xdr >/dev/null 2>&1 &&
     ! x pgrep -f '[x]dr (agent|guard|ensure)' >/dev/null
 }
-if ! within 30 gone_all >/dev/null; then fail uninstall-token "not all gone within 30 s (breakglass said: $uout)"
+if ! within 30 gone_all >/dev/null; then
+  fail uninstall-token "not all gone within 30 s (breakglass said: $uout): $(x sh -c "for f in $COPIES $PINNED $MANIFEST $LAUNCH $CONF /var/lib/xdr/backup; do [ -e \$f ] && echo \$f; done; nft list tables | grep xdr; pgrep -af '[x]dr (agent|guard|ensure)'; systemctl is-active $UNITS; tail -n +$((MARK + 1)) $LOG | grep uninstall" | tr '\n' ' ')"
 else
   # The test's own drop-in goes too, then a minute and more: cron, the timer
   # and the guards would have had their turn.
@@ -336,9 +346,12 @@ else
   gone_all || bad="$bad something-came-back"
   left=$(x sh -c "systemctl list-units --all --plain --no-legend 'xdr-*' | grep -v xdr-e2e; systemctl list-unit-files --plain --no-legend 'xdr-*' | grep -v xdr-e2e; ls /etc/systemd/system/*.wants /run/systemd/generator/*.wants 2>/dev/null | grep '^xdr-'")
   [ -n "$left" ] && bad="$bad units-left:$(tr '\n' ' ' <<<"$left")"
-  imm=$(x sh -c "lsattr -R /etc/xdr /var/lib/xdr /usr/lib/xdr /etc/systemd/system /etc/cron.d 2>/dev/null | awk '\$1 ~ /i/'")
+  imm=$(x sh -c "lsattr -R /etc/xdr /var/lib/xdr /usr/lib/xdr /etc/systemd/system /etc/cron.d 2>/dev/null | awk 'NF >= 2 && \$1 ~ /^[-a-zA-Z]+\$/ && \$1 ~ /i/'")
   [ -n "$imm" ] && bad="$bad immutable-left:$(tr '\n' ' ' <<<"$imm")"
   inc uninstall uninstalled || bad="$bad no-uninstall-incident"
+  # The box can still be logged in to: no gate is left in PAM.
+  x grep -q 'pam_exec.so.*gate' /etc/pam.d/sshd && bad="$bad the-gate-is-left-in-pam"
+  ssh -F "$SSHCFG" -n -o ControlMaster=no -o ControlPath=none "$VM" true || bad="$bad a-fresh-root-login-is-refused"
   if [ -n "$bad" ]; then fail uninstall-token "$bad"; else ok uninstall-token; fi
 fi
 
