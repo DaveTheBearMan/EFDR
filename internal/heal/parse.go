@@ -62,7 +62,7 @@ func parsePrefix(tok string) (netip.Prefix, bool) {
 }
 
 // inFleet: p lies wholly inside one of the fleet's nets. A block wider
-// than the fleet's (10.0.0.0/8 around a /24) does not name the fleet: it
+// than the fleet's (192.0.0.0/8 around a /24) does not name the fleet: it
 // takes others with it.
 func inFleet(p netip.Prefix, fleet []netip.Prefix) bool {
 	for _, f := range fleet {

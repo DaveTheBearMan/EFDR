@@ -74,7 +74,7 @@ func reinstallRig(t *testing.T) (dir string, cfg *Config, bin, keyFile string) {
 	keyFile = filepath.Join(root, "id_ed25519")
 	os.WriteFile(keyFile, []byte("PRIVATE-KEY-MATERIAL-XYZZY"), 0o600)
 	cfg = &Config{Reinstall: &ReinstallConfig{Key: keyFile, User: "root",
-		Hosts: map[string]ReinstallHost{"web01": {Addr: "10.0.0.5", Config: agent}}}}
+		Hosts: map[string]ReinstallHost{"web01": {Addr: "192.0.2.5", Config: agent}}}}
 	return
 }
 
@@ -101,7 +101,7 @@ func TestReinstall_Steps(t *testing.T) {
 	if err := Reinstall(context.Background(), dir, cfg, "web01", f, bin); err != nil {
 		t.Fatal(err)
 	}
-	if f.n() != 1 || f.calls[0].addr != "10.0.0.5" {
+	if f.n() != 1 || f.calls[0].addr != "192.0.2.5" {
 		t.Fatalf("calls: %+v", f.calls)
 	}
 	c := f.calls[0]
@@ -201,16 +201,16 @@ func TestReinstall_Refusals(t *testing.T) {
 	// not enrolled, though listed
 	c1 := *cfg
 	c1.Reinstall = &ReinstallConfig{Key: keyFile, User: "root", Hosts: map[string]ReinstallHost{
-		"web01": cfg.Reinstall.Hosts["web01"], "ghost": {Addr: "10.0.0.9", Config: other}}}
+		"web01": cfg.Reinstall.Hosts["web01"], "ghost": {Addr: "192.0.2.9", Config: other}}}
 	// enrolled, not listed
 	if err := pki.Enroll(dir, "db01", filepath.Join(filepath.Dir(bin), "db01")); err != nil {
 		t.Fatal(err)
 	}
 	inject := &Config{Reinstall: &ReinstallConfig{Key: keyFile, User: "root", Hosts: map[string]ReinstallHost{
-		"web01": {Addr: "1.2.3.4; reboot", Config: cfg.Reinstall.Hosts["web01"].Config}}}}
+		"web01": {Addr: "192.0.2.4; reboot", Config: cfg.Reinstall.Hosts["web01"].Config}}}}
 	relKey := &Config{Reinstall: &ReinstallConfig{Key: "id_ed25519", User: "root", Hosts: cfg.Reinstall.Hosts}}
 	relCfg := &Config{Reinstall: &ReinstallConfig{Key: keyFile, User: "root", Hosts: map[string]ReinstallHost{
-		"web01": {Addr: "10.0.0.5", Config: "web01.json"}}}}
+		"web01": {Addr: "192.0.2.5", Config: "web01.json"}}}}
 	badUser := &Config{Reinstall: &ReinstallConfig{Key: keyFile, User: "root; id", Hosts: cfg.Reinstall.Hosts}}
 	cases := []struct {
 		name string
@@ -284,7 +284,7 @@ func TestConfig_Reinstall(t *testing.T) {
 		os.WriteFile(p, []byte(s), 0o600)
 		return LoadConfig(p)
 	}
-	c, err := load(`{"listen":"127.0.0.1:2379","reinstall":{"key":"/root/k","hosts":{"web01":{"addr":"10.0.0.5","config":"/etc/xdr/web01.json"}}}}`)
+	c, err := load(`{"listen":"127.0.0.1:2379","reinstall":{"key":"/root/k","hosts":{"web01":{"addr":"192.0.2.5","config":"/etc/xdr/web01.json"}}}}`)
 	if err != nil || c.Reinstall == nil || c.Reinstall.After.Duration != 60*time.Second || c.Reinstall.User != "root" {
 		t.Fatalf("defaults: %+v %v", c.Reinstall, err)
 	}
@@ -294,9 +294,9 @@ func TestConfig_Reinstall(t *testing.T) {
 	}
 	for _, bad := range []string{
 		`"key":"k","hosts":{}`,
-		`"key":"/k","hosts":{"web01":{"addr":"10.0.0.5","config":"rel.json"}}`,
-		`"key":"/k","hosts":{"web01":{"addr":"1.2.3.4; reboot","config":"/c.json"}}`,
-		`"key":"/k","hosts":{"Web 01":{"addr":"10.0.0.5","config":"/c.json"}}`,
+		`"key":"/k","hosts":{"web01":{"addr":"192.0.2.5","config":"rel.json"}}`,
+		`"key":"/k","hosts":{"web01":{"addr":"192.0.2.4; reboot","config":"/c.json"}}`,
+		`"key":"/k","hosts":{"Web 01":{"addr":"192.0.2.5","config":"/c.json"}}`,
 		`"key":"/k","user":"a b","hosts":{}`,
 		`"key":"","hosts":{}`,
 	} {

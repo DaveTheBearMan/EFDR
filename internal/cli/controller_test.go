@@ -206,7 +206,7 @@ func TestReinstallCLI_Refusals(t *testing.T) {
 		t.Fatalf("no reinstall section: %d %q", code, se.String())
 	}
 	se.Reset()
-	os.WriteFile(filepath.Join(dir, "controller.json"), []byte(`{"listen":"127.0.0.1:2379","reinstall":{"key":"/nonexistent/k","hosts":{"web02":{"addr":"10.0.0.5","config":"/nonexistent/a.json"}}}}`), 0o600)
+	os.WriteFile(filepath.Join(dir, "controller.json"), []byte(`{"listen":"127.0.0.1:2379","reinstall":{"key":"/nonexistent/k","hosts":{"web02":{"addr":"192.0.2.5","config":"/nonexistent/a.json"}}}}`), 0o600)
 	if code := Run([]string{"controller", "reinstall", "--dir", dir, "--host", "web01"}, &so, &se); code == 0 || !strings.Contains(se.String(), "not enrolled") {
 		t.Fatalf("unenrolled host: %d %q", code, se.String())
 	}

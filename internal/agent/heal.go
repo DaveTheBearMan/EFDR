@@ -27,8 +27,8 @@ const (
 // address and the default route's gateway. Empty fields are not restored.
 type linkSnap struct {
 	Link string // eth0
-	Addr string // 10.0.0.5/24
-	Via  string // 10.0.0.1
+	Addr string // 203.0.113.5/24
+	Via  string // 203.0.113.1
 }
 
 // ladderState is where the reconnect ladder stands. The agent's lock guards it.

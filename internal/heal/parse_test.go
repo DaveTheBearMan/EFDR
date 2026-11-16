@@ -124,7 +124,7 @@ COMMIT
 
 func TestRouteBlockers(t *testing.T) {
 	rules := "0:\tfrom all lookup local\n100:\tfrom all to 192.0.2.7 prohibit\n32766:\tfrom all lookup main\n"
-	routes := "default via 10.0.0.1 dev eth0\nblackhole 192.0.2.7\nunreachable 198.51.100.0/24\nblackhole 203.0.113.0/24\n10.0.0.0/24 dev eth0 proto kernel\n"
+	routes := "default via 192.0.2.1 dev eth0\nblackhole 192.0.2.7\nunreachable 198.51.100.0/24\nblackhole 203.0.113.0/24\n192.0.2.0/24 dev eth0 proto kernel\n"
 	got := RouteBlockers(rules, routes, fleetNets)
 	want := []string{
 		"ip rule del pref 100 from all to 192.0.2.7 prohibit",
