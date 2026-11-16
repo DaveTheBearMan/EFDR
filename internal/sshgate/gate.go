@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Socket is where the agent hears the gate. Anyone may connect: a message
@@ -18,14 +20,25 @@ const Socket = "/run/xdr/gate.sock"
 const (
 	maxMsg   = 8 << 10
 	deadline = 2 * time.Second
-	maxConns = 64
+	// Root's connections (the gate runs as root) have slots of their own,
+	// so that no other user can hold them all.
+	maxConns     = 64
+	nonRootConns = 8
+	nonRootWait  = 500 * time.Millisecond
 )
+
+// isRoot decides whose connections count as the gate's.
+var isRoot = func(uid uint32) bool { return uid == 0 }
 
 // Msg is one request to the agent: a session opening (from pam_exec) or a
 // break-glass token (from `xdr breakglass`).
 type Msg struct {
 	Session, User, RHost, Token string
 	PPID                        int
+	// PeerUID and PeerPID are the connecting process's, from the kernel
+	// (SO_PEERCRED): Serve sets them; a client cannot send them.
+	PeerUID uint32 `json:"-"`
+	PeerPID int    `json:"-"`
 }
 
 // Reply is the agent's answer.
@@ -38,7 +51,7 @@ type Reply struct {
 // connection, until ctx is done.
 func Serve(ctx context.Context, l net.Listener, handle func(Msg) Reply) {
 	go func() { <-ctx.Done(); l.Close() }()
-	slots := make(chan struct{}, maxConns)
+	rootSlots, otherSlots := make(chan struct{}, maxConns), make(chan struct{}, nonRootConns)
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -47,6 +60,11 @@ func Serve(ctx context.Context, l net.Listener, handle func(Msg) Reply) {
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
+		}
+		uid, pid := peerCred(c)
+		slots, wait := otherSlots, nonRootWait
+		if isRoot(uid) {
+			slots, wait = rootSlots, deadline
 		}
 		select {
 		case slots <- struct{}{}:
@@ -57,9 +75,10 @@ func Serve(ctx context.Context, l net.Listener, handle func(Msg) Reply) {
 		go func() {
 			defer func() { <-slots }()
 			defer c.Close()
-			c.SetDeadline(time.Now().Add(deadline))
+			c.SetDeadline(time.Now().Add(wait))
 			r := Reply{Why: "bad message"}
 			if m, err := readMsg(c); err == nil {
+				m.PeerUID, m.PeerPID = uid, pid
 				r = handle(m)
 			}
 			b, _ := json.Marshal(r)
@@ -117,4 +136,23 @@ func Check(env map[string]string, sock string, paused func() bool) error {
 		return fmt.Errorf("gate: refused: %s", r.Why)
 	}
 	return nil
+}
+
+// peerCred is the uid and pid of the process at the other end, from the
+// kernel; an unreadable one is nobody (uid 1<<31), never root.
+func peerCred(c net.Conn) (uint32, int) {
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return 1 << 31, 0
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 1 << 31, 0
+	}
+	var cred *unix.Ucred
+	var cerr error
+	if err := raw.Control(func(fd uintptr) { cred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil || cerr != nil {
+		return 1 << 31, 0
+	}
+	return cred.Uid, int(cred.Pid)
 }

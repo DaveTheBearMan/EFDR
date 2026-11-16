@@ -3,9 +3,11 @@ package sshgate
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func serve(t *testing.T, handle func(Msg) Reply) string {
@@ -75,5 +77,81 @@ func TestServe_BoundsMessage(t *testing.T) {
 	n, _ := c.Read(buf)
 	if called || !strings.Contains(string(buf[:n]), `"OK":false`) {
 		t.Fatalf("oversized message: called %v, reply %q", called, buf[:n])
+	}
+}
+
+func TestServe_PeerUIDFromKernel(t *testing.T) {
+	var got Msg
+	sock := serve(t, func(m Msg) Reply { got = m; return Reply{OK: true} })
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	// A client cannot claim to be root: the uid is the kernel's.
+	c.Write([]byte(`{"Session":"7","PeerUID":0,"PeerPID":1}` + "\n"))
+	buf := make([]byte, 128)
+	c.Read(buf)
+	if got.PeerUID != uint32(os.Getuid()) || got.PeerPID != os.Getpid() {
+		t.Fatalf("peer %d/%d, want %d/%d", got.PeerUID, got.PeerPID, os.Getuid(), os.Getpid())
+	}
+}
+
+// Idle connections of ordinary users must not use up the slots of root's
+// (the gate's), or every blue login would be refused.
+func TestServe_NonRootCannotStarveRoot(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	sock := serve(t, func(Msg) Reply { <-block; return Reply{OK: true} })
+	var held []net.Conn
+	for range nonRootConns {
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write([]byte(`{"Session":"1"}` + "\n"))
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	c.Write([]byte(`{"Session":"2"}` + "\n"))
+	buf := make([]byte, 128)
+	if n, _ := c.Read(buf); n != 0 {
+		t.Fatalf("a non-root connection past its share was served: %q", buf[:n])
+	}
+}
+
+func TestServe_RootKeepsItsSlots(t *testing.T) {
+	old := isRoot
+	isRoot = func(uint32) bool { return true }
+	t.Cleanup(func() { isRoot = old })
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	served := make(chan struct{}, 64)
+	sock := serve(t, func(Msg) Reply { served <- struct{}{}; <-block; return Reply{OK: true} })
+	for range nonRootConns + 5 {
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		c.Write([]byte(`{"Session":"1"}` + "\n"))
+	}
+	for i := range nonRootConns + 5 {
+		select {
+		case <-served:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d root connections served", i, nonRootConns+5)
+		}
 	}
 }

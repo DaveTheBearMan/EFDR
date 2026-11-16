@@ -221,6 +221,12 @@ func (a *agent) onGate(m sshgate.Msg) sshgate.Reply {
 	if m.Token != "" {
 		return a.onToken(m)
 	}
+	// The socket is open to every local user; only the gate, which runs
+	// as root, may register a session. Anyone else could otherwise make
+	// the agent think a session had been dealt with.
+	if m.PeerUID != 0 {
+		return sshgate.Reply{Why: "session messages are accepted from root only"}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.gateOn() {
@@ -240,7 +246,7 @@ func (a *agent) onGate(m sshgate.Msg) sshgate.Reply {
 	}
 	p := sshgate.Policy{Cfg: a.cfg, BaseUsers: a.baseUsers(), Users: a.okUsers, Approved: a.approved, Killed: a.ended, Paused: a.paused(), Now: a.now()}
 	if v, why := sshgate.Judge(ls, st.first, p); v == sshgate.End {
-		st.ended = true
+		// Refused at login, not ended: the sweep still ends it if it exists.
 		a.record(incident.Incident{Kind: "session-refused", Action: "killed", Severity: model.SevHigh, UID: ls.UID, User: ls.User,
 			Detail: fmt.Sprintf("session %s from %s: %s", ls.ID, ls.RemoteHost, why)})
 		return sshgate.Reply{Why: why}

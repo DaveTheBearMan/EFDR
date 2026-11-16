@@ -153,3 +153,36 @@ func TestAgentGate_RegistersAndRefuses(t *testing.T) {
 		t.Fatal("a session logind does not know let in")
 	}
 }
+
+// Any local user can reach the socket: only root's session messages count,
+// and a message must never stop the sweep from ending an unapproved session.
+func TestAgentGate_OnlyRootRegisters(t *testing.T) {
+	r, ran := gateOn(t)
+	sessionFile(t, r.root, "7", "alice", "192.0.2.7", 4242)
+	start := r.now
+	r.a.sessions(r.snap)
+	if rep := r.a.onGate(sshgate.Msg{Session: "7", User: "alice", PeerUID: 1001}); rep.OK || !strings.Contains(rep.Why, "root") {
+		t.Fatalf("a non-root session message: %+v", rep)
+	}
+	// An attacker's loop of messages for its own session, as the grace runs out.
+	r.now = start.Add(90 * time.Second)
+	r.a.onGate(sshgate.Msg{Session: "7", PeerUID: 1001})
+	r.a.sessions(r.snap)
+	if terminates(*ran) != 1 || len(r.kind("session-terminated")) != 1 {
+		t.Fatalf("the session was not ended: %v", *ran)
+	}
+}
+
+// A refusal at login is not an end: the sweep still ends the session if it
+// somehow exists.
+func TestAgentGate_RefusalDoesNotMarkEnded(t *testing.T) {
+	r, ran := gateOn(t)
+	testfs.File(t, r.root, "run/systemd/sessions/9", "USER=evil\nUID=1500\nSERVICE=sshd\nREMOTE_HOST=192.0.2.7\nLEADER=4300\n", 0o644)
+	if rep := r.a.onGate(sshgate.Msg{Session: "9", User: "evil"}); rep.OK {
+		t.Fatalf("evil let in: %+v", rep)
+	}
+	r.a.sessions(r.snap)
+	if terminates(*ran) != 1 {
+		t.Fatalf("the sweep skipped a refused session: %v", *ran)
+	}
+}
