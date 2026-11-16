@@ -123,20 +123,23 @@ type agent struct {
 	snap     *proc.Snapshot
 	snapAt   time.Time
 
-	ssh         *sshgate.Asserter    // nil: no SSH gate
-	gateExe     string               // what pam_exec runs: this binary
-	gateOffSaid bool                 // the gate-off alert was recorded
-	run         sshgate.Runner       // loginctl, usermod, systemctl
-	sess        map[string]*session  // live sessions by id
-	approved    map[string]bool      // session ids approved (orders, break-glass)
-	ended       map[string]bool      // session ids ordered ended
-	okUsers     map[string]bool      // new accounts approved
-	pausedUntil time.Time            // a pause token holds until then
-	uidSaid     map[string]uint32    // gray accounts whose bad uid was reported
-	tokenPub    ed25519.PublicKey    // the jump box's rule key; nil: tokens refused
-	used        map[string]time.Time // break-glass token ids used, by expiry
-	state       string               // the state directory
-	spool       string               // the break-glass spool
+	ssh          *sshgate.Asserter    // nil: no SSH gate
+	gateExe      string               // what pam_exec runs: this binary
+	gateOffSaid  bool                 // the gate-off alert was recorded
+	run          sshgate.Runner       // loginctl, usermod, systemctl
+	sess         map[string]*session  // live sessions by id
+	approved     map[string]bool      // session ids approved (orders, break-glass)
+	ended        map[string]bool      // session ids ordered ended
+	okUsers      map[string]bool      // new accounts approved
+	pausedUntil  time.Time            // a pause token holds until then
+	uidSaid      map[string]uint32    // gray accounts whose bad uid was reported
+	tokenPub     ed25519.PublicKey    // the jump box's rule key; nil: tokens refused
+	used         map[string]time.Time // break-glass token ids used, by expiry
+	state        string               // the state directory
+	spool        string               // the break-glass spool
+	disabled     map[string]bool      // accounts the agent locked
+	userSaid     map[string]bool      // new accounts already alerted on
+	recoverySaid bool                 // recovery-missing was recorded
 
 	unitMu sync.Mutex
 	units  map[string]string // unit → unit file hash, this sweep
@@ -628,6 +631,7 @@ func (a *agent) sweep() {
 	}
 	a.handle(s, detect.Sweep(s, pol))
 	a.sessions(s)
+	a.accounts(s)
 }
 
 // wanted reports whether an event needs a look at the process behind it.

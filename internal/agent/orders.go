@@ -15,6 +15,7 @@ type orders struct {
 	Approved map[string]bool `json:"approved"` // session ids
 	Ended    map[string]bool `json:"ended"`    // session ids
 	Users    map[string]bool `json:"users"`    // new accounts approved
+	Disabled map[string]bool `json:"disabled"` // accounts the agent locked
 }
 
 // onOrder takes in one order from To(host).
@@ -62,12 +63,15 @@ func (a *agent) initOrders() {
 	if a.okUsers == nil {
 		a.okUsers = map[string]bool{}
 	}
+	if a.disabled == nil {
+		a.disabled = map[string]bool{}
+	}
 }
 
 func (a *agent) ordersPath() string { return filepath.Join(a.state, "orders.json") }
 
 func (a *agent) saveOrders() {
-	b, _ := json.Marshal(orders{a.approved, a.ended, a.okUsers})
+	b, _ := json.Marshal(orders{a.approved, a.ended, a.okUsers, a.disabled})
 	if err := os.MkdirAll(a.state, 0o700); err == nil {
 		tmp := a.ordersPath() + ".tmp"
 		if os.WriteFile(tmp, b, 0o600) == nil && os.Rename(tmp, a.ordersPath()) == nil {
@@ -83,6 +87,6 @@ func (a *agent) loadOrders() {
 	if b, err := collect.ReadFile(a.ordersPath(), 4<<20); err == nil {
 		json.Unmarshal(b, &o)
 	}
-	a.approved, a.ended, a.okUsers = o.Approved, o.Ended, o.Users
+	a.approved, a.ended, a.okUsers, a.disabled = o.Approved, o.Ended, o.Users, o.Disabled
 	a.initOrders()
 }
