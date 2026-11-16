@@ -26,6 +26,7 @@ type Layout struct {
 	Backup   string // directory: what ensure restores from
 	Config   string // the agent's config (and Config+".sig")
 	FleetDir string // ca.pem, host.pem, host-key.pem, rules.pub
+	Notes    string // what ensure had to do, for the agent to report
 }
 
 // DefaultLayout is the layout of a box.
@@ -37,6 +38,7 @@ func DefaultLayout() Layout {
 		Backup:   "/var/lib/xdr/backup",
 		Config:   "/etc/xdr/agent.json",
 		FleetDir: "/etc/xdr/fleet",
+		Notes:    "/var/lib/xdr/ensure-notes.jsonl",
 	}
 }
 

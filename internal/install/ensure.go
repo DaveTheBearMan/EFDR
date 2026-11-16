@@ -1,11 +1,14 @@
 package install
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Ensure puts back whatever of the manifest is missing or differs, from a
@@ -14,12 +17,25 @@ import (
 // them) or from Render (units and hooks), makes the files immutable again,
 // and starts the units that are not running. With no good copy it trusts
 // nothing: it restores nothing and says so.
+// What it did, or why it could not, is left as a note (see TakeNotes).
 func Ensure(l Layout, run Runner) (Report, error) {
-	var rep Report
 	pinned, err := pinnedHash(l)
 	if err != nil {
-		return rep, fmt.Errorf("not installed (%w)", err)
+		return Report{}, fmt.Errorf("not installed (%w)", err)
 	}
+	rep, err := ensure(l, run, pinned)
+	if len(rep.Restored)+len(rep.Started) > 0 || err != nil {
+		n := Note{Time: time.Now().UTC(), Restored: rep.Restored, Started: rep.Started}
+		if err != nil {
+			n.Error = err.Error()
+		}
+		addNote(l, n)
+	}
+	return rep, err
+}
+
+func ensure(l Layout, run Runner, pinned string) (Report, error) {
+	var rep Report
 	var good []byte
 	for _, c := range l.Copies {
 		if b, err := os.ReadFile(l.p(c)); err == nil && sum(b) == pinned {
@@ -105,4 +121,61 @@ func Ensure(l Layout, run Runner) (Report, error) {
 		return rep, errors.New(strings.Join(errs, "; "))
 	}
 	return rep, nil
+}
+
+// Note is what one ensure had to do: the agent reports it as a tamper
+// incident, since nothing put back or started went away by itself.
+type Note struct {
+	Time     time.Time
+	Restored []string `json:",omitempty"`
+	Started  []string `json:",omitempty"`
+	Error    string   `json:",omitempty"`
+}
+
+// maxNotes caps the notes file: a guard that fails every second while the
+// agent is down must not fill the disk.
+const maxNotes = 1 << 20
+
+// addNote appends n to the notes file, one JSON line, best effort.
+func addNote(l Layout, n Note) {
+	path := l.p(l.Notes)
+	if st, err := os.Stat(path); err == nil && st.Size() > maxNotes {
+		return
+	}
+	b, err := json.Marshal(n)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(b, '\n')) // one write: appends from several ensures do not interleave
+}
+
+// TakeNotes returns the notes left since the last call and removes them.
+// The file is renamed first, so a note added meanwhile starts a new one.
+func TakeNotes(l Layout) []Note {
+	path := l.p(l.Notes)
+	taken := path + ".taken"
+	if err := os.Rename(path, taken); err != nil {
+		return nil
+	}
+	defer os.Remove(taken)
+	b, err := os.ReadFile(taken)
+	if err != nil {
+		return nil
+	}
+	var out []Note
+	for _, line := range strings.Split(string(b), "\n") {
+		var n Note
+		if line != "" && json.Unmarshal([]byte(line), &n) == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }

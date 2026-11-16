@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"xdr/internal/config"
+	"xdr/internal/install"
+	"xdr/internal/model"
 	"xdr/internal/proc"
 	"xdr/internal/sensor"
 	"xdr/internal/tamper"
@@ -151,5 +156,42 @@ func TestTamper_BurstIsOneIncident(t *testing.T) {
 	r.a.onTamper(hit(860))
 	if len(r.kills) != 2 {
 		t.Fatalf("a repeat two seconds later: %d kills", len(r.kills))
+	}
+}
+
+// What ensure put back or started is a tamper incident: something removed,
+// changed or stopped it.
+func TestTamper_EnsureNotesAreReported(t *testing.T) {
+	r, _ := tamperRig(t)
+	l := install.DefaultLayout()
+	l.Root = t.TempDir()
+	run := func(string, ...string) ([]byte, error) { return []byte("active\n"), nil }
+	cfg := filepath.Join(l.Root, l.Config)
+	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	os.WriteFile(cfg, []byte("{}\n"), 0o600)
+	bin := filepath.Join(t.TempDir(), "xdr")
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	if _, err := install.Install(l, run, bin); err != nil {
+		t.Fatal(err)
+	}
+	r.a.layout, r.a.runner = l, run
+	r.a.ensureNotes()
+	if got := r.kind("tamper"); len(got) != 0 {
+		t.Fatalf("nothing was done, yet %+v", got)
+	}
+	copy3 := l.Copies[2]
+	os.WriteFile(filepath.Join(l.Root, copy3), []byte("corrupt"), 0o755)
+	if _, err := install.Ensure(l, run); err != nil {
+		t.Fatal(err)
+	}
+	r.a.ensureNotes()
+	got := r.kind("tamper")
+	if len(got) != 1 || got[0].Path != copy3 || got[0].Action != "repaired" || got[0].Severity != model.SevHigh ||
+		!strings.Contains(got[0].Detail, "ensure restored "+copy3) {
+		t.Fatalf("tamper: %+v", got)
+	}
+	r.a.ensureNotes()
+	if n := len(r.kind("tamper")); n != 1 {
+		t.Fatalf("reported again: %d", n)
 	}
 }

@@ -382,3 +382,37 @@ func TestUninstall_FailureKeepsTheAgentRunning(t *testing.T) {
 		t.Fatal("a failed guard stop skipped the file removal")
 	}
 }
+
+// What ensure had to do is left for the agent, which reports it as a tamper
+// incident; a quiet ensure leaves nothing.
+func TestEnsure_LeavesANoteOfWhatItDid(t *testing.T) {
+	l := testLayout(t)
+	if _, err := Install(l, (&fake{}).run, binary(t, "#!/bin/sh\necho agent\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Ensure(l, (&fake{}).run); err != nil {
+		t.Fatal(err)
+	}
+	if n := TakeNotes(l); len(n) != 0 {
+		t.Fatalf("a quiet ensure left %+v", n)
+	}
+	write(t, l.p(l.Copies[2]), "corrupt", 0o755)
+	if _, err := Ensure(l, (&fake{active: map[string]string{"xdr-guard-b.service": "inactive"}}).run); err != nil {
+		t.Fatal(err)
+	}
+	n := TakeNotes(l)
+	if len(n) != 1 || !contains(n[0].Restored, l.Copies[2]) || !contains(n[0].Started, "xdr-guard-b.service") || n[0].Time.IsZero() {
+		t.Fatalf("notes %+v", n)
+	}
+	if n := TakeNotes(l); len(n) != 0 {
+		t.Fatalf("taken twice: %+v", n)
+	}
+	// One that could not restore says why.
+	for _, c := range l.Copies {
+		write(t, l.p(c), "corrupt", 0o755)
+	}
+	Ensure(l, (&fake{}).run)
+	if n := TakeNotes(l); len(n) != 1 || !strings.Contains(n[0].Error, "pinned hash") {
+		t.Fatalf("notes %+v", n)
+	}
+}

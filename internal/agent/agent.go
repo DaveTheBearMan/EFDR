@@ -989,6 +989,7 @@ func Run(ctx context.Context, o Options) error {
 			local.Store(&addrs)
 			a.guard()
 			a.ladder(a.run)
+			a.ensureNotes()
 		case ev, ok := <-events:
 			if !ok {
 				events = nil

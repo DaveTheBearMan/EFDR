@@ -200,3 +200,36 @@ func readPinned() string {
 	b, _ := os.ReadFile(install.DefaultLayout().Pinned)
 	return strings.TrimSpace(string(b))
 }
+
+// ensureNotes reports what the launch points' ensure had to do since the
+// last look, one tamper incident per run: a file put back or a unit started
+// means something removed, changed or stopped it.
+func (a *agent) ensureNotes() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runner == nil {
+		return // not the installed agent
+	}
+	for _, n := range install.TakeNotes(a.layout) {
+		var did []string
+		if len(n.Restored) > 0 {
+			did = append(did, "restored "+strings.Join(n.Restored, ", "))
+		}
+		if len(n.Started) > 0 {
+			did = append(did, "started "+strings.Join(n.Started, ", "))
+		}
+		in := incident.Incident{Kind: "tamper", Action: "repaired", Severity: model.SevHigh, Time: n.Time,
+			Detail: "ensure " + strings.Join(did, "; ")}
+		if len(n.Restored) > 0 {
+			in.Path = n.Restored[0]
+		}
+		if n.Error != "" {
+			in.Action, in.Severity = "alert", model.SevCritical
+			if len(did) == 0 {
+				in.Detail = "ensure"
+			}
+			in.Detail += ": " + n.Error
+		}
+		a.record(in)
+	}
+}
