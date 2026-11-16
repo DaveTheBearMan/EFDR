@@ -47,8 +47,8 @@ func Render(l Layout) []File {
 	restart := "Restart=always\nRestartSec=1\n"
 	return []File{
 		{"/etc/systemd/system/xdr-agent.service", unit("XDR agent", unitLaunch(l, agentArgs(l)), restart, "multi-user.target"), 0o644},
-		{"/etc/systemd/system/xdr-guard-a.service", unit("XDR guard A", unitLaunch(l, "guard --watch xdr-guard-b.service"), restart, "multi-user.target"), 0o644},
-		{"/etc/systemd/system/xdr-guard-b.service", unit("XDR guard B", unitLaunch(l, "guard --watch xdr-guard-a.service"), restart, "multi-user.target"), 0o644},
+		{"/etc/systemd/system/xdr-guard-a.service", unit("XDR guard A", unitLaunch(l, "guard --watch xdr-guard-b.service --every 5s"), restart, "multi-user.target"), 0o644},
+		{"/etc/systemd/system/xdr-guard-b.service", unit("XDR guard B", unitLaunch(l, "guard --watch xdr-guard-a.service --every 5s"), restart, "multi-user.target"), 0o644},
 		{"/etc/systemd/system/xdr-ensure.service", unit("XDR ensure", unitLaunch(l, "ensure"), "Type=oneshot\n", "multi-user.target"), 0o644},
 		{"/etc/systemd/system/xdr-ensure.timer", []byte("[Unit]\nDescription=XDR ensure, every 30 s\n\n[Timer]\nOnBootSec=30s\nOnUnitActiveSec=30s\nUnit=xdr-ensure.service\n\n[Install]\nWantedBy=timers.target\n"), 0o644},
 		{"/etc/cron.d/xdr-ensure", []byte(fmt.Sprintf("SHELL=/bin/sh\n@reboot root %s\n* * * * * root %s\n", shLaunch(l, "ensure"), shLaunch(l, "ensure"))), 0o644},

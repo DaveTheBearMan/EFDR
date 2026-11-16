@@ -48,11 +48,33 @@ func Ensure(l Layout, run Runner) (Report, error) {
 	return rep, err
 }
 
+// read is one file as read once in this call, with its hash.
+type read struct {
+	b   []byte
+	sum string
+	err error
+}
+
 func ensure(l Layout, run Runner, pinned string) (Report, error) {
 	var rep Report
+	// Each file is read and hashed once per call: the binary copies are
+	// large, and the guards run this every few seconds.
+	cache := map[string]read{}
+	get := func(path string) ([]byte, string, error) {
+		full := l.p(path)
+		r, ok := cache[full]
+		if !ok {
+			r.b, r.err = readFile(full)
+			if r.err == nil {
+				r.sum = sum(r.b)
+			}
+			cache[full] = r
+		}
+		return r.b, r.sum, r.err
+	}
 	var good []byte
 	for _, c := range l.Copies {
-		if b, err := os.ReadFile(l.p(c)); err == nil && sum(b) == pinned {
+		if b, h, err := get(c); err == nil && h == pinned {
 			good = b
 			break
 		}
@@ -82,7 +104,7 @@ func ensure(l Layout, run Runner, pinned string) (Report, error) {
 		if _, err := os.Stat(l.p(f.path)); err == nil {
 			continue
 		}
-		if b, err := os.ReadFile(l.p(f.backup)); err == nil {
+		if b, err := readFile(l.p(f.backup)); err == nil {
 			if err := put(f.path, b, 0o644); err == nil {
 				rep.Restored = append(rep.Restored, f.path)
 			}
@@ -91,7 +113,7 @@ func ensure(l Layout, run Runner, pinned string) (Report, error) {
 	var errs []string
 	unitChanged := false
 	for _, e := range m.Entries {
-		if b, err := os.ReadFile(l.p(e.Path)); err == nil && sum(b) == e.SHA256 {
+		if _, h, err := get(e.Path); err == nil && h == e.SHA256 {
 			continue
 		}
 		var content []byte
@@ -103,7 +125,7 @@ func ensure(l Layout, run Runner, pinned string) (Report, error) {
 				content = f.Content
 			}
 		case "config", "backup":
-			if b, err := os.ReadFile(l.p(e.Source)); err == nil && sum(b) == e.SHA256 {
+			if b, h, err := get(e.Source); err == nil && h == e.SHA256 {
 				content = b
 			}
 		}
@@ -115,6 +137,7 @@ func ensure(l Layout, run Runner, pinned string) (Report, error) {
 			errs = append(errs, e.Path+": "+err.Error())
 			continue
 		}
+		cache[l.p(e.Path)] = read{b: content, sum: e.SHA256} // a later entry's source may be this one
 		rep.Restored = append(rep.Restored, e.Path)
 		unitChanged = unitChanged || strings.HasPrefix(e.Path, "/etc/systemd/system/")
 	}

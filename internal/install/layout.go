@@ -140,7 +140,8 @@ type Report struct {
 
 func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
-func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+// readFile is os.ReadFile; tests count reads through it.
+var readFile = os.ReadFile
 
 // ReadManifestBytes is the manifest as it is on disk, or its backup's copy.
 func ReadManifestBytes(l Layout) ([]byte, error) {
