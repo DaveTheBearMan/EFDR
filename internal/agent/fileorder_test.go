@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"xdr/internal/baseline"
+	"xdr/internal/fleet"
 	"xdr/internal/testfs"
 )
 
@@ -110,5 +111,60 @@ func TestFileOrder_PurgesOld(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(q, "bbbbbbbbbbbbbbbb")); err != nil {
 		t.Error("a 1 h old entry was purged")
+	}
+}
+
+// The path is resolved by name at order time: a parent directory an
+// attacker owns can be swapped for a symlink after the report.
+func TestFileOrder_ParentSwapIsRefused(t *testing.T) {
+	r := scanRig(t)
+	id := reported(t, r, "/home/bob/.config/systemd/user/evil.service", "[Service]\nExecStart=/tmp/x\n", 0o644)
+	// The scored service's own unit, which happens to hold the same text.
+	victimDir := filepath.Join(t.TempDir(), "system")
+	os.MkdirAll(victimDir, 0o755)
+	victim := filepath.Join(victimDir, "evil.service")
+	os.WriteFile(victim, []byte("[Service]\nExecStart=/tmp/x\n"), 0o644)
+	parent := filepath.Join(r.root, "home/bob/.config/systemd/user")
+	os.RemoveAll(parent)
+	os.Symlink(victimDir, parent)
+	r.a.onOrder(order("file", id, "remove"))
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("the file behind the swapped parent was removed: %v", err)
+	}
+	if len(r.kind("file-removed")) != 0 || len(r.kind("file-refused")) != 1 {
+		t.Fatalf("removed %+v refused %+v", r.kind("file-removed"), r.kind("file-refused"))
+	}
+}
+
+func TestFileOrder_UndoDoesNotFollowOrOverwrite(t *testing.T) {
+	r := scanRig(t)
+	id := reported(t, r, "/home/bob/.ssh/authorized_keys2", "echo hi\n", 0o644)
+	r.a.onOrder(order("file", id, "remove"))
+	if len(r.kind("file-removed")) != 1 {
+		t.Fatalf("not removed: %+v", r.kind("file-refused"))
+	}
+	// Someone put a new file there: not overwritten.
+	testfs.File(t, r.root, "home/bob/.ssh/authorized_keys2", "new content\n", 0o600)
+	r.a.onOrder(order("file", id, "undo"))
+	if b, _ := os.ReadFile(filepath.Join(r.root, "home/bob/.ssh/authorized_keys2")); string(b) != "new content\n" {
+		t.Fatalf("overwritten: %q", b)
+	}
+	if len(r.kind("file-restored")) != 0 {
+		t.Fatal("restored over an existing file")
+	}
+	// The parent is now a symlink to a directory the attacker chose.
+	os.Remove(filepath.Join(r.root, "home/bob/.ssh/authorized_keys2"))
+	elsewhere := t.TempDir()
+	os.RemoveAll(filepath.Join(r.root, "home/bob/.ssh"))
+	os.Symlink(elsewhere, filepath.Join(r.root, "home/bob/.ssh"))
+	r.a.onOrder(fleet.Order{Kind: "file", Name: id, Value: []byte(`{"verdict":"undo","at":99}`)})
+	if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+		t.Fatalf("restored through a symlinked parent: %v", ents)
+	}
+	if len(r.kind("file-restored")) != 0 {
+		t.Fatal("restored through a symlink")
+	}
+	if _, err := os.Stat(filepath.Join(r.a.state, "quarantine-files", id, "data")); err != nil {
+		t.Fatalf("the quarantined copy was lost by a refused undo: %v", err)
 	}
 }

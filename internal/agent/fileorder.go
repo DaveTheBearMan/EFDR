@@ -4,14 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"xdr/internal/baseline"
 	"xdr/internal/collect"
@@ -90,43 +92,78 @@ func (a *agent) removeFile(id string) string {
 			return e.Path + " is in the baseline"
 		}
 	}
-	full := filepath.Join(a.root, e.Path)
-	st, err := os.Lstat(full)
+	// Everything below happens through descriptors: the parent directories
+	// are opened without following a symlink, the file is checked and hashed
+	// from the descriptor it was opened as, and moved by name inside the
+	// directory that was opened.
+	dirfd, err := openDirNoFollow(a.root, filepath.Dir(e.Path))
 	if err != nil {
+		return "the directory cannot be opened without following a symlink: " + err.Error()
+	}
+	defer unix.Close(dirfd)
+	name := filepath.Base(e.Path)
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return "gone: " + err.Error()
 	}
-	sys, _ := st.Sys().(*syscall.Stat_t)
-	m := qmeta{Path: e.Path, Mode: uint32(st.Mode().Perm()), SHA256: e.SHA256, At: a.now()}
-	if sys != nil {
-		m.UID, m.GID = sys.Uid, sys.Gid
+	m := qmeta{Path: e.Path, Mode: st.Mode & 0o777, // setuid and setgid are not kept UID: st.Uid, GID: st.Gid, SHA256: e.SHA256, At: a.now()}
+	qdir := a.qdir(id)
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		return err.Error()
 	}
+	qfd, err := unix.Open(qdir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err.Error()
+	}
+	defer unix.Close(qfd)
 	switch {
-	case e.Type == baseline.TypeLink:
-		target, err := os.Readlink(full)
-		if err != nil || target != e.Link {
+	case e.Type == baseline.TypeLink && st.Mode&unix.S_IFMT == unix.S_IFLNK:
+		buf := make([]byte, 4096)
+		n, err := unix.Readlinkat(dirfd, name, buf)
+		if err != nil || string(buf[:n]) != e.Link {
 			return "no longer the symlink that was reported"
 		}
-		m.Link = target
-	case e.Type == baseline.TypeFile && st.Mode().IsRegular():
-		if sum, err := fileSum(full, e.Size); err != nil || (e.SHA256 != "" && !strings.HasPrefix(e.SHA256, "partial:") && sum != e.SHA256) {
+		m.Link = e.Link
+		if err := unix.Unlinkat(dirfd, name, 0); err != nil {
+			return err.Error()
+		}
+	case e.Type == baseline.TypeFile && st.Mode&unix.S_IFMT == unix.S_IFREG:
+		fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return err.Error()
+		}
+		f := os.NewFile(uintptr(fd), name)
+		defer f.Close()
+		var fst unix.Stat_t
+		if err := unix.Fstat(fd, &fst); err != nil || fst.Dev != st.Dev || fst.Ino != st.Ino || fst.Mode&unix.S_IFMT != unix.S_IFREG {
+			return "no longer the file that was reported"
+		}
+		if sum, err := fileSumFrom(f, fst.Size, e.Size); err != nil || (e.SHA256 != "" && !strings.HasPrefix(e.SHA256, "partial:") && sum != e.SHA256) {
 			return "changed since it was reported"
+		}
+		if err := unix.Renameat(dirfd, name, qfd, "data"); err != nil {
+			if !errors.Is(err, unix.EXDEV) {
+				return err.Error()
+			}
+			// Another filesystem: copy from the descriptor, then unlink the
+			// name only if it is still the file that was copied.
+			if err := copyFd(f, qfd, "data"); err != nil {
+				return err.Error()
+			}
+			var now unix.Stat_t
+			if err := unix.Fstatat(dirfd, name, &now, unix.AT_SYMLINK_NOFOLLOW); err != nil || now.Dev != fst.Dev || now.Ino != fst.Ino {
+				unix.Unlinkat(qfd, "data", 0)
+				return "changed while it was moved"
+			}
+			if err := unix.Unlinkat(dirfd, name, 0); err != nil {
+				return err.Error()
+			}
 		}
 	default:
 		return "no longer the file that was reported"
 	}
-	dir := a.qdir(id)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err.Error()
-	}
-	if m.Link != "" {
-		if err := os.Remove(full); err != nil {
-			return err.Error()
-		}
-	} else if err := moveFile(full, filepath.Join(dir, "data")); err != nil {
-		return err.Error()
-	}
 	meta, _ := json.Marshal(m)
-	if err := os.WriteFile(filepath.Join(dir, "meta.json"), meta, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(qdir, "meta.json"), meta, 0o600); err != nil {
 		a.logf("quarantine meta for %s: %v", id, err)
 	}
 	a.record(incident.Incident{Kind: "file-removed", Action: "repaired", Severity: model.SevHigh, Path: e.Path, SHA256: e.SHA256,
@@ -144,21 +181,47 @@ func (a *agent) restoreFile(id string) string {
 	if json.Unmarshal(b, &m) != nil || m.Path == "" || FileID(m.Path) != id {
 		return "the quarantine entry is damaged"
 	}
-	full := filepath.Join(a.root, m.Path)
-	if _, err := os.Lstat(full); err == nil {
+	dirfd, err := openDirNoFollow(a.root, filepath.Dir(m.Path))
+	if err != nil {
+		return "the directory cannot be opened without following a symlink: " + err.Error()
+	}
+	defer unix.Close(dirfd)
+	name := filepath.Base(m.Path)
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 		return m.Path + " exists again; not overwritten"
 	}
+	qfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err.Error()
+	}
+	defer unix.Close(qfd)
 	if m.Link != "" {
-		if err := os.Symlink(m.Link, full); err != nil {
+		if err := unix.Symlinkat(m.Link, dirfd, name); err != nil {
 			return err.Error()
 		}
-		os.Lchown(full, int(m.UID), int(m.GID))
+		unix.Fchownat(dirfd, name, int(m.UID), int(m.GID), unix.AT_SYMLINK_NOFOLLOW)
 	} else {
-		if err := moveFile(filepath.Join(dir, "data"), full); err != nil {
+		// Owner and mode are set on the quarantined file, which only root
+		// can reach, before it is moved: nothing is chowned by name in a
+		// directory the user owns. The move refuses to replace anything.
+		fd, err := unix.Openat(qfd, "data", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
 			return err.Error()
 		}
-		os.Chmod(full, os.FileMode(m.Mode))
-		os.Chown(full, int(m.UID), int(m.GID))
+		f := os.NewFile(uintptr(fd), "data")
+		defer f.Close()
+		f.Chown(int(m.UID), int(m.GID))
+		f.Chmod(os.FileMode(m.Mode & 0o777))
+		if err := unix.Renameat2(qfd, "data", dirfd, name, unix.RENAME_NOREPLACE); err != nil {
+			if !errors.Is(err, unix.EXDEV) {
+				return err.Error()
+			}
+			if err := copyFdTo(f, dirfd, name, os.FileMode(m.Mode&0o777), int(m.UID), int(m.GID)); err != nil {
+				return err.Error()
+			}
+			unix.Unlinkat(qfd, "data", 0)
+		}
 	}
 	os.RemoveAll(dir)
 	a.record(incident.Incident{Kind: "file-restored", Action: "repaired", Severity: model.SevMedium, Path: m.Path, SHA256: m.SHA256, Detail: "restored from quarantine on the operator's order"})
@@ -197,24 +260,15 @@ func (a *agent) purgeQuarantine() {
 	}
 }
 
-// fileSum is the sha256 of a regular file, read with O_NOFOLLOW; a file
-// over 64 MiB is judged by its size alone.
-func fileSum(path string, size int64) (string, error) {
-	st, err := os.Lstat(path)
-	if err != nil || !st.Mode().IsRegular() {
-		return "", fmt.Errorf("not a regular file")
-	}
-	if st.Size() > 64<<20 {
-		if st.Size() != size {
+// fileSumFrom is the sha256 of an open regular file; one over 64 MiB is
+// judged by its size alone (size is its size now, reported what was reported).
+func fileSumFrom(f *os.File, size, reported int64) (string, error) {
+	if size > 64<<20 {
+		if size != reported {
 			return "", fmt.Errorf("size changed")
 		}
 		return "", nil
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -222,32 +276,34 @@ func fileSum(path string, size int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// moveFile renames, or copies and removes across filesystems.
-func moveFile(from, to string) error {
-	if err := os.Rename(from, to); err == nil {
-		return nil
+// copyFd copies f into a new file name inside the directory qfd (mode 0600).
+func copyFd(f *os.File, qfd int, name string) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
 	}
-	in, err := os.Open(from)
+	return copyFdTo(f, qfd, name, 0o600, -1, -1)
+}
+
+// copyFdTo makes a new file name in the directory dirfd (it must not exist,
+// and a symlink is not followed) with f's content, owner and mode.
+func copyFdTo(f *os.File, dirfd int, name string, mode os.FileMode, uid, gid int) error {
+	fd, err := unix.Openat(dirfd, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	st, err := in.Stat()
+	out := os.NewFile(uintptr(fd), name)
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		_, err = io.Copy(out, f)
+	}
+	if uid >= 0 {
+		out.Chown(uid, gid)
+	}
+	out.Chmod(mode)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
-		return err
+		unix.Unlinkat(dirfd, name, 0)
 	}
-	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, st.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(to)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(to)
-		return err
-	}
-	return os.Remove(from)
+	return err
 }
